@@ -20,6 +20,13 @@ import (
 	"github.com/NSchatz/tracker/internal/server"
 )
 
+// partitionLookaheadMonths is how far ahead of today the server provisions monthly partitions
+// of `fixes` at start-up: this month and the next. Two is enough for the month rollover to be a
+// no-op for any server that is restarted (or redeployed) at least monthly, and small enough
+// that a long-lived process's need for a maintenance tick (S7) stays visible rather than being
+// papered over with a twelve-month lookahead.
+const partitionLookaheadMonths = 2
+
 func main() {
 	if err := run(); err != nil {
 		// One line, on stderr, naming the fix. A start-up failure is read by a human
@@ -62,6 +69,20 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// `fixes` is partitioned by month and has NO default partition on purpose, so a fix whose
+	// month was never provisioned is rejected outright rather than landing somewhere retention
+	// can never drop it. That makes provisioning a start-up responsibility, and the lookahead
+	// is what stops ingestion breaking at midnight on the 1st.
+	//
+	// A process that stays up longer than the lookahead still needs a maintenance tick. That
+	// belongs with the retention job in S7; building it now would be building S7 early. It is
+	// recorded in the README as a known limitation rather than left to be discovered.
+	names, err := db.EnsurePartitions(ctx, pool, time.Now(), partitionLookaheadMonths)
+	if err != nil {
+		return err
+	}
+	logger.Info("fix partitions ready", "partitions", names)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

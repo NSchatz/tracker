@@ -54,9 +54,19 @@ job is telling you where your family is. These are not style preferences:
 - **Distance/radius must be computed on `geography`** — on `geometry`, `ST_DWithin(..., 100)` means 100
   *degrees*, which is nonsense, not 100 metres.
 - **On the boundary, `ST_Contains` is FALSE.** Use `ST_Intersects` / `ST_Covers` when a fix exactly on a
-  geofence edge must count as inside.
+  geofence edge must count as inside. On `geography`, `ST_Contains` does not exist *at all* — reaching for
+  it forces a cast to `geometry`, which is a one-way door back into degree-space. The rule is `ST_Covers`.
 - **GiST index every geography column.** `ST_Distance` is *not* index-accelerated: pre-filter with
   `ST_DWithin`, then rank by `ST_Distance`.
+- **PostGIS does not reject a bad coordinate — it COERCES it.** An out-of-range latitude (the signature of
+  a lon/lat swap) is silently folded back into range and *stored*: swapped Seattle lands in the South
+  Atlantic, with every constraint passing. No `CHECK` can catch this, because the corruption happens
+  inside the cast. **Validate lon/lat in Go before it reaches SQL** — `store.ValidateLonLat` — and never
+  delete that call because "the database checks it". The database launders it.
+- **A geography polygon's edges are GEODESICS, not lines on a lat/lon grid.** A "square" drawn on the grid
+  has north/south edges that follow parallels, which are not great circles, so the true edge bows ~120 m
+  away from the drawn one on a 1°-wide box. A fix on the drawn edge is genuinely *outside*. This is what a
+  geography polygon means; it is not fixable, and geofencing must be built knowing it.
 
 ## Fail-safe stance
 

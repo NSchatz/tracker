@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/tracker/internal/db"
 	"github.com/NSchatz/tracker/internal/testsupport"
@@ -76,6 +77,108 @@ func TestMigrationsUpDown(t *testing.T) {
 	if !postgisEnabled(ctx, t, dsn) {
 		t.Fatal("PostGIS is not enabled after re-applying the migration — the migration " +
 			"runner is recording versions without executing their SQL")
+	}
+}
+
+// schemaTables are the tables migration 00002 owns. Every one of them must exist after it is
+// applied and be GONE after it is rolled back.
+var schemaTables = []string{"families", "devices", "viewers", "fixes", "geofences"}
+
+// TestSchemaDownDropsItsTables proves migration 00002's rollback actually destroys the schema
+// it created.
+//
+// # Why this test does not have the same shape as TestMigrationsUpDown
+//
+// S0's up/down test proves the migration RUNNER executes SQL, by rolling back and observing
+// that PostGIS disappears. That was the right assertion when the only migration created an
+// extension. It is the WRONG assertion to copy now, because it is satisfied by a Down that
+// drops the extension and nothing else — and 00002's Down has five tables to lose.
+//
+// So the assertion here is not "the version went back" (goose's bookkeeping can rewind while
+// the SQL does nothing) and not "the migration runner runs SQL" (already proven). It is the
+// only one that bites: THE TABLES ARE GONE. Gut every DROP out of 00002's Down section and
+// this test fails; leave one behind and it fails naming it.
+//
+// The rollback stops at version 1, not 0: unwinding to 0 would also drop PostGIS, and then
+// "the tables are gone" would be true for a reason that has nothing to do with 00002's Down.
+func TestSchemaDownDropsItsTables(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dsn := testsupport.NewPostGIS(t)
+
+	if err := db.Up(ctx, dsn); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+
+	pool, err := db.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer pool.Close()
+
+	for _, table := range schemaTables {
+		if !exists(ctx, t, pool, table) {
+			t.Fatalf("%s does not exist after Up — migration 00002 did not create it", table)
+		}
+	}
+
+	// Give the rollback something real to destroy: a partition holding an actual fix. A Down
+	// tested against an empty schema is a Down that has never met a row it had to drop, and
+	// `DROP TABLE` on a partitioned parent with live children is exactly the case that would
+	// fail if the DROP order were wrong.
+	familyID, deviceID := seedDevice(ctx, t, pool, "rollback")
+	ts := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	if _, err := db.EnsureMonthlyPartition(ctx, pool, ts); err != nil {
+		t.Fatalf("EnsureMonthlyPartition: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO fixes (device_id, ts, location) VALUES ($1, $2, ST_Point(12.5, 41.9, 4326)::geography)`,
+		deviceID, ts); err != nil {
+		t.Fatalf("insert a fix: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO geofences (family_id, name, area) VALUES ($1, 'home',
+		     ST_GeogFromText('SRID=4326;POLYGON((12.0 41.0, 13.0 41.0, 13.0 42.0, 12.0 42.0, 12.0 41.0))'))`,
+		familyID); err != nil {
+		t.Fatalf("insert a geofence: %v", err)
+	}
+
+	// Roll back 00002 only.
+	if err := db.DownTo(ctx, dsn, 1); err != nil {
+		t.Fatalf("DownTo(1): %v", err)
+	}
+	if v := version(ctx, t, dsn); v != 1 {
+		t.Fatalf("after DownTo(1) the database is at version %d, want 1", v)
+	}
+
+	// THE assertion.
+	for _, table := range schemaTables {
+		if exists(ctx, t, pool, table) {
+			t.Fatalf("%s still exists after rolling 00002 back. The Down migration updated goose's "+
+				"version and left the schema in place — a rollback that reports success while "+
+				"changing nothing.", table)
+		}
+	}
+	// The partition went with its parent. That is the same mechanism retention uses to purge
+	// history, so if it did not work here it would not work there.
+	if exists(ctx, t, pool, "fixes_2026_07") {
+		t.Fatal("the monthly partition fixes_2026_07 outlived its parent table")
+	}
+
+	// PostGIS is untouched: we rolled back 00002, not 00001.
+	if !postgisEnabled(ctx, t, dsn) {
+		t.Fatal("rolling back 00002 also removed PostGIS; it must only drop what it created")
+	}
+
+	// And the schema comes back. A Down that cannot be followed by an Up is a one-way door.
+	if err := db.Up(ctx, dsn); err != nil {
+		t.Fatalf("Up after rolling 00002 back: %v", err)
+	}
+	for _, table := range schemaTables {
+		if !exists(ctx, t, pool, table) {
+			t.Fatalf("%s did not come back after re-applying 00002", table)
+		}
 	}
 }
 
