@@ -1,0 +1,12 @@
+# Keep the build context to what the image actually needs: the Go source. The migrations
+# are embedded by internal/db, so they travel inside the binary, not beside it.
+.git
+.github
+.gitignore
+docker-compose.yml
+Dockerfile
+Makefile
+README.md
+CLAUDE.md
+scripts
+/tracker

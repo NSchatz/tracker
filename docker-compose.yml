@@ -1,0 +1,53 @@
+# tracker — the self-hosted deployment.
+#
+#   docker compose config -q      # validate before you run it
+#   docker compose up -d
+#   curl localhost:8080/healthz
+#
+# The server applies its own migrations on start-up, so there is no separate migration
+# step: bring the stack up and it converges.
+
+services:
+  postgis:
+    # Pinned. Every spatial assertion tracker makes is an assertion about a specific
+    # PostGIS version's behaviour, so a floating tag would let the thing under test change
+    # without the tests changing.
+    image: postgis/postgis:16-3.4
+    container_name: tracker-postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tracker
+      # Local-only placeholder. CHANGE THIS before exposing the stack to anything,
+      # and prefer an env file or a secret over a literal here.
+      POSTGRES_PASSWORD: ${TRACKER_DB_PASSWORD:-tracker}
+      POSTGRES_DB: tracker
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
+    healthcheck:
+      # tracker's own start-up depends on this: it migrates before it listens, so it must
+      # not start against a database that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U tracker -d tracker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No `ports:` — PostGIS is reachable on the compose network only, never published to
+    # the host. Nothing outside this stack has any business talking to it directly.
+
+  tracker:
+    build:
+      context: .
+    image: tracker:dev
+    container_name: tracker
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      TRACKER_DATABASE_URL: postgres://tracker:${TRACKER_DB_PASSWORD:-tracker}@postgis:5432/tracker?sslmode=disable
+      TRACKER_ADDR: ":8080"
+      TRACKER_LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgis-data:

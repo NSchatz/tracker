@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned for reproducibility. staticcheck/govulncheck are deliberately NOT pinned here:
+  # the gate below is `make check`, so the Makefile owns those versions. Pinning them in
+  # both places is how a Makefile bump leaves CI silently running a different tool than a
+  # human does.
+  GO_VERSION: "1.25.12"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # THE gate — the same target a human runs and the same one scripts/verify.sh runs.
+      #
+      # `make test` inside it starts a REAL PostGIS via testcontainers (ubuntu-latest ships
+      # a Docker daemon, so this works unmodified). Those tests FAIL rather than skip if
+      # the daemon is unreachable: tracker's correctness is spatial SQL, which cannot be
+      # proven against a mock, and a gate that skips its bedrock when the database is
+      # missing reports green while proving nothing.
+      - name: make check
+        run: make check
+
+  smoke:
+    # The deploy gate. `make check` proves the code is correct; this proves the SHIPPED
+    # ARTEFACT works — that the image builds, the binary finds its database, and the
+    # embedded migrations run. A green build has never implied a working deploy.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compose smoke (/healthz against the real stack)
+        run: make smoke
