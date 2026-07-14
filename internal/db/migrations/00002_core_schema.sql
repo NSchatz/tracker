@@ -122,7 +122,18 @@ CREATE TABLE geofences (
     family_id  uuid                    NOT NULL REFERENCES families(id) ON DELETE CASCADE,
     name       text                    NOT NULL CHECK (length(trim(name)) > 0),
     area       geography(Polygon,4326) NOT NULL,
-    created_at timestamptz             NOT NULL DEFAULT now()
+    created_at timestamptz             NOT NULL DEFAULT now(),
+
+    -- A Place whose ring crosses itself is not a Place. PostGIS will happily STORE one — a
+    -- bowtie parses, raises a NOTICE nobody reads, and yields a polygon with zero area that
+    -- ST_Covers reports as containing nothing, ever. The failure is a geofence that never
+    -- fires, with no error anywhere: silent, confident and wrong, which is the exact class
+    -- this project refuses.
+    --
+    -- The check lives HERE, on the table, rather than only in the writer that happens to exist
+    -- today, because S5 will add the real Places CRUD and it must not be able to reintroduce
+    -- this. A constraint cannot be forgotten by the next caller.
+    CONSTRAINT geofences_area_valid CHECK (ST_IsValid(area::geometry))
 );
 CREATE INDEX geofences_family_idx ON geofences (family_id);
 CREATE INDEX geofences_area_gist  ON geofences USING GIST (area);

@@ -78,6 +78,11 @@ Containment uses **`ST_Covers`**, which is inclusive of the boundary — a fix e
 "school" counts as at school. (`ST_Contains` is `false` on the boundary, and does not exist for
 `geography` at all.)
 
+**A ring that crosses itself is refused**, by a typed error *and* by a `CHECK` constraint on the table.
+PostGIS would otherwise store it: a bowtie parses, warns into a NOTICE nobody reads, and yields a polygon
+of **zero area** that contains nothing, forever — a Place that looks real in every listing and whose alert
+simply never fires.
+
 ## Running it
 
 ```bash

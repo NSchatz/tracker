@@ -415,6 +415,69 @@ func TestGeofenceBoundaryContainment(t *testing.T) {
 	})
 }
 
+// TestInvalidGeofenceNeverLands proves a Place whose ring crosses itself cannot be stored.
+//
+// # Why this needs a test and a CHECK constraint rather than a comment
+//
+// PostGIS does not reject a bowtie. It parses, warns into a NOTICE nobody reads, and produces a
+// polygon of ZERO AREA — one that ST_Covers reports as containing nothing, forever. So the row
+// lands, the Place appears in every listing, and the arrival alert simply never fires. Nothing
+// errors, so nothing is ever investigated: silent, confident and wrong.
+//
+// The second half is the half that matters long term. S5 builds the real Places CRUD, and a
+// guard that lives only in today's writer is a guard S5 can forget. The CHECK constraint cannot
+// be forgotten, and this test proves it stops raw SQL too.
+func TestInvalidGeofenceNeverLands(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	pool := setup(ctx, t)
+	familyID, _ := seedDevice(ctx, t, pool, "invalid-fence")
+
+	// A bowtie: the ring crosses itself at (12.5, 41.5).
+	bowtie := []Point{
+		{Lon: 12, Lat: 41}, {Lon: 13, Lat: 42},
+		{Lon: 13, Lat: 41}, {Lon: 12, Lat: 42},
+	}
+
+	_, err := CreateGeofence(ctx, pool, familyID, "bowtie", bowtie)
+	if !errors.Is(err, ErrInvalidGeofence) {
+		t.Fatalf("CreateGeofence with a self-intersecting ring = %v, want ErrInvalidGeofence", err)
+	}
+	if n := scalar[int64](ctx, t, pool, `SELECT count(*) FROM geofences WHERE family_id = $1`, familyID); n != 0 {
+		t.Fatalf("a rejected geofence left %d rows behind", n)
+	}
+
+	// The control: PostGIS itself would have accepted it. This is what the guard is for, and it
+	// is why the guard cannot be deleted as "the database checks it anyway".
+	area := scalar[float64](ctx, t, pool,
+		`SELECT ST_Area(ST_GeogFromText('SRID=4326;POLYGON((12 41, 13 42, 13 41, 12 42, 12 41))')::geometry)`)
+	if area != 0 {
+		t.Fatalf("the bowtie has area %v; this test's premise (that it encloses nothing) is wrong", area)
+	}
+
+	// And the durable guard: the CHECK constraint refuses the same ring through raw SQL, so a
+	// future writer that skips CreateGeofence cannot reintroduce this.
+	_, err = pool.Exec(ctx,
+		`INSERT INTO geofences (family_id, name, area)
+		 VALUES ($1, 'raw-bowtie', ST_GeogFromText('SRID=4326;POLYGON((12 41, 13 42, 13 41, 12 42, 12 41))'))`,
+		familyID)
+	if err == nil {
+		t.Fatal("raw SQL stored a self-intersecting Place; the geofences_area_valid CHECK is not " +
+			"holding, so S5's writer could reintroduce a geofence that never fires")
+	}
+	if !strings.Contains(err.Error(), "geofences_area_valid") {
+		t.Fatalf("the bowtie was rejected, but not by the validity constraint: %v", err)
+	}
+
+	// A well-formed Place still stores, so the constraint is not simply refusing everything.
+	if _, err := CreateGeofence(ctx, pool, familyID, "square", []Point{
+		{Lon: 12, Lat: 41}, {Lon: 13, Lat: 41}, {Lon: 13, Lat: 42}, {Lon: 12, Lat: 42},
+	}); err != nil {
+		t.Fatalf("CreateGeofence with a valid square: %v", err)
+	}
+}
+
 // TestProximityUsesGiSTIndex is §5.1's "EXPLAIN asserts GiST usage on the proximity query".
 //
 // It EXPLAINs fixesNearSQL — the actual constant FixesNear executes — because an index that

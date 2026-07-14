@@ -55,26 +55,25 @@ func CreateDevice(ctx context.Context, q db.Querier, familyID, name string, toke
 	return id, nil
 }
 
-// CreateViewer registers a human who can watch the family's map.
-func CreateViewer(ctx context.Context, q db.Querier, familyID, email, displayName string, tokenHash []byte) (string, error) {
-	if len(tokenHash) != TokenHashLen {
-		return "", fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(tokenHash), TokenHashLen)
-	}
-	var id string
-	err := q.QueryRow(ctx,
-		`INSERT INTO viewers (family_id, email, display_name, token_hash) VALUES ($1, $2, $3, $4) RETURNING id`,
-		familyID, email, displayName, tokenHash).Scan(&id)
-	if err != nil {
-		return "", fmt.Errorf("create viewer %q: %w", email, err)
-	}
-	return id, nil
-}
+// ErrInvalidGeofence is returned when a ring does not describe a usable Place.
+//
+// The failure it prevents is silent. A ring that crosses itself (a "bowtie") is not rejected by
+// PostGIS: it parses, raises a NOTICE nobody reads, and produces a polygon of ZERO AREA that
+// ST_Covers reports as containing nothing — forever. The row lands, the Place looks real in
+// every listing, and the arrival alert simply never fires. Nothing errors, so nothing is ever
+// investigated.
+//
+// So an invalid ring is a typed error here, and a CHECK constraint on the table catches any
+// other writer that tries the same thing (see 00002_core_schema.sql).
+var ErrInvalidGeofence = errors.New("invalid geofence area")
 
 // CreateGeofence stores a Place as a geography(Polygon,4326).
 //
 // The ring is closed for you if it is not already closed (OGC requires a polygon's ring to
 // return to its first point). That is not a guess about where the caller meant the boundary to
 // be — it is the only closure that exists.
+//
+// The ring's VALIDITY is checked before anything is stored — see ErrInvalidGeofence.
 //
 // Ring ORIENTATION is deliberately not fussed over: PostGIS's geography type interprets a ring
 // as the SMALLER of the two areas it divides the globe into, so clockwise and anticlockwise
@@ -84,6 +83,22 @@ func CreateGeofence(ctx context.Context, q db.Querier, familyID, name string, ri
 	wkt, err := polygonWKT(ring)
 	if err != nil {
 		return "", fmt.Errorf("create geofence %q: %w", name, err)
+	}
+
+	// Ask PostGIS whether this is a real polygon BEFORE storing it, so the caller gets a
+	// sentence naming the problem rather than a constraint violation — and so a bowtie can
+	// never become a Place that quietly covers nothing.
+	var valid bool
+	var reason string
+	err = q.QueryRow(ctx,
+		`SELECT ST_IsValid(g::geometry), ST_IsValidReason(g::geometry)
+		 FROM (SELECT ST_GeogFromText($1) AS g) s`, wkt).Scan(&valid, &reason)
+	if err != nil {
+		return "", fmt.Errorf("create geofence %q: check the area is a valid polygon: %w", name, err)
+	}
+	if !valid {
+		return "", fmt.Errorf("%w: %s (a ring that crosses itself encloses no area, so the Place "+
+			"would never contain anybody)", ErrInvalidGeofence, reason)
 	}
 
 	var id string
@@ -105,13 +120,27 @@ func CreateGeofence(ctx context.Context, q db.Querier, familyID, name string, ri
 // reshaping the Place (see ErrCoordinateOutOfRange). The formatting is Go's own float
 // rendering of already-validated numbers, so there is no user text reaching the SQL.
 func polygonWKT(ring []Point) (string, error) {
-	if len(ring) < 3 {
-		return "", fmt.Errorf("a polygon needs at least 3 points, got %d", len(ring))
-	}
 	for i, p := range ring {
 		if err := ValidateLonLat(p.Lon, p.Lat); err != nil {
 			return "", fmt.Errorf("point %d: %w", i, err)
 		}
+	}
+
+	// Count DISTINCT corners, not points. A ring of {A, B, A} has three entries but only two
+	// corners, and it encloses nothing — a bare len() >= 3 would wave it through to PostGIS,
+	// which rejects it with a parse error from three layers down instead of the typed error the
+	// fail-safe stance promises the caller.
+	open := ring
+	if n := len(open); n > 1 && open[0] == open[n-1] {
+		open = open[:n-1] // drop an explicit closing point before counting
+	}
+	corners := make(map[Point]struct{}, len(open))
+	for _, p := range open {
+		corners[p] = struct{}{}
+	}
+	if len(corners) < 3 {
+		return "", fmt.Errorf("%w: a polygon needs at least 3 distinct corners, got %d",
+			ErrInvalidGeofence, len(corners))
 	}
 
 	closed := ring

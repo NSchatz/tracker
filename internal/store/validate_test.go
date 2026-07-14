@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"math"
 	"testing"
@@ -84,8 +85,19 @@ func TestPolygonWKT(t *testing.T) {
 	})
 
 	t.Run("too few points is an error, not an empty Place", func(t *testing.T) {
-		if _, err := polygonWKT([]Point{{Lon: 12, Lat: 41}, {Lon: 13, Lat: 41}}); err == nil {
-			t.Fatal("polygonWKT accepted a 2-point ring")
+		if _, err := polygonWKT([]Point{{Lon: 12, Lat: 41}, {Lon: 13, Lat: 41}}); !errors.Is(err, ErrInvalidGeofence) {
+			t.Fatalf("polygonWKT with a 2-point ring = %v, want ErrInvalidGeofence", err)
+		}
+	})
+
+	t.Run("three points but only two corners is an error", func(t *testing.T) {
+		// {A, B, A} has three entries and is "already closed", so a naive len(ring) >= 3 waves
+		// it through — and PostGIS then rejects it with a parse error from deep inside the
+		// driver instead of the typed error the caller was promised.
+		a := Point{Lon: 12, Lat: 41}
+		b := Point{Lon: 13, Lat: 41}
+		if _, err := polygonWKT([]Point{a, b, a}); !errors.Is(err, ErrInvalidGeofence) {
+			t.Fatalf("polygonWKT({A, B, A}) = %v, want ErrInvalidGeofence — that ring encloses nothing", err)
 		}
 	})
 
@@ -96,4 +108,33 @@ func TestPolygonWKT(t *testing.T) {
 				"would have coerced it and stored a Place with a different shape than the caller drew", err)
 		}
 	})
+}
+
+// TestCreateDeviceRejectsAThingThatIsNotADigest pins the guard on the way in to devices.
+//
+// It needs no database: the check runs before any SQL, which is exactly the property being
+// asserted — a nil Querier proves nothing was sent. The failure it guards is not a typo but a
+// caller passing the RAW TOKEN where the hash belongs, which "works" (bytea takes anything) and
+// turns the table into a file of live credentials.
+func TestCreateDeviceRejectsAThingThatIsNotADigest(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		name  string
+		token []byte
+	}{
+		{"a raw token, not a digest", []byte("a-plausible-looking-bearer-token")[:31]},
+		{"an empty credential", nil},
+		{"a truncated digest", make([]byte, TokenHashLen-1)},
+		{"an over-long digest", make([]byte, TokenHashLen+1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// A nil Querier: if the guard did not fire first, this would panic rather than
+			// quietly pass.
+			_, err := CreateDevice(context.Background(), nil, "family", "phone", c.token)
+			if !errors.Is(err, ErrInvalidTokenHash) {
+				t.Fatalf("CreateDevice with %s = %v, want ErrInvalidTokenHash", c.name, err)
+			}
+		})
+	}
 }
