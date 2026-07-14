@@ -171,6 +171,31 @@ func TestPartitions(t *testing.T) {
 		}
 	})
 
+	t.Run("a same-named partition with the WRONG bounds is not reported as provisioned", func(t *testing.T) {
+		// CREATE TABLE IF NOT EXISTS is silent when the name is taken, and does not care what
+		// range the existing relation covers. Left unchecked, that turns "provisioned" into a
+		// claim about a NAME rather than about a MONTH — and the lie only surfaces later, when
+		// an INSERT for that month is rejected at ingestion time.
+		//
+		// Hand-make a partition called fixes_2026_09 that actually covers a single day.
+		if _, err := pool.Exec(ctx, `
+			CREATE TABLE fixes_2026_09 PARTITION OF fixes
+			FOR VALUES FROM ('2026-09-01T00:00:00Z'::timestamptz) TO ('2026-09-02T00:00:00Z'::timestamptz)`); err != nil {
+			t.Fatalf("hand-make a mis-bounded partition: %v", err)
+		}
+
+		sept := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+		_, err := db.EnsureMonthlyPartition(ctx, pool, sept)
+		if !errors.Is(err, db.ErrUnrecognizedPartition) {
+			t.Fatalf("EnsureMonthlyPartition over a mis-bounded partition = %v; want ErrUnrecognizedPartition. "+
+				"It must not report a month as ready when the partition of that name covers a different range.", err)
+		}
+
+		if _, err := pool.Exec(ctx, `DROP TABLE fixes_2026_09`); err != nil {
+			t.Fatalf("clean up the mis-bounded partition: %v", err)
+		}
+	})
+
 	t.Run("a partition whose bound cannot be read stops the purge", func(t *testing.T) {
 		// Runs last: it leaves a DEFAULT partition behind.
 		//

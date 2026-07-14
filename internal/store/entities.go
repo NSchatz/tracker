@@ -97,8 +97,12 @@ func CreateGeofence(ctx context.Context, q db.Querier, familyID, name string, ri
 		return "", fmt.Errorf("create geofence %q: check the area is a valid polygon: %w", name, err)
 	}
 	if !valid {
-		return "", fmt.Errorf("%w: %s (a ring that crosses itself encloses no area, so the Place "+
-			"would never contain anybody)", ErrInvalidGeofence, reason)
+		// ST_IsValidReason names the actual cause. Do not paraphrase it: a self-intersection is
+		// the common case but not the only one — a collinear ring and a zero-width spike are
+		// also invalid and do not cross themselves. What every case shares is the consequence,
+		// and that is what is worth spelling out.
+		return "", fmt.Errorf("%w: %s — such a ring encloses no area, so the Place would never "+
+			"contain anybody", ErrInvalidGeofence, reason)
 	}
 
 	var id string

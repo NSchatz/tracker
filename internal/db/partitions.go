@@ -62,6 +62,30 @@ func EnsureMonthlyPartition(ctx context.Context, q Querier, month time.Time) (st
 	if _, err := q.Exec(ctx, stmt); err != nil {
 		return "", fmt.Errorf("create partition %s: %w", name, err)
 	}
+
+	// Verify the bounds we ended up with are the bounds we asked for.
+	//
+	// CREATE TABLE IF NOT EXISTS is SILENT when a relation of that name already exists — and it
+	// does not care whether that relation covers the range we wanted, or is even a partition at
+	// all. Without this check, a pre-existing `fixes_2026_07` covering some other range would be
+	// reported as "provisioned", the server would log "fix partitions ready" and boot, and the
+	// truth would surface only when an INSERT for July was rejected at ingestion time. This
+	// function exists to catch that at start-up, so it has to actually look.
+	var lower, upper *time.Time
+	err := q.QueryRow(ctx, `
+		SELECT (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[1]::timestamptz,
+		       (regexp_match(pg_get_expr(c.relpartbound, c.oid), 'FROM \(''([^'']+)''\) TO \(''([^'']+)''\)'))[2]::timestamptz
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = current_schema()`, name).Scan(&lower, &upper)
+	if err != nil {
+		return "", fmt.Errorf("read the bounds of partition %s: %w", name, err)
+	}
+	if lower == nil || upper == nil || !lower.Equal(start) || !upper.Equal(end) {
+		return "", fmt.Errorf("%w: %s already exists but does not cover [%s, %s) — it covers [%v, %v), "+
+			"so the month it is named for is NOT provisioned",
+			ErrUnrecognizedPartition, name, start.Format(time.RFC3339), end.Format(time.RFC3339), lower, upper)
+	}
 	return name, nil
 }
 
@@ -124,17 +148,26 @@ func DropPartitionsBefore(ctx context.Context, q Querier, cutoff time.Time) ([]s
 		return nil, fmt.Errorf("list partitions of %s: %w", FixesTable, err)
 	}
 
+	// The whole list is read (and the rows closed) BEFORE any DROP runs: the drops below execute
+	// on the same connection this cursor is using, and issuing DDL while it is still open is how
+	// you deadlock a purge against itself.
 	var children []child
-	for rows.Next() {
-		var c child
-		if err := rows.Scan(&c.name, &c.upper); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan partition of %s: %w", FixesTable, err)
+	func() {
+		defer rows.Close()
+		for rows.Next() {
+			var c child
+			if err = rows.Scan(&c.name, &c.upper); err != nil {
+				err = fmt.Errorf("scan partition of %s: %w", FixesTable, err)
+				return
+			}
+			children = append(children, c)
 		}
-		children = append(children, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list partitions of %s: %w", FixesTable, err)
+		if e := rows.Err(); e != nil {
+			err = fmt.Errorf("list partitions of %s: %w", FixesTable, e)
+		}
+	}()
+	if err != nil {
+		return nil, err
 	}
 
 	var dropped []string

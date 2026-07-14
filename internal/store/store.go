@@ -154,8 +154,10 @@ func FixesNear(ctx context.Context, q db.Querier, familyID string, lon, lat, rad
 	if err := ValidateLonLat(lon, lat); err != nil {
 		return nil, err
 	}
-	if radiusM < 0 || math.IsNaN(radiusM) {
-		return nil, fmt.Errorf("radius must be a non-negative number of metres, got %v", radiusM)
+	// NaN and +Inf both have to go: neither is "a number of metres", and both would reach
+	// ST_DWithin as a distance rather than being rejected as the caller bug they are.
+	if radiusM < 0 || math.IsNaN(radiusM) || math.IsInf(radiusM, 0) {
+		return nil, fmt.Errorf("radius must be a finite, non-negative number of metres, got %v", radiusM)
 	}
 
 	rows, err := q.Query(ctx, fixesNearSQL, familyID, lon, lat, radiusM)
