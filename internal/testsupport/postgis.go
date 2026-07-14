@@ -21,9 +21,11 @@ package testsupport
 
 import (
 	"context"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -42,9 +44,25 @@ const (
 	testDB   = "tracker_test"
 )
 
-// NewPostGIS starts a PostGIS container and returns a DSN pointing at it.
+// cleanDB is the database tests actually run against. It is created from `template0`,
+// NOT from the container's default database.
 //
-// The container is terminated when the test ends. Each call gets its OWN database, so
+// That distinction is the whole point, and getting it wrong once already produced a gate
+// that proved nothing. The postgis/postgis image's initdb scripts pre-create the postgis
+// extension (plus postgis_topology and postgis_tiger_geocoder) in POSTGRES_DB. A test
+// running there could assert "postgis is enabled" all day and never learn whether the
+// MIGRATION enabled it — the image did. Gut the migration's SQL and such a test still
+// passes green.
+//
+// `template0` is pristine by definition: no extensions, nothing pre-installed. So in this
+// database the schema has to stand on its own, and every assertion about it is an
+// assertion about our migrations rather than about somebody's Dockerfile.
+const cleanDB = "tracker_clean"
+
+// NewPostGIS starts a PostGIS container and returns a DSN pointing at a pristine database
+// inside it (see cleanDB).
+//
+// The container is terminated when the test ends. Each call gets its OWN container, so
 // tests cannot leak schema or rows into one another — which is what lets them run in
 // parallel and what makes a failure mean what it says.
 func NewPostGIS(t testing.TB) string {
@@ -81,9 +99,34 @@ func NewPostGIS(t testing.TB) string {
 		}
 	})
 
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	adminDSN, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		t.Fatalf("could not build a DSN for %s: %v", PostGISImage, err)
 	}
-	return dsn
+
+	return createCleanDB(ctx, t, adminDSN)
+}
+
+// createCleanDB makes the pristine `template0`-derived database and returns its DSN.
+func createCleanDB(ctx context.Context, t testing.TB, adminDSN string) string {
+	t.Helper()
+
+	admin, err := pgx.Connect(ctx, adminDSN)
+	if err != nil {
+		t.Fatalf("connect to %s to create the clean database: %v", PostGISImage, err)
+	}
+	defer func() { _ = admin.Close(ctx) }()
+
+	// TEMPLATE template0 is what guarantees no extensions come along for the ride. The
+	// identifier is a compile-time constant, not user input, so there is nothing to inject.
+	if _, err := admin.Exec(ctx, `CREATE DATABASE `+cleanDB+` TEMPLATE template0`); err != nil {
+		t.Fatalf("create the clean database %q: %v", cleanDB, err)
+	}
+
+	u, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Fatalf("parse the container DSN: %v", err)
+	}
+	u.Path = "/" + cleanDB
+	return u.String()
 }

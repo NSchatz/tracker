@@ -1,6 +1,7 @@
 # tracker — the self-hosted deployment.
 #
-#   docker compose config -q      # validate before you run it
+#   export TRACKER_DB_PASSWORD='...'   # required; there is no default
+#   docker compose config -q           # validate before you run it
 #   docker compose up -d
 #   curl localhost:8080/healthz
 #
@@ -13,24 +14,32 @@ services:
     # PostGIS version's behaviour, so a floating tag would let the thing under test change
     # without the tests changing.
     image: postgis/postgis:16-3.4
-    container_name: tracker-postgis
     restart: unless-stopped
     environment:
       POSTGRES_USER: tracker
-      # `:?` — NOT `:-`. Compose REFUSES to start (or even to `config`) when this is
-      # unset, with that message. The `:-default` form would instead hand a family
-      # location tracker a Postgres superuser whose password was chosen by nobody, which
-      # is the exact fail-safe this phase exists to enforce: never boot with a silent
-      # default for a secret. A comment saying "CHANGE THIS" is documentation where the
-      # requirement was a refusal.
+      # `:?` — NOT `:-`. Compose REFUSES to start (or even to `config`) when this is unset,
+      # with this message. The `:-default` form would instead hand a family location
+      # tracker a Postgres superuser password chosen by nobody, which is exactly the
+      # fail-safe this project enforces: never boot with a silent default for a secret.
+      #
+      # HEADS UP, and it is a sharp edge in Postgres itself, not in tracker: this value is
+      # read ONLY by initdb, i.e. only on the very first start against an empty
+      # `postgis-data` volume. On every later start it is IGNORED. So CHANGING it does not
+      # rotate the password — it just leaves tracker's DSN disagreeing with the database
+      # and the server crash-looping on "password authentication failed". To really rotate
+      # it, change it inside the database (`ALTER ROLE tracker WITH PASSWORD …`) and set
+      # this to match. Only `down -v` resets it, and that destroys the location history.
       POSTGRES_PASSWORD: ${TRACKER_DB_PASSWORD:?set TRACKER_DB_PASSWORD — refusing to start with a default database password}
       POSTGRES_DB: tracker
     volumes:
       - postgis-data:/var/lib/postgresql/data
     healthcheck:
-      # tracker's own start-up depends on this: it migrates before it listens, so it must
-      # not start against a database that is still initialising.
-      test: ["CMD-SHELL", "pg_isready -U tracker -d tracker"]
+      # `-h localhost` is load-bearing. Without it pg_isready probes the UNIX SOCKET, and
+      # the postgres entrypoint runs a temporary socket-only server during initdb — so a
+      # socket probe reports HEALTHY mid-initialisation, `service_healthy` fires early, and
+      # tracker starts against a database that is about to be shut down and restarted.
+      # Over TCP there is nothing to connect to until the real server is listening.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U tracker -d tracker"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -41,17 +50,31 @@ services:
     build:
       context: .
     image: tracker:dev
-    container_name: tracker
-    restart: unless-stopped
+    # `on-failure` with a bound, NOT `unless-stopped`. tracker exits non-zero and refuses
+    # to start on bad config — that refusal is the fail-safe, and an unbounded restart
+    # policy would turn it into a crash loop that `docker compose up -d` still reports as
+    # success. A bound means a transient database blip is still ridden out, while a genuine
+    # misconfiguration ends in a stopped container with the reason in its logs, which is
+    # what an operator can actually act on.
+    restart: on-failure:5
     depends_on:
       postgis:
         condition: service_healthy
     environment:
+      # The password is interpolated into a URL here, so it must be URL-safe: `@`, `/`,
+      # `:`, `#`, `%` and `?` all have meaning in a DSN. Use an alphanumeric password or
+      # percent-encode it. Getting this wrong fails closed and loudly (the server cannot
+      # connect and says so) — it never silently connects to the wrong thing.
       TRACKER_DATABASE_URL: postgres://tracker:${TRACKER_DB_PASSWORD:?set TRACKER_DB_PASSWORD — refusing to start with a default database password}@postgis:5432/tracker?sslmode=disable
       TRACKER_ADDR: ":8080"
       TRACKER_LOG_LEVEL: info
     ports:
       - "8080:8080"
+
+# No `container_name:` on either service. It is daemon-global and defeats compose's
+# per-project namespacing, so the smoke stack (`-p tracker-smoke`) would collide with a dev
+# stack already running — turning the gate red for reasons that have nothing to do with the
+# code under test.
 
 volumes:
   postgis-data:

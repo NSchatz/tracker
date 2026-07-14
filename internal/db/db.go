@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver, which goose needs
@@ -100,13 +101,26 @@ func Version(ctx context.Context, dsn string) (int64, error) {
 	return v, nil
 }
 
+// gooseSetup configures goose's PACKAGE-LEVEL globals, exactly once.
+//
+// SetBaseFS and SetDialect mutate process-wide state. Calling them on every migration —
+// as this used to — is a data race the moment two goroutines migrate at once, which the
+// parallel tests in this package are one `t.Parallel()` away from doing. The values are
+// constant, so doing it once is both correct and sufficient.
+var gooseSetup = sync.OnceValue(func() error {
+	goose.SetBaseFS(migrationsFS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		return fmt.Errorf("set goose dialect: %w", err)
+	}
+	return nil
+})
+
 // openForMigration opens the short-lived database/sql handle goose speaks through. It is
 // separate from the pgxpool the server serves requests on, and closed as soon as the
 // migration finishes.
 func openForMigration(dsn string) (*sql.DB, error) {
-	goose.SetBaseFS(migrationsFS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return nil, fmt.Errorf("set goose dialect: %w", err)
+	if err := gooseSetup(); err != nil {
+		return nil, err
 	}
 
 	sqlDB, err := sql.Open("pgx", dsn)

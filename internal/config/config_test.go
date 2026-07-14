@@ -29,7 +29,12 @@ func TestLoadRefusesWithoutDatabaseURL(t *testing.T) {
 }
 
 func TestLoadDefaults(t *testing.T) {
+	// Clear the optional vars explicitly. Without this the test reads whatever the
+	// developer happens to have exported and goes red on a clean tree — a gate that
+	// depends on the ambient environment is not a gate.
 	t.Setenv(EnvPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(EnvPrefix+"ADDR", "")
+	t.Setenv(EnvPrefix+"LOG_LEVEL", "")
 
 	c, err := Load()
 	if err != nil {

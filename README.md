@@ -37,6 +37,17 @@ you are trusted to change later — a refusal, up front. A default would mean a 
 including minors', sitting behind a Postgres superuser password that nobody ever chose. The same rule as
 the server's: never boot with a silent default for a secret.
 
+> Use an **alphanumeric** password, or percent-encode it. It is interpolated into the DSN, so `@`, `/`,
+> `:`, `#`, `%` and `?` have meaning there — `p@ss` would be parsed as a *hostname*. You will not get a
+> wrong answer if you ignore this (the server fails to connect and says so, loudly), just a confusing one.
+
+> **Changing `TRACKER_DB_PASSWORD` later does not rotate the password.** This is a sharp edge in
+> Postgres, not in tracker: the variable is read **only by `initdb`**, on the very first start against an
+> empty data volume. Afterwards it is ignored — so editing it leaves tracker's DSN disagreeing with the
+> database, and the server crash-loops on *"password authentication failed"*. To actually rotate it,
+> change it **inside the database** (`ALTER ROLE tracker WITH PASSWORD '…'`) and set the variable to
+> match. `docker compose down -v` resets it too, but that **destroys the location history** with it.
+
 The server **applies its own migrations on start-up, before it listens**, so there is no separate
 migration step and it can never serve requests against a half-migrated schema.
 

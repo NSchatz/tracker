@@ -1,18 +1,31 @@
 -- +goose Up
--- The one thing tracker cannot work without. Every spatial column, index and query in
--- the phases that follow (roadmap §5.1) is provided by this extension, so it is the
--- first migration and nothing may precede it.
+-- The one thing tracker cannot work without. Every spatial column, index and query in the
+-- phases that follow (roadmap §5.1) is provided by this extension, so it is the first
+-- migration and nothing may precede it.
 --
--- IF NOT EXISTS because the postgis/postgis image already installs it into the default
--- database from its initdb scripts — but a database created any other way (a test
--- container's fresh DB, a managed Postgres with the extension merely *available*) will
--- not have it. Doing it here means the schema is self-sufficient and does not depend on
--- how the database was provisioned.
+-- This is NOT redundant with the postgis/postgis image, which pre-creates the extension in
+-- POSTGRES_DB from its own initdb scripts. That image is one way to get a database; a
+-- managed Postgres, or a plain postgres:16 with the extension merely *available*, are
+-- others — and there, nothing creates it until this runs. Doing it here is what makes the
+-- schema self-sufficient, independent of how the database was provisioned. The tests run
+-- against a pristine `template0` database precisely so that this line is load-bearing and
+-- not quietly doing nothing.
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 -- +goose Down
--- Deliberately NOT `DROP EXTENSION postgis`. Down-migrating to zero should undo what the
--- schema added, and dropping the extension would take every geography column in the
--- database with it — including any a later migration created. The extension is
--- infrastructure, not schema; removing it is an operator's decision, not a rollback's.
-SELECT 1;
+-- Deliberately WITHOUT `CASCADE`.
+--
+-- goose rolls back in reverse order, so by the time this unwinds, every later migration has
+-- already dropped its own tables — and with them every geography column depending on this
+-- extension. If one is somehow still there, Postgres REFUSES this statement rather than
+-- obeying it, and that refusal is the point: `CASCADE` would silently delete the offending
+-- column and the table holding it, which is data loss wearing a clean rollback's clothes.
+--
+-- Known and accepted: on a database provisioned by the postgis/postgis IMAGE, this refuses
+-- even with no tracker tables present — the image also installs postgis_topology and
+-- postgis_tiger_geocoder, which depend on postgis, and tracker never asked for either. So a
+-- full `down-to-0` there stops here with "other objects depend on it". That is a safe,
+-- loud, correct refusal to uninstall an extension somebody else's objects are using, and
+-- rolling a production database back to version zero is not an operation tracker supports
+-- anyway. Rollbacks go to N-1, not to 0.
+DROP EXTENSION IF EXISTS postgis;
