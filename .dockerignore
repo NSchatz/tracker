@@ -1,0 +1,19 @@
+# Keep the build context to what the image actually needs: the Go source. The migrations
+# are embedded by internal/db, so they travel inside the binary, not beside it.
+.git
+.github
+.gitignore
+docker-compose.yml
+Dockerfile
+Makefile
+README.md
+CLAUDE.md
+scripts
+/tracker
+
+# The build stage does `COPY . .`, so without these a developer's local .env — which
+# .gitignore says holds the database password — would be baked into a build layer on
+# every `docker compose up --build`.
+.env
+*.env
+

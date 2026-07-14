@@ -1,0 +1,7 @@
+# the built binary
+/tracker
+
+# local env overrides — these hold the database password
+.env
+*.env
+!.env.example
