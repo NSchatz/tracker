@@ -17,9 +17,13 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: tracker
-      # Local-only placeholder. CHANGE THIS before exposing the stack to anything,
-      # and prefer an env file or a secret over a literal here.
-      POSTGRES_PASSWORD: ${TRACKER_DB_PASSWORD:-tracker}
+      # `:?` — NOT `:-`. Compose REFUSES to start (or even to `config`) when this is
+      # unset, with that message. The `:-default` form would instead hand a family
+      # location tracker a Postgres superuser whose password was chosen by nobody, which
+      # is the exact fail-safe this phase exists to enforce: never boot with a silent
+      # default for a secret. A comment saying "CHANGE THIS" is documentation where the
+      # requirement was a refusal.
+      POSTGRES_PASSWORD: ${TRACKER_DB_PASSWORD:?set TRACKER_DB_PASSWORD — refusing to start with a default database password}
       POSTGRES_DB: tracker
     volumes:
       - postgis-data:/var/lib/postgresql/data
@@ -43,7 +47,7 @@ services:
       postgis:
         condition: service_healthy
     environment:
-      TRACKER_DATABASE_URL: postgres://tracker:${TRACKER_DB_PASSWORD:-tracker}@postgis:5432/tracker?sslmode=disable
+      TRACKER_DATABASE_URL: postgres://tracker:${TRACKER_DB_PASSWORD:?set TRACKER_DB_PASSWORD — refusing to start with a default database password}@postgis:5432/tracker?sslmode=disable
       TRACKER_ADDR: ":8080"
       TRACKER_LOG_LEVEL: info
     ports:

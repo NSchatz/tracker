@@ -10,3 +10,10 @@ README.md
 CLAUDE.md
 scripts
 /tracker
+
+# The build stage does `COPY . .`, so without these a developer's local .env — which
+# .gitignore says holds the database password — would be baked into a build layer on
+# every `docker compose up --build`.
+.env
+*.env
+

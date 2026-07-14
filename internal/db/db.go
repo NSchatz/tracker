@@ -46,8 +46,15 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 // Up applies every pending migration, in order, and blocks until they are done.
 //
 // It runs on the way up, before the server listens. A tracker serving requests against a
-// half-migrated schema is the failure this prevents. goose takes a session advisory lock,
-// so concurrent replicas starting at once serialize here rather than racing.
+// half-migrated schema is the failure this prevents.
+//
+// NOT SAFE against concurrent migrators. goose only locks when a Provider is built with
+// WithSessionLocker, and this uses the legacy package-level API, which takes no lock at
+// all. Today that is fine — the compose stack runs one replica. It stops being fine the
+// moment tracker is scaled to the stateless replicas roadmap §1 plans for, because every
+// instance migrates on boot: two starting together race on CREATE EXTENSION and on the
+// goose_db_version insert. Whoever does that scaling owns fixing this, and this comment
+// is here so they find out from the code rather than from production.
 func Up(ctx context.Context, dsn string) error {
 	sqlDB, err := openForMigration(dsn)
 	if err != nil {

@@ -41,9 +41,6 @@ func TestLoadDefaults(t *testing.T) {
 	if c.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", c.LogLevel)
 	}
-	if c.ShutdownTimeout.Seconds() != 15 {
-		t.Errorf("ShutdownTimeout = %v, want 15s", c.ShutdownTimeout)
-	}
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -67,23 +64,12 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			env:  map[string]string{"DATABASE_URL": validDSN, "LOG_LEVEL": "loud"},
 			want: "not one of debug|info|warn|error",
 		},
-		{
-			name: "non-integer shutdown timeout",
-			env:  map[string]string{"DATABASE_URL": validDSN, "SHUTDOWN_TIMEOUT_SEC": "soon"},
-			want: "is not an integer",
-		},
-		{
-			name: "non-positive shutdown timeout",
-			env:  map[string]string{"DATABASE_URL": validDSN, "SHUTDOWN_TIMEOUT_SEC": "0"},
-			want: "must be > 0",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(EnvPrefix+"DATABASE_URL", "")
 			t.Setenv(EnvPrefix+"LOG_LEVEL", "")
-			t.Setenv(EnvPrefix+"SHUTDOWN_TIMEOUT_SEC", "")
 			for k, v := range tt.env {
 				t.Setenv(EnvPrefix+k, v)
 			}

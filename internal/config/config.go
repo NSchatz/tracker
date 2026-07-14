@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -39,11 +38,14 @@ type Config struct {
 
 	// LogLevel is one of debug|info|warn|error.
 	LogLevel string
-
-	// ShutdownTimeout bounds how long a graceful shutdown may take before
-	// in-flight requests are abandoned.
-	ShutdownTimeout time.Duration
 }
+
+// ShutdownTimeout bounds how long a graceful shutdown may take before in-flight requests
+// are abandoned. A constant, not a knob: nothing in S0's acceptance asked for it to be
+// tunable, and an env var nobody has a reason to set is surface that has to be validated,
+// tested and documented forever. Make it configurable when something actually needs to
+// configure it.
+const ShutdownTimeout = 15 * time.Second
 
 // Load reads the configuration from the environment and validates it.
 //
@@ -57,21 +59,9 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		DatabaseURL:     dsn,
-		Addr:            envOr(EnvPrefix+"ADDR", ":8080"),
-		LogLevel:        envOr(EnvPrefix+"LOG_LEVEL", "info"),
-		ShutdownTimeout: 15 * time.Second,
-	}
-
-	if raw := strings.TrimSpace(os.Getenv(EnvPrefix + "SHUTDOWN_TIMEOUT_SEC")); raw != "" {
-		secs, err := strconv.Atoi(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%sSHUTDOWN_TIMEOUT_SEC %q is not an integer: %w", EnvPrefix, raw, err)
-		}
-		if secs <= 0 {
-			return nil, fmt.Errorf("%sSHUTDOWN_TIMEOUT_SEC %d must be > 0", EnvPrefix, secs)
-		}
-		c.ShutdownTimeout = time.Duration(secs) * time.Second
+		DatabaseURL: dsn,
+		Addr:        envOr(EnvPrefix+"ADDR", ":8080"),
+		LogLevel:    envOr(EnvPrefix+"LOG_LEVEL", "info"),
 	}
 
 	if err := c.validate(); err != nil {

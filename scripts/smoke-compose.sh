@@ -16,6 +16,13 @@ PROJECT=tracker-smoke
 COMPOSE=(docker compose -p "$PROJECT")
 DEADLINE=120 # seconds; a cold image build is slow
 
+# docker-compose.yml uses the `${VAR:?}` form for the database password, so it REFUSES to
+# start without one — that is the point, and it means this gate must supply its own.
+#
+# Synthetic, throwaway, and local to a stack that publishes no database port and is torn
+# down (`down -v`) on the way out. It is not a credential and must never become one.
+export TRACKER_DB_PASSWORD="smoke-only-$$"
+
 cleanup() {
   local code=$?
   if [ "$code" -ne 0 ]; then

@@ -27,9 +27,15 @@ it rather than trusting it.
 ## Running it
 
 ```bash
+export TRACKER_DB_PASSWORD='choose-something'   # required — see below
 docker compose up -d
-curl localhost:8080/healthz     # {"status":"ok","database":"up"}
+curl localhost:8080/healthz                     # {"status":"ok","database":"up"}
 ```
+
+**There is no default database password, and compose refuses to start without one.** Not a placeholder
+you are trusted to change later — a refusal, up front. A default would mean a family's location history,
+including minors', sitting behind a Postgres superuser password that nobody ever chose. The same rule as
+the server's: never boot with a silent default for a secret.
 
 The server **applies its own migrations on start-up, before it listens**, so there is no separate
 migration step and it can never serve requests against a half-migrated schema.
@@ -45,10 +51,10 @@ a password, and keeping it on the environment means there is no config artefact 
 
 | variable | required | default | meaning |
 |---|---|---|---|
-| `TRACKER_DATABASE_URL` | **yes** | *none, ever* | PostgreSQL DSN |
+| `TRACKER_DATABASE_URL` | **yes** | *none, ever* | PostgreSQL DSN (the server reads this) |
+| `TRACKER_DB_PASSWORD` | **yes** | *none, ever* | the database password (`docker-compose.yml` reads this) |
 | `TRACKER_ADDR` | no | `:8080` | listen address |
 | `TRACKER_LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `TRACKER_SHUTDOWN_TIMEOUT_SEC` | no | `15` | graceful-shutdown budget |
 
 **The server refuses to start** without a valid `TRACKER_DATABASE_URL` — no default, no empty string, no
 guess. A tracker pointed at the wrong database is worse than one that would not boot, because the first

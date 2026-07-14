@@ -83,12 +83,12 @@ func run() error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		logger.Info("shutting down", "timeout", cfg.ShutdownTimeout)
+		logger.Info("shutting down", "timeout", config.ShutdownTimeout)
 	}
 
 	// A fresh context: the root one is already cancelled, and Shutdown needs a live
 	// deadline to drain in-flight requests against.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
