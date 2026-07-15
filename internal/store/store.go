@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrCoordinateOutOfRange is returned for a longitude outside [-180, 180], a latitude outside
@@ -80,7 +82,7 @@ type Fix struct {
 	MsgID         *string
 }
 
-// insertFixSQL writes one fix.
+// upsertFixSQL writes one fix, idempotently on its (device_id, ts) identity.
 //
 // ST_Point(lon, lat, 4326) — LONGITUDE FIRST, and with an explicit SRID. Both halves matter:
 //
@@ -90,25 +92,135 @@ type Fix struct {
 //     and ST_Point(..., 4326) makes it in one call.
 //   - The axis order is the classic silent bug, guarded permanently by
 //     TestAxisOrderRegression.
-const insertFixSQL = `
-	INSERT INTO fixes (device_id, ts, location, accuracy_m, battery_pct, speed_mps, trigger_reason, msg_id)
-	VALUES ($1, $2, ST_Point($3, $4, 4326)::geography, $5, $6, $7, $8, $9)`
-
-// InsertFix validates the coordinate and stores the fix.
 //
-// It validates FIRST and returns a typed error, storing nothing — see ErrCoordinateOutOfRange
-// for why the database cannot be trusted to do this for us.
-func InsertFix(ctx context.Context, q db.Querier, f Fix) error {
+// ON CONFLICT (device_id, ts) DO NOTHING is the idempotency §5.2 requires. A report can arrive
+// more than once — the client's offline queue (C2) retries on any uncertain outcome, and a network
+// that dropped the response but not the request will replay it — so a replayed fix must be a no-op,
+// not a second row and not an error. (device_id, ts) is the fix's identity and the table's primary
+// key, so the FIRST report for an instant wins and every replay is silently absorbed. received_at
+// is deliberately not in the column list: the database stamps its own clock (§5.2, liveness),
+// distinct from the device's ts, and a replay does not move it.
+const upsertFixSQL = `
+	INSERT INTO fixes (device_id, ts, location, accuracy_m, battery_pct, speed_mps, trigger_reason, msg_id)
+	VALUES ($1, $2, ST_Point($3, $4, 4326)::geography, $5, $6, $7, $8, $9)
+	ON CONFLICT (device_id, ts) DO NOTHING`
+
+// UpsertFix validates the coordinate and stores the fix idempotently, reporting whether it was a
+// new row (true) or an absorbed replay (false).
+//
+// It validates FIRST and returns a typed error, storing nothing — see ErrCoordinateOutOfRange for
+// why the database cannot be trusted to do this for us. It does NOT provision partitions: a fix for
+// an unprovisioned month fails with a missing-partition error, which is IngestFix's job to catch.
+// The regression tests that pin the spatial write path call in here directly, against months they
+// provisioned themselves.
+func UpsertFix(ctx context.Context, q db.Querier, f Fix) (inserted bool, err error) {
 	if err := ValidateLonLat(f.Lon, f.Lat); err != nil {
-		return err
+		return false, err
 	}
-	_, err := q.Exec(ctx, insertFixSQL,
+	tag, err := q.Exec(ctx, upsertFixSQL,
 		f.DeviceID, f.TS, f.Lon, f.Lat,
 		f.AccuracyM, f.BatteryPct, f.SpeedMPS, f.TriggerReason, f.MsgID)
 	if err != nil {
-		return fmt.Errorf("insert fix for device %s: %w", f.DeviceID, err)
+		return false, fmt.Errorf("insert fix for device %s: %w", f.DeviceID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ErrTimestampOutOfWindow is returned for a fix whose ts is too far from the server's clock to be
+// accepted — see IngestFix for why the window exists and what it bounds.
+var ErrTimestampOutOfWindow = errors.New("fix timestamp outside the acceptable ingest window")
+
+// The ingest window (see IngestFix). These are deliberately generous and deliberately finite.
+const (
+	// MaxIngestFutureSkew is how far ahead of the server clock a fix's ts may be. A fix from the
+	// future is a bad device clock, not a real event; 24h absorbs timezone/NTP confusion without
+	// admitting one that could provision a partition months ahead of anything real.
+	MaxIngestFutureSkew = 24 * time.Hour
+
+	// MaxIngestBacklog is how far into the past a fix's ts may be. A phone offline for a while
+	// replays genuinely old fixes (C2), so this is generous; but it is finite, because the partition
+	// provisioned for a fix's month is created from client-supplied ts, and an unbounded past would
+	// let one hostile device carpet the catalog with a partition per month going back to the epoch.
+	MaxIngestBacklog = 90 * 24 * time.Hour
+)
+
+// IngestFix is the entry point for a fix arriving from the network. It is UpsertFix plus the two
+// things an untrusted, network-facing writer needs that the raw upsert does not.
+//
+// # 1. The partition-lookahead mitigation (S1's hard-won constraint #1)
+//
+// `fixes` has no default partition and the server provisions only a small lookahead at start-up. A
+// process that stays up LONGER THAN THE LOOKAHEAD crosses into an unprovisioned month, and from
+// that instant every INSERT fails with "no partition of relation" — at S1 that was harmless
+// (nothing ingested), but from S2 on it is silent, total data loss at a month boundary until
+// someone restarts the process. S7 owns the real fix (a maintenance ticker). This is the mitigation
+// that ships FIRST, in the phase that first puts data in: when the upsert fails because the month is
+// not provisioned, IngestFix creates that month's partition and retries once. A long-lived process
+// therefore self-heals on the very next fix instead of hemorrhaging a month of history.
+//
+// # 2. The timestamp window (which is what makes #1 safe)
+//
+// Because the mitigation creates a partition from a client-supplied ts, an unbounded ts would be an
+// abuse vector — a partition per month, forever, from one hostile device. The window checked here
+// FIRST is what bounds that: a ts outside [now-MaxIngestBacklog, now+MaxIngestFutureSkew] is
+// rejected with a typed error and stored nowhere, so at most a bounded handful of months can ever be
+// provisioned on demand. `now` is a parameter, not time.Now(), so the boundary is testable without
+// waiting for a month to turn over.
+func IngestFix(ctx context.Context, q db.Querier, f Fix, now time.Time) (inserted bool, err error) {
+	if err := validateFixTimestamp(f.TS, now); err != nil {
+		return false, err
+	}
+
+	inserted, err = UpsertFix(ctx, q, f)
+	if err != nil && isMissingPartitionErr(err) {
+		// The month this fix belongs to was never provisioned (see #1 above). Create it and retry.
+		// The ts window checked above bounds how many months this can ever create.
+		//
+		// A DUPLICATE-relation error here is benign and expected under concurrency: another
+		// in-flight fix for the same new month may have created the partition between our failed
+		// insert and this call (CREATE TABLE IF NOT EXISTS is not atomic against a concurrent
+		// creator). The month is ready either way, so we swallow that specific error and let the
+		// retry below be the real arbiter — anything else is a genuine provisioning failure.
+		if _, perr := db.EnsureMonthlyPartition(ctx, q, f.TS); perr != nil && !isDuplicateRelationErr(perr) {
+			return false, fmt.Errorf("provision partition for a fix at %s: %w", f.TS.Format(time.RFC3339), perr)
+		}
+		inserted, err = UpsertFix(ctx, q, f)
+	}
+	return inserted, err
+}
+
+// validateFixTimestamp enforces the ingest window. A zero or garbage ts (e.g. epoch 0 from a
+// missing field that slipped through) lands far in the past and is rejected here too.
+func validateFixTimestamp(ts, now time.Time) error {
+	switch {
+	case ts.After(now.Add(MaxIngestFutureSkew)):
+		return fmt.Errorf("%w: %s is more than %s ahead of the server clock", ErrTimestampOutOfWindow, ts.UTC().Format(time.RFC3339), MaxIngestFutureSkew)
+	case ts.Before(now.Add(-MaxIngestBacklog)):
+		return fmt.Errorf("%w: %s is more than %s in the past", ErrTimestampOutOfWindow, ts.UTC().Format(time.RFC3339), MaxIngestBacklog)
 	}
 	return nil
+}
+
+// isMissingPartitionErr reports whether err is Postgres refusing an INSERT because no partition of
+// `fixes` covers the row's month.
+//
+// It matches on the error MESSAGE ("no partition of relation") rather than the SQLSTATE alone:
+// Postgres raises this as a check_violation (23514), the SAME code as a real CHECK constraint
+// failure (a bad battery_pct, an invalid geofence), and retrying THOSE by provisioning a partition
+// would be nonsense. The message is specific to the missing-partition case, and the codebase already
+// depends on it (TestPartitions asserts the same substring), so matching it keeps the two in step.
+func isMissingPartitionErr(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && strings.Contains(pgErr.Message, "no partition of relation")
+}
+
+// isDuplicateRelationErr reports whether err is Postgres's duplicate_table (42P07) — a relation of
+// that name already exists. In the mitigation path it means a racing ingest already provisioned the
+// month, which is a success, not a failure. Matching the SQLSTATE (not a message) is precise here:
+// 42P07 has exactly one meaning.
+func isDuplicateRelationErr(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P07"
 }
 
 // NearbyFix is one row of the "who is near X" answer, with the distance that ranked it.

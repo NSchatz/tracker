@@ -4,14 +4,16 @@ A **self-hosted, Life360-style family location tracker**. An Android phone repor
 server *you* run; family members see each other on a live map and get alerts when someone arrives at or
 leaves a place you have defined.
 
-> **Status: early. The server spine and its data model.**
-> This repo has config, `/healthz`, a database pool, and — as of S1 — the **spatial schema**: families,
-> devices, viewers, monthly-partitioned `fixes`, and geofences, with the query helpers for proximity and
-> containment.
-> There is still **no ingestion endpoint, no read API, no map and no Android client**; those are the
-> phases that follow. **Nothing writes to these tables over the network yet.** It is not usable as a
-> tracker today, and this README will say so until it is. The plan lives in the umbrella at
-> `operations/roadmaps/tracker.md`.
+> **Status: early. The server spine, its data model, and — as of S2 — ingestion.**
+> This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
+> viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, and now
+> a **token-authenticated ingestion surface**: per-device enrollment, `POST /v1/fixes` on the
+> first-party schema, and an interim `POST /owntracks` adapter so the stock OwnTracks app can drive
+> the server. **Real location data goes in now.**
+> There is still **no read API, no live map, and no Android client**; those are the phases that
+> follow — data goes in but nothing reads it back yet. It is not usable as a tracker today, and this
+> README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the
+> umbrella at `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -83,6 +85,48 @@ PostGIS would otherwise store it: a bowtie parses, warns into a NOTICE nobody re
 of **zero area** that contains nothing, forever — a Place that looks real in every listing and whose alert
 simply never fires.
 
+## Reporting fixes (S2)
+
+A phone reports its location by POSTing a fix with a **per-device bearer token**. The full wire
+contract — schema, auth, idempotency, errors — is [`SPEC.md`](SPEC.md); the essentials:
+
+- **`POST /v1/fixes`** — the first-party JSON schema (`lat`, `lon`, `ts` required; `accuracy`,
+  `battery`, `speed`, `trigger`, `msg_id` optional). The Android client will speak this.
+- **`POST /owntracks`** — an **interim, deprecatable** adapter for the stock OwnTracks Android app,
+  so a real phone can drive the server before the first-party client exists. It is not a product
+  dependency and is a candidate for retirement in S7.
+
+Three properties are load-bearing and each is pinned by a test:
+
+- **Idempotent on `(device_id, ts)`.** A replayed report is a silent no-op (`200`, `deduped:true`),
+  never a duplicate row — so a client can retry a report whose response it never saw. The server
+  stamps its own `received_at` separately from the device's `ts`.
+- **Malformed input is a typed `400`, stored nowhere.** Coordinates are validated **in Go, before
+  the SQL** — PostGIS *coerces* a bad coordinate rather than rejecting it, so the check cannot live
+  in the database. `/v1/fixes` also rejects unknown fields, so a client typo is loud, not silent.
+- **A device writes only its own fixes.** The fix is stored under the *authenticated* device; there
+  is no `device_id` in either payload for a caller to forge (§7 authz, by construction).
+
+### Enrolling a device
+
+Tokens are issued **by the operator, out of band** — S2 has no admin login, so enrollment is a
+command against the database rather than an HTTP endpoint (whoever can enroll can write a family's
+history; the credential for that is shell access to the deployment, not a network call).
+
+```bash
+docker compose exec tracker tracker create-family -name "The Schatz family"
+#   → prints the family id
+docker compose exec tracker tracker enroll -family <family-id> -name "Alice's phone"
+#   → prints the bearer token ONCE — store it now, it is not recoverable
+```
+
+The server stores only the **SHA-256** of the token. The token is 43 characters (base64url of 32
+random bytes), never 32 bytes — which is what makes `token_hash`'s length check a real guard against
+a raw token being stored where its digest belongs, rather than a coincidence.
+
+> **TLS is S7, not S2.** Bearer tokens must travel over TLS in a real deployment; today the server
+> terminates plaintext HTTP. Do not expose this to an untrusted network yet.
+
 ## Running it
 
 ```bash
@@ -150,12 +194,16 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **No network surface for the data model.** The schema and its queries exist; nothing ingests or serves
-  them. That is the next phase, not an oversight.
-- **Partitions are provisioned at start-up, with a two-month lookahead.** A server process that runs
-  continuously for longer than that would eventually reach an unprovisioned month and start **rejecting
-  fixes** (loudly — they are never silently misfiled). A restart fixes it; a maintenance tick, alongside
-  the retention job, is the real answer and belongs with it.
+- **Data goes in, but nothing reads it back yet.** Ingestion exists (S2); the read API, live map and
+  Android client are the phases that follow. And the interim OwnTracks path is exactly that — interim.
+- **No TLS yet.** The server terminates plaintext HTTP. Bearer tokens and location data must travel
+  over TLS in any real deployment; enforcing that (and the threat model) is S7.
+- **Partitions are provisioned at start-up, with a two-month lookahead — plus an on-ingest safety
+  net.** A process running longer than the lookahead would otherwise reach an unprovisioned month and
+  reject every fix at the rollover: harmless before S2 (nothing ingested), silent data loss after it.
+  So ingestion now provisions a fix's month **on demand** if it is missing, bounded by the timestamp
+  window (`[now−90d, now+24h]`) so untrusted input cannot create partitions without limit. That is a
+  reactive mitigation; the real fix — a maintenance tick alongside the retention job — is S7's.
 - **Retention purging is coarse.** History is dropped a whole month at a time, so a fix can outlive its
   retention date by up to a month. Deliberate — see above.
 - **Migrations are not safe against concurrent migrators.** Every instance migrates on boot, so two

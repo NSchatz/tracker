@@ -140,8 +140,8 @@ func TestAxisOrderRegression(t *testing.T) {
 	ts := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	mustEnsurePartition(ctx, t, pool, ts)
 
-	if err := InsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: romeLon, Lat: romeLat}); err != nil {
-		t.Fatalf("InsertFix: %v", err)
+	if _, err := UpsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: romeLon, Lat: romeLat}); err != nil {
+		t.Fatalf("UpsertFix: %v", err)
 	}
 
 	// 1. The stored point's X is the LONGITUDE and its Y is the LATITUDE. In PostGIS, X is
@@ -209,9 +209,9 @@ func TestOutOfRangeCoordinatesNeverLand(t *testing.T) {
 	// Seattle (-122.3321, 47.6062) with the axes swapped: latitude -122.3321 cannot exist.
 	const swappedLon, swappedLat = 47.6062, -122.3321
 
-	err := InsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: swappedLon, Lat: swappedLat})
+	_, err := UpsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: swappedLon, Lat: swappedLat})
 	if !errors.Is(err, ErrCoordinateOutOfRange) {
-		t.Fatalf("InsertFix with latitude %v returned %v; want ErrCoordinateOutOfRange", swappedLat, err)
+		t.Fatalf("UpsertFix with latitude %v returned %v; want ErrCoordinateOutOfRange", swappedLat, err)
 	}
 
 	if n := scalar[int64](ctx, t, pool, `SELECT count(*) FROM fixes WHERE device_id = $1`, deviceID); n != 0 {
@@ -241,8 +241,8 @@ func TestOutOfRangeCoordinatesNeverLand(t *testing.T) {
 		{"Inf longitude", math.Inf(1), romeLat},
 		{"longitude past the antimeridian", 180.5, romeLat},
 	} {
-		if err := InsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: bad.lon, Lat: bad.lat}); !errors.Is(err, ErrCoordinateOutOfRange) {
-			t.Fatalf("InsertFix(%s) returned %v; want ErrCoordinateOutOfRange", bad.name, err)
+		if _, err := UpsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: bad.lon, Lat: bad.lat}); !errors.Is(err, ErrCoordinateOutOfRange) {
+			t.Fatalf("UpsertFix(%s) returned %v; want ErrCoordinateOutOfRange", bad.name, err)
 		}
 	}
 }
@@ -258,8 +258,8 @@ func TestSameSRIDAssertion(t *testing.T) {
 	ts := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	mustEnsurePartition(ctx, t, pool, ts)
 
-	if err := InsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: romeLon, Lat: romeLat}); err != nil {
-		t.Fatalf("InsertFix: %v", err)
+	if _, err := UpsertFix(ctx, pool, Fix{DeviceID: deviceID, TS: ts, Lon: romeLon, Lat: romeLat}); err != nil {
+		t.Fatalf("UpsertFix: %v", err)
 	}
 
 	// Everything stored is 4326. Nothing else can be.
