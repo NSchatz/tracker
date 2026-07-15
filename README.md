@@ -4,16 +4,17 @@ A **self-hosted, Life360-style family location tracker**. An Android phone repor
 server *you* run; family members see each other on a live map and get alerts when someone arrives at or
 leaves a place you have defined.
 
-> **Status: early. The server spine, its data model, and — as of S2 — ingestion.**
+> **Status: early. The server spine, its data model, ingestion, and — as of S3 — a read API.**
 > This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
-> viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, and now
-> a **token-authenticated ingestion surface**: per-device enrollment, `POST /v1/fixes` on the
-> first-party schema, and an interim `POST /owntracks` adapter so the stock OwnTracks app can drive
-> the server. **Real location data goes in now.**
-> There is still **no read API, no live map, and no Android client**; those are the phases that
-> follow — data goes in but nothing reads it back yet. It is not usable as a tracker today, and this
-> README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the
-> umbrella at `operations/roadmaps/tracker.md`.
+> viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, a
+> **token-authenticated ingestion surface** (per-device enrollment, `POST /v1/fixes`, and an interim
+> `POST /owntracks` adapter), and now a **family-scoped read API**: `GET /v1/positions`,
+> `GET /v1/devices/{id}/history`, and `GET /v1/near`, behind a separate **viewer** credential.
+> **Location data goes in and can be read back now — poll-only.**
+> There is still **no live map and no Android client**; the live-map SSE stream (S4) and the client
+> are the phases that follow, so today you read by polling, not by watching. It is not a finished
+> tracker, and this README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the
+> plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -107,25 +108,51 @@ Three properties are load-bearing and each is pinned by a test:
 - **A device writes only its own fixes.** The fix is stored under the *authenticated* device; there
   is no `device_id` in either payload for a caller to forge (§7 authz, by construction).
 
-### Enrolling a device
+### Enrolling a device (and a viewer)
 
-Tokens are issued **by the operator, out of band** — S2 has no admin login, so enrollment is a
-command against the database rather than an HTTP endpoint (whoever can enroll can write a family's
-history; the credential for that is shell access to the deployment, not a network call).
+Tokens are issued **by the operator, out of band** — there is no admin login yet, so enrollment is a
+command against the database rather than an HTTP endpoint (whoever can enroll can write or read a
+family's history; the credential for that is shell access to the deployment, not a network call).
 
 ```bash
 docker compose exec tracker tracker create-family -name "The Schatz family"
 #   → prints the family id
 docker compose exec tracker tracker enroll -family <family-id> -name "Alice's phone"
-#   → prints the bearer token ONCE — store it now, it is not recoverable
+#   → prints the DEVICE (write) token ONCE — store it now, it is not recoverable
+docker compose exec tracker tracker add-viewer -family <family-id> -email alice@example.com -name "Alice"
+#   → prints the VIEWER (read) token ONCE — store it now, it is not recoverable
 ```
 
-The server stores only the **SHA-256** of the token. The token is 43 characters (base64url of 32
+The server stores only the **SHA-256** of each token. The token is 43 characters (base64url of 32
 random bytes), never 32 bytes — which is what makes `token_hash`'s length check a real guard against
 a raw token being stored where its digest belongs, rather than a coincidence.
 
-> **TLS is S7, not S2.** Bearer tokens must travel over TLS in a real deployment; today the server
+> **TLS is S7.** Bearer tokens must travel over TLS in a real deployment; today the server
 > terminates plaintext HTTP. Do not expose this to an untrusted network yet.
+
+## Reading fixes (S3)
+
+A **viewer** reads a family's location back over three poll-able routes, each requiring a viewer
+bearer token and each scoped to that viewer's own family. The full contract is [`SPEC.md`](SPEC.md);
+the essentials:
+
+- **`GET /v1/positions`** — the latest fix per device in the family, ordered by device name.
+- **`GET /v1/devices/{id}/history`** — one device's fixes, newest first, within an optional
+  `from`/`to` window, paginated with `limit`/`offset`.
+- **`GET /v1/near?lat=&lon=&m=`** — the family's fixes within `m` **metres** of a point, nearest
+  first (the §5.1 `ST_DWithin`-then-`ST_Distance` proximity template, over the GiST index).
+
+Two properties are load-bearing and each is pinned by the authz-matrix tests:
+
+- **Reads and writes use separate credentials.** A **device** token writes its own fixes and only its
+  own; a **viewer** token reads its family and only its family. Neither works on the other's routes
+  (§7) — a device token on a read route is a `401`, a viewer token on a write route is a `401`.
+- **A viewer sees only its own family.** Every route is scoped in its SQL, not by the caller. A read
+  that names a device in another family is a `403`, and an empty result is `[]` — **never** a leak of
+  another family's data.
+
+> **The map is poll-only until S4.** These routes answer a request; there is no live push yet. The
+> SSE stream and a web map are S4.
 
 ## Running it
 
@@ -194,8 +221,10 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **Data goes in, but nothing reads it back yet.** Ingestion exists (S2); the read API, live map and
-  Android client are the phases that follow. And the interim OwnTracks path is exactly that — interim.
+- **Data goes in and reads back — but poll-only, and there is no client.** Ingestion (S2) and a
+  family-scoped read API (S3) exist; the live-map SSE stream (S4) and the Android client are the
+  phases that follow, so today you poll the read routes rather than watch a live map. And the interim
+  OwnTracks path is exactly that — interim.
 - **No TLS yet.** The server terminates plaintext HTTP. Bearer tokens and location data must travel
   over TLS in any real deployment; enforcing that (and the threat model) is S7.
 - **Partitions are provisioned at start-up, with a two-month lookahead — plus an on-ingest safety
