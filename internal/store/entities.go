@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/jackc/pgx/v5"
 )
 
 // TokenHashLen is the length of the SHA-256 digest stored in devices.token_hash and
@@ -53,6 +54,46 @@ func CreateDevice(ctx context.Context, q db.Querier, familyID, name string, toke
 		return "", fmt.Errorf("create device %q: %w", name, err)
 	}
 	return id, nil
+}
+
+// Device is an enrolled phone, as much of it as authorization needs: its id, and — the reason this
+// type exists rather than a bare id — the family it belongs to. Every write is scoped by FamilyID
+// (§7), and carrying it out of the single token lookup means the ingestion path never has to ask the
+// database "whose device is this" a second time, nor trust the network to tell it.
+type Device struct {
+	ID       string
+	FamilyID string
+	Name     string
+}
+
+// ErrUnknownToken is returned when no device matches the presented credential. It is deliberately
+// indistinguishable from a device that does not exist: the caller answers 401 either way, and
+// telling "wrong token" apart from "no such device" only helps an attacker enumerate.
+var ErrUnknownToken = errors.New("no device matches the presented token")
+
+// AuthenticateDevice looks up the device whose token_hash is the given digest.
+//
+// tokenHash is a SHA-256 digest (auth.Token.Hash) — never a raw token. The lookup is an indexed
+// equality on token_hash, which is both fast and the correct shape of comparison here: what is being
+// matched is a 256-bit digest, not a short secret, so a preimage attack is the only way to forge a
+// match and a timing side-channel on the index buys an attacker nothing they could act on. The guard
+// on tokenHash's length is the same one CreateDevice applies on the way in — a caller that passes a
+// raw token (the wrong length) is refused rather than silently never matching.
+func AuthenticateDevice(ctx context.Context, q db.Querier, tokenHash []byte) (Device, error) {
+	if len(tokenHash) != TokenHashLen {
+		return Device{}, fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(tokenHash), TokenHashLen)
+	}
+	var d Device
+	err := q.QueryRow(ctx,
+		`SELECT id, family_id, name FROM devices WHERE token_hash = $1`, tokenHash).
+		Scan(&d.ID, &d.FamilyID, &d.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Device{}, ErrUnknownToken
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("authenticate device: %w", err)
+	}
+	return d, nil
 }
 
 // ErrInvalidGeofence is returned when a ring does not describe a usable Place.
