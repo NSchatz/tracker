@@ -2,8 +2,9 @@
 // operator commands that stand up the accounts it serves.
 //
 // With no subcommand (or `serve`) it runs the HTTP server: config, migrations, a database pool,
-// partition provisioning, and the S2 ingestion surface. The `create-family` and `enroll`
-// subcommands are the OPERATOR path for issuing device credentials.
+// partition provisioning, and the S2 ingestion + S3 read surface. The `create-family`, `enroll`,
+// and `add-viewer` subcommands are the OPERATOR path for issuing credentials: `enroll` mints a
+// device's write token, `add-viewer` a human's read token.
 //
 // # Why enrollment is a CLI command, not an HTTP endpoint
 //
@@ -59,8 +60,10 @@ func main() {
 		err = runCreateFamily(args)
 	case "enroll":
 		err = runEnroll(args)
+	case "add-viewer":
+		err = runAddViewer(args)
 	default:
-		err = fmt.Errorf("unknown command %q — expected serve, create-family, or enroll", sub)
+		err = fmt.Errorf("unknown command %q — expected serve, create-family, enroll, or add-viewer", sub)
 	}
 
 	if err != nil {
@@ -210,6 +213,47 @@ func runEnroll(args []string) error {
 	// Straight to stdout, deliberately NOT through the structured logger: a token must not land in
 	// the server's logs. This is the one time it is shown.
 	fmt.Printf("device enrolled\n  id:     %s\n  family: %s\n  name:   %s\n\n", deviceID, *familyID, *name)
+	fmt.Printf("bearer token (store it now — it is not recoverable):\n  %s\n", token)
+	return nil
+}
+
+// runAddViewer issues a per-viewer bearer token for a human who watches the map, and prints it
+// ONCE. It is the read-side counterpart to runEnroll: a viewer token is what the S3 read API
+// (GET /v1/positions, /v1/devices/{id}/history, /v1/near) authenticates, and — like a device token —
+// it is issued by the operator out of band rather than over HTTP, because there is still no admin
+// login (see the package doc), and the credential to mint one is shell access to the deployment.
+func runAddViewer(args []string) error {
+	fs := flag.NewFlagSet("add-viewer", flag.ContinueOnError)
+	familyID := fs.String("family", "", "the family id whose map this viewer may read (required)")
+	email := fs.String("email", "", "the viewer's email, unique within the deployment (required)")
+	name := fs.String("name", "", "a display name for the viewer, e.g. \"Alice\" (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *familyID == "" || *email == "" || *name == "" {
+		return errors.New("add-viewer needs -family, -email, and -name")
+	}
+
+	token, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+	hash := token.Hash()
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	viewerID, err := store.CreateViewer(ctx, pool, *familyID, *email, *name, hash[:])
+	if err != nil {
+		return err
+	}
+
+	// stdout only, never the structured logger: a token must not land in the server's logs.
+	fmt.Printf("viewer added\n  id:     %s\n  family: %s\n  email:  %s\n  name:   %s\n\n", viewerID, *familyID, *email, *name)
 	fmt.Printf("bearer token (store it now — it is not recoverable):\n  %s\n", token)
 	return nil
 }

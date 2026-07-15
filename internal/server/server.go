@@ -71,6 +71,17 @@ func New(database DB, logger *slog.Logger) http.Handler {
 		r.Post("/owntracks", postOwnTracks(database, logger))
 	})
 
+	// The read surface (S3). Every route requires a valid VIEWER token — a separate credential from
+	// the device token above (§7: a device writes its own fixes, a viewer reads its family, never the
+	// reverse) — and every query is scoped to the viewer's own family. A cross-family read is a 403,
+	// an empty result is [], and another family's data never leaves this boundary.
+	r.Group(func(r chi.Router) {
+		r.Use(requireViewer(database, logger))
+		r.Get("/v1/positions", getPositions(database, logger))
+		r.Get("/v1/devices/{id}/history", getDeviceHistory(database, logger))
+		r.Get("/v1/near", getNear(database, logger))
+	})
+
 	return r
 }
 

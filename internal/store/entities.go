@@ -96,6 +96,85 @@ func AuthenticateDevice(ctx context.Context, q db.Querier, tokenHash []byte) (De
 	return d, nil
 }
 
+// ErrUnknownDevice is returned when no device has the given id. It is the read-side counterpart
+// to ErrUnknownToken: the history endpoint uses it to answer 404 for a device that does not exist,
+// distinct from the 403 a device in ANOTHER family gets (see DeviceByID's callers).
+var ErrUnknownDevice = errors.New("no device has that id")
+
+// DeviceByID looks up a device by its id, for the read API's family-scoped authorization.
+//
+// It exists so the history endpoint can make the authz decision the roadmap's §7 requires BEFORE
+// it runs a query: a device in the caller's own family is readable, a device in a DIFFERENT family
+// is a 403, and a device that does not exist is a 404. That three-way split needs the device's
+// family_id, which is exactly what this returns. The history query is ALSO scoped by family in its
+// own SQL (defence in depth — see DeviceHistory), so this lookup decides the status code, not
+// whether the data leaks.
+func DeviceByID(ctx context.Context, q db.Querier, deviceID string) (Device, error) {
+	var d Device
+	err := q.QueryRow(ctx,
+		`SELECT id, family_id, name FROM devices WHERE id = $1`, deviceID).
+		Scan(&d.ID, &d.FamilyID, &d.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Device{}, ErrUnknownDevice
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("look up device %s: %w", deviceID, err)
+	}
+	return d, nil
+}
+
+// Viewer is a human who watches the map, as much of them as authorization needs: their id and the
+// family they may read. It is the READ-side counterpart to Device, and a SEPARATE type on purpose
+// (§7): a device token may only WRITE its own fixes and a viewer token may only READ its family,
+// and collapsing the two into one identity is how that separation gets eroded into a single
+// privilege by accident. A viewer credential authenticates only the read routes; presented to a
+// write route it matches no device and is a 401.
+type Viewer struct {
+	ID          string
+	FamilyID    string
+	Email       string
+	DisplayName string
+}
+
+// CreateViewer enrolls a human account into a family. tokenHash is a SHA-256 digest of the
+// viewer's bearer token — never the token itself, for the same reason CreateDevice takes a digest
+// (see ErrInvalidTokenHash): a database that is read must not hand the reader a live credential.
+func CreateViewer(ctx context.Context, q db.Querier, familyID, email, displayName string, tokenHash []byte) (string, error) {
+	if len(tokenHash) != TokenHashLen {
+		return "", fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(tokenHash), TokenHashLen)
+	}
+	var id string
+	err := q.QueryRow(ctx,
+		`INSERT INTO viewers (family_id, email, display_name, token_hash) VALUES ($1, $2, $3, $4) RETURNING id`,
+		familyID, email, displayName, tokenHash).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create viewer %q: %w", email, err)
+	}
+	return id, nil
+}
+
+// AuthenticateViewer looks up the viewer whose token_hash is the given digest. It is the read-side
+// mirror of AuthenticateDevice — same indexed equality on a 256-bit digest, same length guard, same
+// deliberately-uniform ErrUnknownToken so "wrong token" cannot be told from "no such account" — and
+// it queries the viewers table, so a DEVICE token presented to a read route matches nothing here and
+// is refused. That is §7's read/write separation, enforced by which table the credential lives in.
+func AuthenticateViewer(ctx context.Context, q db.Querier, tokenHash []byte) (Viewer, error) {
+	if len(tokenHash) != TokenHashLen {
+		return Viewer{}, fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(tokenHash), TokenHashLen)
+	}
+	var v Viewer
+	err := q.QueryRow(ctx,
+		`SELECT id, family_id, email, display_name FROM viewers WHERE token_hash = $1`, tokenHash).
+		Scan(&v.ID, &v.FamilyID, &v.Email, &v.DisplayName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Viewer{}, ErrUnknownToken
+	}
+	if err != nil {
+		return Viewer{}, fmt.Errorf("authenticate viewer: %w", err)
+	}
+	return v, nil
+}
+
 // ErrInvalidGeofence is returned when a ring does not describe a usable Place.
 //
 // The failure it prevents is silent. A ring that crosses itself (a "bowtie") is not rejected by
