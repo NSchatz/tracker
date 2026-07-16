@@ -5,7 +5,7 @@ server *you* run; family members see each other on a live map and get alerts whe
 leaves a place you have defined.
 
 > **Status: early. The server spine, its data model, ingestion, a read API, a live map, server-side
-> geofencing, and — as of S6 — push alerts.**
+> geofencing, push alerts, and — as of S7 — security & privacy hardening.**
 > This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
 > viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, a
 > **token-authenticated ingestion surface** (per-device enrollment, `POST /v1/fixes`, and an interim
@@ -20,9 +20,13 @@ leaves a place you have defined.
 > now pushes them to registered phones end-to-end.** Delivery is **best-effort** (FCM's own contract),
 > and push is **off unless a backend is configured**. There is still **no Android client**; the native
 > Kotlin app (C-track) is the phase that follows, so today a real phone drives the server through the
-> interim OwnTracks adapter. It is not a finished tracker, and this README will say so until it is. The
-> wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the umbrella at
-> `operations/roadmaps/tracker.md`.
+> interim OwnTracks adapter. As of **S7** the server is **hardened**: TLS is enforced (it refuses to
+> start in plaintext unless you say so explicitly), history **auto-purges** on a retention timer,
+> database **roles are least-privilege**, tokens can be **rotated and expired**, `tracker config-lint`
+> fails on a plaintext endpoint or a checked-in secret, and the honest server-holds-plaintext boundary
+> is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). It is not a finished tracker, and this README
+> will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the umbrella
+> at `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -308,6 +312,10 @@ a password, and keeping it on the environment means there is no config artefact 
 | `TRACKER_DB_PASSWORD` | **yes** | *none, ever* | the database password (`docker-compose.yml` reads this) |
 | `TRACKER_ADDR` | no | `:8080` | listen address |
 | `TRACKER_LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `TRACKER_TLS_CERT_FILE` | for TLS | *none* | PEM certificate; **both** cert and key set → the server terminates HTTPS |
+| `TRACKER_TLS_KEY_FILE` | for TLS | *none* | PEM private key (a secret — mounted, never committed) |
+| `TRACKER_ALLOW_PLAINTEXT` | no | *unset* | `1` to run **without** TLS (dev, or behind a TLS-terminating proxy). Required if no cert/key is set, or the server refuses to start |
+| `TRACKER_RETENTION_DAYS` | no | `0` | drop `fixes` older than this many days on a daily timer; `0` = keep forever (no purge) |
 | `TRACKER_PUSH_PROVIDER` | no | *disabled* | `fcm` \| `unifiedpush` — the S6 push backend; unset = no push |
 | `TRACKER_FCM_PROJECT_ID` | when `fcm` | *none* | the Firebase project id the FCM v1 endpoint is scoped to |
 | `TRACKER_FCM_CREDENTIALS_FILE` | when `fcm` | *none* | path to the Google service-account JSON key (mounted, never committed) |
@@ -316,11 +324,54 @@ a password, and keeping it on the environment means there is no config artefact 
 guess. A tracker pointed at the wrong database is worse than one that would not boot, because the first
 is discovered in production.
 
+**It also refuses to start in plaintext by accident (S7).** With neither a `TRACKER_TLS_CERT_FILE` /
+`TRACKER_TLS_KEY_FILE` pair nor `TRACKER_ALLOW_PLAINTEXT=1`, it will not boot: location is maximally
+sensitive, so serving it unencrypted must be a *decision*, never an unset variable. A half-configured
+pair (cert without key, or vice versa) is refused too — that is a deploy that believes it is encrypted
+and is not. `tracker config-lint` is stricter than start-up: it fails on **any** plaintext endpoint
+(`ALLOW_PLAINTEXT` does not satisfy it) and additionally scans the repo for checked-in secrets, so a
+production config cannot ship plaintext by inheriting the dev default.
+
 **Push is disabled unless a backend is named**, and a named backend that is missing what it needs to send
 also refuses to start — `TRACKER_PUSH_PROVIDER=fcm` without a project id and a credentials file is a
 start-up error, not a server that boots and silently drops every alert. `unifiedpush` needs no global
 config (the endpoint is per-subscription). The FCM credentials file is **mounted at deploy time and never
 committed** — it is a secret.
+
+## Security & retention (S7)
+
+**TLS.** Point the server at a certificate and key, or run behind a proxy that terminates TLS:
+
+```bash
+export TRACKER_TLS_CERT_FILE=/etc/tracker/tls.crt
+export TRACKER_TLS_KEY_FILE=/etc/tracker/tls.key     # a secret — mount it, never commit it
+# …or, behind a TLS-terminating reverse proxy / for local dev:
+export TRACKER_ALLOW_PLAINTEXT=1
+```
+
+**Lint before you deploy.** `config-lint` fails on a plaintext endpoint *or* a checked-in secret, and it
+does **not** accept `ALLOW_PLAINTEXT` — a production config must terminate TLS:
+
+```bash
+TRACKER_TLS_CERT_FILE=/etc/tracker/tls.crt TRACKER_TLS_KEY_FILE=/etc/tracker/tls.key \
+  tracker config-lint --repo .
+```
+
+**Rotate or expire a token.** A new token is minted and the old one dies in the same write; `-ttl` gives
+it a lifetime (omit for "never expires"). An expired token authenticates nothing.
+
+```bash
+tracker rotate-device-token -id <device-id> -ttl 720h   # a phone's write token, valid 30 days
+tracker rotate-viewer-token -id <viewer-id>             # a viewer's read token, no expiry
+```
+
+**Retention.** Set `TRACKER_RETENTION_DAYS` to drop `fixes` older than that window on a daily timer (a
+`DROP` per whole month, transactional and all-or-nothing). Unset/`0` keeps history forever.
+
+**Least-privilege database roles.** Migration `00005` ships two group roles the operator builds login
+roles from — `tracker_readonly` (SELECT only) and `tracker_writer` (DML, no DDL) — so a reporting or
+analytics connection can never alter or delete a family's trail. The server's own connection is the
+schema **owner** (it provisions and drops partitions). See [`THREAT-MODEL.md`](THREAT-MODEL.md) §6.
 
 ## Development
 
@@ -374,20 +425,30 @@ Things that are true today and are not hidden:
 - **The stream token travels in the URL for browsers.** `EventSource` cannot set an `Authorization`
   header, so the Leaflet page passes the viewer token as `?token=`. URLs leak into logs and referrers;
   this is an interim trade mitigated by TLS (S7) and retired by the in-app map (C5). Programmatic
-  callers should use the header.
-- **HTTP/2 is not terminated yet.** SSE multiplexes cleanly over HTTP/2, which also lifts the
-  browser's ~6-connections-per-origin cap; tracker upgrades to it automatically once TLS lands (S7).
-  Until then, over plaintext HTTP/1.1, more than ~6 simultaneous tabs to the same origin can queue.
-- **No TLS yet.** The server terminates plaintext HTTP. Bearer tokens and location data must travel
-  over TLS in any real deployment; enforcing that (and the threat model) is S7.
+  callers should use the header. With TLS now enforceable (S7), that `?token=` no longer crosses the
+  wire in the clear; the log/referrer exposure remains until the in-app map (C5).
+- **HTTP/2 comes with TLS.** SSE multiplexes cleanly over HTTP/2, which also lifts the browser's
+  ~6-connections-per-origin cap. Go negotiates HTTP/2 automatically when the server terminates TLS
+  (S7), so configuring a cert/key pair gets it; over plaintext HTTP/1.1 (`ALLOW_PLAINTEXT`, or a proxy
+  that speaks HTTP/1.1 upstream), more than ~6 simultaneous tabs to the same origin can queue.
+- **TLS is enforced, but you supply the certificate.** The server terminates HTTPS when
+  `TRACKER_TLS_CERT_FILE` / `TRACKER_TLS_KEY_FILE` are set (TLS 1.2 floor), and it **refuses to start**
+  in plaintext unless `TRACKER_ALLOW_PLAINTEXT=1` says so on purpose (dev, or a TLS-terminating proxy).
+  It does not obtain or renew certificates — that is the operator's (or the proxy's) job. `tracker
+  config-lint` fails on any plaintext endpoint or a checked-in secret.
 - **Partitions are provisioned at start-up, with a two-month lookahead — plus an on-ingest safety
   net.** A process running longer than the lookahead would otherwise reach an unprovisioned month and
   reject every fix at the rollover: harmless before S2 (nothing ingested), silent data loss after it.
   So ingestion now provisions a fix's month **on demand** if it is missing, bounded by the timestamp
-  window (`[now−90d, now+24h]`) so untrusted input cannot create partitions without limit. That is a
-  reactive mitigation; the real fix — a maintenance tick alongside the retention job — is S7's.
-- **Retention purging is coarse.** History is dropped a whole month at a time, so a fix can outlive its
-  retention date by up to a month. Deliberate — see above.
+  window (`[now−90d, now+24h]`) so untrusted input cannot create partitions without limit. **S7 added
+  the retention purge on a daily timer** (dropping *old* months); forward provisioning still rides the
+  start-up lookahead plus this on-ingest safety net, so a dedicated forward-provisioning ticker remains
+  a later refinement rather than a correctness gap.
+- **Retention purging is coarse, and off by default.** With `TRACKER_RETENTION_DAYS` set, a daily job
+  **drops** whole monthly `fixes` partitions older than the window — a `DROP`, not a `DELETE`, so it is
+  transactional and all-or-nothing per month. Because partitions are monthly, a fix can outlive its
+  retention date by up to a month. Unset (`0`) runs no purge and keeps history forever — silently
+  deleting on a window nobody chose would be worse, so it is opt-in.
 - **Migrations are not safe against concurrent migrators.** Every instance migrates on boot, so two
   starting at once would race. The compose stack runs one replica; whoever scales it out owns fixing this.
 
@@ -396,8 +457,10 @@ Things that are true today and are not hidden:
 **Location is not end-to-end encrypted, and this project will not claim it is.** The server renders the
 map and runs the spatial queries, so it necessarily holds plaintext positions. What self-hosting buys you
 is *whose* server that is: the plaintext sits on yours rather than a company's. Anyone with
-administrative access to it can read the family's location history. A full threat model ships before the
-tracker is usable.
+administrative access to it can read the family's location history — this is **inherent, not a fixable
+gap**. The full, honest threat model — what tracker defends against (network eavesdropping, database
+theft of hashed tokens, third-party-cloud exposure) and what it cannot (a compromised server or
+malicious admin) — is in [`THREAT-MODEL.md`](THREAT-MODEL.md).
 
 **Push notifications carry no location.** A crossing alert says only *"Alice's phone arrived at School"* —
 the device name and Place name the family themselves chose, and the direction. It never carries a

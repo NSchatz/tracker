@@ -74,6 +74,18 @@ services:
       TRACKER_DATABASE_URL: postgres://tracker:${TRACKER_DB_PASSWORD:?set TRACKER_DB_PASSWORD — refusing to start with a default database password}@postgis:5432/tracker?sslmode=disable
       TRACKER_ADDR: ":8080"
       TRACKER_LOG_LEVEL: info
+      # EXPLICIT plaintext (roadmap §7). Location is maximally sensitive, so the server REFUSES to
+      # start with neither TLS nor this flag — a plaintext deployment must be a decision, never an
+      # accident of an unset variable. This dev/compose stack runs plaintext on the compose network
+      # and publishes 8080 for local use; a REAL deployment must terminate TLS, either by setting
+      # TRACKER_TLS_CERT_FILE / TRACKER_TLS_KEY_FILE here or by putting a TLS-terminating reverse
+      # proxy in front and keeping this flag. `tracker config-lint` fails on this flag on purpose, so
+      # a production config cannot ship plaintext by inheriting this file's convenience default.
+      TRACKER_ALLOW_PLAINTEXT: "1"
+      # Optional history retention: drop `fixes` partitions older than this many days on a daily
+      # timer. Unset (or 0) keeps history forever — the purge does not run. Uncomment to enable, e.g.
+      # keep 90 days:
+      # TRACKER_RETENTION_DAYS: "90"
     ports:
       - "8080:8080"
 
