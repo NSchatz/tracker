@@ -93,6 +93,66 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestLoadPushProvider(t *testing.T) {
+	// Clears the push env for a subtest, so the ambient environment can never make this go red.
+	clearPush := func(t *testing.T) {
+		t.Setenv(EnvPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(EnvPrefix+"PUSH_PROVIDER", "")
+		t.Setenv(EnvPrefix+"FCM_PROJECT_ID", "")
+		t.Setenv(EnvPrefix+"FCM_CREDENTIALS_FILE", "")
+	}
+
+	t.Run("disabled by default", func(t *testing.T) {
+		clearPush(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.PushProvider != PushProviderNone {
+			t.Errorf("PushProvider = %q, want disabled by default", c.PushProvider)
+		}
+	})
+
+	t.Run("unifiedpush needs no extra config", func(t *testing.T) {
+		clearPush(t)
+		t.Setenv(EnvPrefix+"PUSH_PROVIDER", "unifiedpush")
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load unifiedpush: %v", err)
+		}
+	})
+
+	t.Run("fcm requires project id and credentials file", func(t *testing.T) {
+		clearPush(t)
+		t.Setenv(EnvPrefix+"PUSH_PROVIDER", "fcm")
+
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FCM_PROJECT_ID") {
+			t.Fatalf("fcm without project id: err = %v, want it to name FCM_PROJECT_ID", err)
+		}
+
+		t.Setenv(EnvPrefix+"FCM_PROJECT_ID", "my-project")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FCM_CREDENTIALS_FILE") {
+			t.Fatalf("fcm without credentials: err = %v, want it to name FCM_CREDENTIALS_FILE", err)
+		}
+
+		t.Setenv(EnvPrefix+"FCM_CREDENTIALS_FILE", "/etc/tracker/fcm.json")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("fcm fully configured: %v", err)
+		}
+		if c.PushProvider != PushProviderFCM || c.FCMProjectID != "my-project" {
+			t.Errorf("config = %+v, want fcm/my-project", c)
+		}
+	})
+
+	t.Run("an unknown provider is refused", func(t *testing.T) {
+		clearPush(t)
+		t.Setenv(EnvPrefix+"PUSH_PROVIDER", "telegram")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PUSH_PROVIDER") {
+			t.Fatalf("unknown provider: err = %v, want a refusal naming PUSH_PROVIDER", err)
+		}
+	})
+}
+
 func TestRedactedHidesThePassword(t *testing.T) {
 	// The DSN is the only config value carrying a credential, and start-up logging is
 	// where it would leak. This test is the tripwire on that.

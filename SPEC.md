@@ -27,6 +27,10 @@ As of **S5**, tracker evaluates incoming fixes against a family's **"Places"** (
 **enter/exit** events. A viewer reads the Places and the event log over **`GET /v1/places`** and
 **`GET /v1/geofence-events`**; Places are managed by the operator CLI. See *Geofencing (S5)* below.
 
+As of **S6**, a viewer registers its phone over **`POST /v1/push-subscriptions`** and a crossing is
+delivered as a **high-priority FCM HTTP v1** message, or via **UnifiedPush/ntfy** for a degoogled
+deployment. Delivery is best-effort and off unless a backend is configured. See *Push alerts (S6)* below.
+
 ---
 
 ## Authentication
@@ -317,6 +321,57 @@ tracker remove-place -family <family-id> -id <place-id>
 
 A self-intersecting ring (a "bowtie") or an out-of-range vertex is refused — such a ring encloses no
 area and would be a Place that never fires.
+
+---
+
+## Push alerts (S6) — `POST /v1/push-subscriptions`
+
+A **viewer** registers the push endpoint of its phone so a family's geofence crossings are delivered to
+it. Registration is a **viewer** write — the viewer it registers under is the authenticated caller, never
+a field in the body — so a viewer can only register an endpoint under itself.
+
+**Request** (viewer token; strict decode — unknown fields and trailing data are rejected):
+
+```json
+{"provider": "fcm", "token": "the-endpoint-address"}
+```
+
+- **`provider`** — `"fcm"` or `"unifiedpush"` (required). Any other value is a `400`.
+- **`token`** — the routing address (required, non-empty). Its meaning depends on `provider`:
+  - **`fcm`** — the app's FCM **registration token** (the opaque device id from Firebase).
+  - **`unifiedpush`** — the distributor-issued **endpoint URL** the server POSTs to.
+
+**Success** — `201` with the stored subscription's id and provider:
+
+```json
+{"id": "…", "provider": "fcm"}
+```
+
+Registration is **idempotent** on `(provider, token)`: the same phone re-registering (a fresh launch, a
+rotated FCM token re-sent) refreshes the existing row and moves it to the presenting viewer — it never
+creates a duplicate that would push the same phone twice per crossing.
+
+### What a push contains
+
+On an enter/exit, every registered endpoint in the crossing device's family receives one message.
+Whatever the backend, the alert carries the same content:
+
+- **title** — the device's name (e.g. `"Alice's phone"`).
+- **body** — the crossing in the family's own words (e.g. `"Alice's phone arrived at School"`).
+- **high priority** — FCM sends `android.priority: "high"` (the only priority that wakes a closed app on
+  an idle device); UnifiedPush carries the same intent.
+- **collapse key** — per **(device, Place)**, so a rapid enter→exit collapses to the latest state.
+- **data** — a small structured map: `type=geofence`, `device_id`, `place_id`, `place_name`,
+  `transition`, `ts`. **No coordinate, accuracy, or raw fix datum is ever included** — a push carries
+  only the family's own labels (§5.3).
+
+### Delivery guarantees (there are none, by design)
+
+Delivery is **best-effort** — FCM does not guarantee it and caps pending messages, so a missed alert is
+possible; the freshest state arrives on the device's next crossing. A push **never blocks or fails
+ingestion**: it runs on a bounded, retrying background worker, a persistent failure is logged (not
+crashed), and a backlog past the pending cap is dropped. Push is **disabled** unless the deployment
+configures a backend (`TRACKER_PUSH_PROVIDER`); see the README's *Configuration*.
 
 ---
 

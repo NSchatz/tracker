@@ -4,22 +4,25 @@ A **self-hosted, Life360-style family location tracker**. An Android phone repor
 server *you* run; family members see each other on a live map and get alerts when someone arrives at or
 leaves a place you have defined.
 
-> **Status: early. The server spine, its data model, ingestion, a read API, a live map, and — as of
-> S5 — server-side geofencing.**
+> **Status: early. The server spine, its data model, ingestion, a read API, a live map, server-side
+> geofencing, and — as of S6 — push alerts.**
 > This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
 > viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, a
 > **token-authenticated ingestion surface** (per-device enrollment, `POST /v1/fixes`, and an interim
 > `POST /owntracks` adapter), a **family-scoped read API** (`GET /v1/positions`,
 > `GET /v1/devices/{id}/history`, `GET /v1/near`) behind a separate **viewer** credential, a
-> **live-map SSE stream** (`GET /v1/stream` + a Leaflet page at `GET /map`), and now **server-side
-> geofencing**: operator-managed "Places", a stream evaluator that records **enter/exit** events off
-> the fix stream, and viewer reads for both (`GET /v1/places`, `GET /v1/geofence-events`). **Location
-> data goes in, reads back, streams to a live map, and now fires enter/exit events end-to-end.**
-> Those events are **logged, not yet delivered** — push (FCM/UnifiedPush) is S6. There is still **no
-> Android client**; the native Kotlin app (C-track) is the phase that follows, so today a real phone
-> drives the server through the interim OwnTracks adapter. It is not a finished tracker, and this
-> README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the
-> umbrella at `operations/roadmaps/tracker.md`.
+> **live-map SSE stream** (`GET /v1/stream` + a Leaflet page at `GET /map`), **server-side
+> geofencing** (operator-managed "Places", a stream evaluator that records **enter/exit** events off
+> the fix stream, and viewer reads for both — `GET /v1/places`, `GET /v1/geofence-events`), and now
+> **push alerts**: a viewer registers its phone (`POST /v1/push-subscriptions`) and a crossing is
+> delivered as a **high-priority FCM HTTP v1** message — or via **UnifiedPush/ntfy** for a degoogled
+> deployment. **Location data goes in, reads back, streams to a live map, fires enter/exit events, and
+> now pushes them to registered phones end-to-end.** Delivery is **best-effort** (FCM's own contract),
+> and push is **off unless a backend is configured**. There is still **no Android client**; the native
+> Kotlin app (C-track) is the phase that follows, so today a real phone drives the server through the
+> interim OwnTracks adapter. It is not a finished tracker, and this README will say so until it is. The
+> wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the umbrella at
+> `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -45,6 +48,7 @@ it rather than trusting it.
 | `fixes` | the location history: `geography(Point,4326)`, **partitioned by month** |
 | `geofences` | server-side "Places": `geography(Polygon,4326)` |
 | `geofence_events` | the **append-only** enter/exit log, one row per crossing (S5) |
+| `push_subscriptions` | a viewer's registered push endpoint — where a crossing is delivered (S6) |
 
 Three decisions in there are load-bearing, and each is pinned by a test that fails if it is undone.
 
@@ -228,6 +232,40 @@ Four properties are load-bearing, and each is pinned by a test:
   device stayed inside; if the boundary-crossing fix never arrives, the event is attributed to a later
   fix — it is never invented, and a device tracker only ever *saw* inside a Place gets no phantom enter.
 
+## Push alerts (S6)
+
+A crossing that S5 records is delivered to the family's **watchers** as a push. A watcher (a **viewer**)
+registers the push endpoint of its phone, and every enter/exit for that family is sent to it.
+
+- **`POST /v1/push-subscriptions`** — register (or refresh) an endpoint (viewer token). Body:
+  `{"provider": "fcm" | "unifiedpush", "token": "…"}`. For **fcm**, `token` is the app's FCM
+  registration token; for **unifiedpush**, it is the distributor-issued endpoint URL. Re-registering the
+  same endpoint is idempotent — it never duplicates. See [`SPEC.md`](SPEC.md) for the exact shapes.
+
+Two backends, one contract (roadmap §1 — FCM by default, UnifiedPush/ntfy for a degoogled deployment).
+A family gets the **same alert** either way: title, body, high priority, a collapse key, and a small
+structured `data` map. Which one a deployment uses is a config choice (below); push is **off** until one
+is set.
+
+The properties that matter, each pinned by a test:
+
+- **High priority, always.** The FCM message sets `android.priority: "high"` — only a high-priority push
+  wakes a closed app on an idle (Doze) device, which is the entire point of an arrival alert.
+- **Collapsible "latest state."** The collapse key is per **(device, Place)**, so a rapid enter→exit
+  collapses to the newest state rather than buzzing a phone twice for a crossing it can no longer act on.
+- **A push NEVER blocks or fails ingestion.** Delivery runs on a bounded, retrying background worker: a
+  slow or dead push backend cannot slow a fix's ingest, a send that fails is retried within limits and
+  then **logged, not crashed**, and a backlog past the **pending cap** is dropped rather than growing
+  without limit. Delivery is best-effort — FCM's own contract — and tracker does not pretend to more.
+- **No location in the body.** A notification carries only the family's **own labels** — the device's
+  name, the Place's name, the direction — and never a coordinate, accuracy, or raw fix datum (§5.3). The
+  family named the device and the Place; a latitude is not something they opted to broadcast.
+
+> **The owner-side real-device check is deferred to the owner.** CI proves the pipeline against a mock
+> FCM (request shape, high priority, collapse key, failure handling) and a UnifiedPush parity test; that
+> a real push lands on a real handset is a manual check the deployment owner runs with their own Firebase
+> project — it confirms, it does not gate.
+
 ## Running it
 
 ```bash
@@ -270,10 +308,19 @@ a password, and keeping it on the environment means there is no config artefact 
 | `TRACKER_DB_PASSWORD` | **yes** | *none, ever* | the database password (`docker-compose.yml` reads this) |
 | `TRACKER_ADDR` | no | `:8080` | listen address |
 | `TRACKER_LOG_LEVEL` | no | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `TRACKER_PUSH_PROVIDER` | no | *disabled* | `fcm` \| `unifiedpush` — the S6 push backend; unset = no push |
+| `TRACKER_FCM_PROJECT_ID` | when `fcm` | *none* | the Firebase project id the FCM v1 endpoint is scoped to |
+| `TRACKER_FCM_CREDENTIALS_FILE` | when `fcm` | *none* | path to the Google service-account JSON key (mounted, never committed) |
 
 **The server refuses to start** without a valid `TRACKER_DATABASE_URL` — no default, no empty string, no
 guess. A tracker pointed at the wrong database is worse than one that would not boot, because the first
 is discovered in production.
+
+**Push is disabled unless a backend is named**, and a named backend that is missing what it needs to send
+also refuses to start — `TRACKER_PUSH_PROVIDER=fcm` without a project id and a credentials file is a
+start-up error, not a server that boots and silently drops every alert. `unifiedpush` needs no global
+config (the endpoint is per-subscription). The FCM credentials file is **mounted at deploy time and never
+committed** — it is a secret.
 
 ## Development
 
@@ -295,15 +342,17 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **Data goes in, reads back, streams to a live map, and fires geofence events — but there is no
-  Android client yet.** Ingestion (S2), a family-scoped read API (S3), the live-map SSE stream +
-  Leaflet page (S4), and server-side geofencing (S5) exist; the native Kotlin app (C-track) is the
-  phase that follows, so today a real phone drives the server through the interim OwnTracks adapter —
-  which is exactly that, interim.
-- **Geofence events are logged, not delivered.** A crossing appends to `geofence_events` and is
-  readable at `GET /v1/geofence-events`, but nothing pushes it to a phone yet — high-priority FCM /
-  UnifiedPush delivery is S6. Freshness is bounded by the last received fix: an offline phone's
-  crossings fire when its buffered fixes arrive.
+- **Data goes in, reads back, streams to a live map, fires geofence events, and pushes them — but there
+  is no Android client yet.** Ingestion (S2), a family-scoped read API (S3), the live-map SSE stream +
+  Leaflet page (S4), server-side geofencing (S5), and push alerts (S6) exist; the native Kotlin app
+  (C-track) is the phase that follows, so today a real phone drives the server through the interim
+  OwnTracks adapter — which is exactly that, interim.
+- **Push delivery is best-effort, and off by default.** A crossing is delivered to registered phones
+  (S6) via FCM or UnifiedPush, but delivery is **not guaranteed** — FCM's own contract — and a missed
+  alert is possible; the freshest state arrives on the device's next crossing. Push is disabled unless a
+  backend is configured, and freshness is still bounded by the last received fix: an offline phone's
+  crossings — and their pushes — fire when its buffered fixes arrive. Whether a real push reaches a real
+  handset is the owner's manual real-device check (CI proves the pipeline against a mock).
 - **Enter/exit is debounced, so it is deliberately not instant.** A crossing must dwell 90 s before it
   is recorded — the price of not alerting on GPS jitter. And the evaluator advances a (device, Place)'s
   state *forward* in `ts`: a fix arriving out of order and older than that pair's latest recorded
@@ -349,3 +398,10 @@ map and runs the spatial queries, so it necessarily holds plaintext positions. W
 is *whose* server that is: the plaintext sits on yours rather than a company's. Anyone with
 administrative access to it can read the family's location history. A full threat model ships before the
 tracker is usable.
+
+**Push notifications carry no location.** A crossing alert says only *"Alice's phone arrived at School"* —
+the device name and Place name the family themselves chose, and the direction. It never carries a
+coordinate, an accuracy, or any raw fix datum, so a family's precise whereabouts never transit a push
+provider's servers (§5.3). A push endpoint is a routing address the phone can rotate, not a credential and
+not location data, so it is stored in the clear — losing it leaks "this endpoint can be pushed to", not a
+family's movements.

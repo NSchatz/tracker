@@ -34,6 +34,7 @@ import (
 	"github.com/NSchatz/tracker/internal/auth"
 	"github.com/NSchatz/tracker/internal/config"
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/NSchatz/tracker/internal/push"
 	"github.com/NSchatz/tracker/internal/server"
 	"github.com/NSchatz/tracker/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -127,9 +128,18 @@ func runServe() error {
 	}
 	logger.Info("fix partitions ready", "partitions", names)
 
+	// S6 push delivery. Disabled unless a backend is configured (§10 open question #1 — the default is
+	// a human choice, so the default is none). When enabled, the dispatcher owns a worker goroutine
+	// that must be drained on shutdown; a nil notifier tells server.New to substitute a no-op.
+	notifier, closeNotifier, err := buildPushNotifier(cfg, pool, logger)
+	if err != nil {
+		return err
+	}
+	defer closeNotifier()
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(pool, logger),
+		Handler:           server.New(pool, notifier, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -160,6 +170,42 @@ func runServe() error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// buildPushNotifier assembles the S6 push pipeline from config: a per-provider sender, a bounded
+// retrying dispatcher in front of it, and the EventNotifier the server calls on each crossing. It
+// returns a nil notifier (server.New substitutes a no-op) and a no-op closer when push is disabled, so
+// the caller can always `defer closeNotifier()` unconditionally.
+//
+// The closer drains the dispatcher's worker on shutdown. Building the FCM token source here — reading
+// the service-account key at start-up — is deliberate: a push backend that cannot authenticate should
+// fail the boot (the fail-safe), not the first alert hours later.
+func buildPushNotifier(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) (server.Notifier, func(), error) {
+	noop := func() {}
+
+	var sender push.Sender
+	switch cfg.PushProvider {
+	case config.PushProviderNone:
+		logger.Info("push delivery disabled (no TRACKER_PUSH_PROVIDER set)")
+		return nil, noop, nil
+	case config.PushProviderFCM:
+		tokens, err := push.NewServiceAccountTokenSourceFromFile(cfg.FCMCredentialsFile, nil)
+		if err != nil {
+			return nil, noop, fmt.Errorf("configure FCM push: %w", err)
+		}
+		sender = push.NewFCMSender(cfg.FCMProjectID, tokens, nil)
+		logger.Info("push delivery enabled", "provider", "fcm", "project", cfg.FCMProjectID)
+	case config.PushProviderUnifiedPush:
+		sender = push.NewUnifiedPushSender(nil)
+		logger.Info("push delivery enabled", "provider", "unifiedpush")
+	default:
+		// config.validate already rejected an unknown provider; this is defence in depth.
+		return nil, noop, fmt.Errorf("unknown push provider %q", cfg.PushProvider)
+	}
+
+	disp := push.NewDispatcher(map[string]push.Sender{cfg.PushProvider: sender}, logger)
+	notifier := push.NewEventNotifier(pool, disp, logger)
+	return notifier, disp.Close, nil
 }
 
 // runCreateFamily creates a family and prints its id — the id `enroll` needs.

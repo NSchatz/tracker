@@ -38,7 +38,31 @@ type Config struct {
 
 	// LogLevel is one of debug|info|warn|error.
 	LogLevel string
+
+	// PushProvider selects the S6 push backend: "" (disabled — the default), "fcm", or "unifiedpush".
+	// Push is OPTIONAL: a deployment that sets nothing still ingests, evaluates and serves the geofence
+	// event log — it just delivers no alerts. This mirrors roadmap §10 open question #1: the default
+	// backend is a human choice, so the default here is "no backend", never a silent one.
+	PushProvider string
+
+	// FCMProjectID is the Firebase project id the FCM v1 endpoint is scoped to. Required when
+	// PushProvider is "fcm"; ignored otherwise.
+	FCMProjectID string
+
+	// FCMCredentialsFile is the path to the Google service-account JSON key the FCM sender mints access
+	// tokens from. Required when PushProvider is "fcm"; ignored otherwise. The file is read at start-up
+	// (the token source fails loudly if it is missing or malformed), never a secret in the repo.
+	FCMCredentialsFile string
 }
+
+// Push backend identifiers. These match internal/store's push_provider values and internal/push's
+// senders; a config that names a backend the deployment cannot build is refused at Load, not
+// discovered at the first crossing.
+const (
+	PushProviderNone        = ""
+	PushProviderFCM         = "fcm"
+	PushProviderUnifiedPush = "unifiedpush"
+)
 
 // ShutdownTimeout bounds how long a graceful shutdown may take before in-flight requests
 // are abandoned. A constant, not a knob: nothing in S0's acceptance asked for it to be
@@ -59,9 +83,12 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		DatabaseURL: dsn,
-		Addr:        envOr(EnvPrefix+"ADDR", ":8080"),
-		LogLevel:    envOr(EnvPrefix+"LOG_LEVEL", "info"),
+		DatabaseURL:        dsn,
+		Addr:               envOr(EnvPrefix+"ADDR", ":8080"),
+		LogLevel:           envOr(EnvPrefix+"LOG_LEVEL", "info"),
+		PushProvider:       strings.TrimSpace(os.Getenv(EnvPrefix + "PUSH_PROVIDER")),
+		FCMProjectID:       strings.TrimSpace(os.Getenv(EnvPrefix + "FCM_PROJECT_ID")),
+		FCMCredentialsFile: strings.TrimSpace(os.Getenv(EnvPrefix + "FCM_CREDENTIALS_FILE")),
 	}
 
 	if err := c.validate(); err != nil {
@@ -93,6 +120,24 @@ func (c *Config) validate() error {
 
 	if c.Addr == "" {
 		return fmt.Errorf("%sADDR is empty", EnvPrefix)
+	}
+
+	// Push config: the fail-safe applies to the CHOSEN backend. Disabled is fine (no push); a named
+	// backend that is missing what it needs to send refuses to start, rather than booting and silently
+	// dropping every alert. An unknown provider is likewise a start-up error, not a guess.
+	switch c.PushProvider {
+	case PushProviderNone, PushProviderUnifiedPush:
+		// Disabled, or UnifiedPush (whose endpoint is per-subscription, so it needs no global config).
+	case PushProviderFCM:
+		if c.FCMProjectID == "" {
+			return fmt.Errorf("%sPUSH_PROVIDER=fcm needs %sFCM_PROJECT_ID", EnvPrefix, EnvPrefix)
+		}
+		if c.FCMCredentialsFile == "" {
+			return fmt.Errorf("%sPUSH_PROVIDER=fcm needs %sFCM_CREDENTIALS_FILE", EnvPrefix, EnvPrefix)
+		}
+	default:
+		return fmt.Errorf("%sPUSH_PROVIDER %q is not one of \"\" (disabled), %q, or %q",
+			EnvPrefix, c.PushProvider, PushProviderFCM, PushProviderUnifiedPush)
 	}
 	return nil
 }

@@ -236,7 +236,10 @@ type reading struct {
 
 // EvaluateDeviceGeofences recomputes the debounced enter/exit transitions for a device against every
 // Place in its family, around the ts of an incoming fix, and appends any newly-confirmed ones to the
-// append-only geofence_events log. It returns the number of events it appended.
+// append-only geofence_events log. It returns the events it actually appended — the newly-recorded
+// crossings, in evaluation order — which is what S6's push fan-out delivers. An idempotent
+// re-evaluation that writes nothing returns an empty slice, so a replayed fix produces no event AND
+// no push.
 //
 // It is called from the ingestion path after a fix is stored (see server.ingest), so the log grows
 // straight off the fix stream. It is IDEMPOTENT — re-running it for the same stored fixes appends
@@ -246,46 +249,51 @@ type reading struct {
 // `around` is the ts of the fix that triggered the evaluation; `debounce` is the dwell the caller
 // wants (the server passes GeofenceDebounce). The evaluation is per-geofence and independent, so a
 // failure to append one Place's transition does not abandon the others.
-func EvaluateDeviceGeofences(ctx context.Context, q db.Querier, deviceID string, around time.Time, debounce time.Duration) (int, error) {
+func EvaluateDeviceGeofences(ctx context.Context, q db.Querier, deviceID string, around time.Time, debounce time.Duration) ([]GeofenceEvent, error) {
 	// The Places to evaluate are the device's family's, resolved through the device — the evaluator
-	// needs no family_id passed in, and cannot be handed the wrong one.
+	// needs no family_id passed in, and cannot be handed the wrong one. The name is read here so an
+	// appended event carries it (S6 puts the Place name in the notification, and reading it once with
+	// the id is cheaper than a second lookup per crossing).
 	rows, err := q.Query(ctx, `
-		SELECT g.id
+		SELECT g.id, g.name
 		FROM geofences g
 		JOIN devices d ON d.family_id = g.family_id
 		WHERE d.id = $1
 		ORDER BY g.id`, deviceID)
 	if err != nil {
-		return 0, fmt.Errorf("list geofences for device %s: %w", deviceID, err)
+		return nil, fmt.Errorf("list geofences for device %s: %w", deviceID, err)
 	}
-	var geofenceIDs []string
+	type place struct{ id, name string }
+	var places []place
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var p place
+		if err := rows.Scan(&p.id, &p.name); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("scan geofence id: %w", err)
+			return nil, fmt.Errorf("scan geofence id: %w", err)
 		}
-		geofenceIDs = append(geofenceIDs, id)
+		places = append(places, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("list geofences for device %s: %w", deviceID, err)
+		return nil, fmt.Errorf("list geofences for device %s: %w", deviceID, err)
 	}
 
-	appended := 0
-	for _, gid := range geofenceIDs {
-		n, err := evaluateOneGeofence(ctx, q, deviceID, gid, around, debounce)
+	var appended []GeofenceEvent
+	for _, p := range places {
+		evs, err := evaluateOneGeofence(ctx, q, deviceID, p.id, p.name, around, debounce)
 		if err != nil {
 			return appended, err
 		}
-		appended += n
+		appended = append(appended, evs...)
 	}
 	return appended, nil
 }
 
 // evaluateOneGeofence is EvaluateDeviceGeofences for a single Place: read the prior state, read the
 // local neighbourhood of fixes in ts order, run the dwell state machine, and append what it confirms.
-func evaluateOneGeofence(ctx context.Context, q db.Querier, deviceID, geofenceID string, around time.Time, debounce time.Duration) (int, error) {
+// It returns the events it newly appended (those the INSERT actually wrote — a re-derived transition
+// absorbed by ON CONFLICT is not returned), each stamped with the Place's name for the notification.
+func evaluateOneGeofence(ctx context.Context, q db.Querier, deviceID, geofenceID, geofenceName string, around time.Time, debounce time.Duration) ([]GeofenceEvent, error) {
 	// The prior state: the latest recorded transition for this (device, place). Its type IS the
 	// confirmed state (enter → inside, exit → outside), and its fix_ts is the floor below which the
 	// forward-only evaluator will not splice new events (see the file header). Absent → the device is
@@ -300,7 +308,7 @@ func evaluateOneGeofence(ctx context.Context, q db.Querier, deviceID, geofenceID
 		ORDER BY fix_ts DESC
 		LIMIT 1`, deviceID, geofenceID).Scan(&lastTransition, &lastTS); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("read last geofence event for device %s place %s: %w", deviceID, geofenceID, err)
+			return nil, fmt.Errorf("read last geofence event for device %s place %s: %w", deviceID, geofenceID, err)
 		}
 		haveEvent = false
 	}
@@ -337,25 +345,25 @@ func evaluateOneGeofence(ctx context.Context, q db.Querier, deviceID, geofenceID
 		ORDER BY ts ASC`,
 		deviceID, geofenceID, lastTS, around, geofenceEvalNeighbours)
 	if err != nil {
-		return 0, fmt.Errorf("read fix neighbourhood for device %s place %s: %w", deviceID, geofenceID, err)
+		return nil, fmt.Errorf("read fix neighbourhood for device %s place %s: %w", deviceID, geofenceID, err)
 	}
 	var readings []reading
 	for fixRows.Next() {
 		var r reading
 		if err := fixRows.Scan(&r.ts, &r.inside); err != nil {
 			fixRows.Close()
-			return 0, fmt.Errorf("scan fix containment: %w", err)
+			return nil, fmt.Errorf("scan fix containment: %w", err)
 		}
 		readings = append(readings, r)
 	}
 	fixRows.Close()
 	if err := fixRows.Err(); err != nil {
-		return 0, fmt.Errorf("read fix neighbourhood for device %s place %s: %w", deviceID, geofenceID, err)
+		return nil, fmt.Errorf("read fix neighbourhood for device %s place %s: %w", deviceID, geofenceID, err)
 	}
 
 	transitions := confirmTransitions(readings, seedInside, haveEvent, debounce)
 
-	appended := 0
+	var appended []GeofenceEvent
 	for _, tr := range transitions {
 		kind := "exit"
 		if tr.enter {
@@ -371,7 +379,17 @@ func evaluateOneGeofence(ctx context.Context, q db.Querier, deviceID, geofenceID
 		if err != nil {
 			return appended, fmt.Errorf("append %s event for device %s place %s: %w", kind, deviceID, geofenceID, err)
 		}
-		appended += int(tag.RowsAffected())
+		// Only a row the INSERT actually wrote is a NEW crossing worth a push; a transition absorbed by
+		// ON CONFLICT was already recorded (and already delivered) on the fix that first produced it.
+		if tag.RowsAffected() == 1 {
+			appended = append(appended, GeofenceEvent{
+				DeviceID:     deviceID,
+				GeofenceID:   geofenceID,
+				GeofenceName: geofenceName,
+				Transition:   kind,
+				FixTS:        tr.ts,
+			})
+		}
 	}
 	return appended, nil
 }
