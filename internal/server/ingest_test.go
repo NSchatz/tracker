@@ -24,6 +24,7 @@ import (
 
 	"github.com/NSchatz/tracker/internal/auth"
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/NSchatz/tracker/internal/push"
 	"github.com/NSchatz/tracker/internal/server"
 	"github.com/NSchatz/tracker/internal/store"
 	"github.com/NSchatz/tracker/internal/testsupport"
@@ -31,10 +32,41 @@ import (
 )
 
 // harness is a migrated PostGIS, a live handler over it, and helpers to enroll devices and post.
+//
+// It wires the REAL S6 push pipeline — an EventNotifier over a dispatcher whose sole sender is a
+// capturing stub registered under both providers — so a crossing posted through /v1/fixes actually
+// fans out, builds a notification, and delivers it, and a test can read what landed on `pushes`. The
+// stub stands in for FCM/UnifiedPush (a real backend cannot run in CI); everything up to the wire is
+// the production path.
 type harness struct {
 	t       *testing.T
 	pool    *pgxpool.Pool
 	handler http.Handler
+	pushes  *capturingSender
+}
+
+// capturingSender is a push.Sender that records every delivery to a buffered channel instead of
+// hitting a network backend, so a test can assert what a crossing produced.
+type capturingSender struct {
+	ch chan push.Delivery
+}
+
+func (c *capturingSender) Send(_ context.Context, d push.Delivery) error {
+	c.ch <- d
+	return nil
+}
+
+// nextPush returns the next delivered push, failing the test if none arrives promptly — delivery is
+// asynchronous (the dispatcher's worker), so this waits rather than assuming it has already happened.
+func (h *harness) nextPush(t *testing.T) push.Delivery {
+	t.Helper()
+	select {
+	case d := <-h.pushes.ch:
+		return d
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a push delivery, none arrived within 3s")
+		return push.Delivery{}
+	}
 }
 
 func newHarness(t *testing.T) *harness {
@@ -51,7 +83,15 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(pool.Close)
 
-	return &harness{t: t, pool: pool, handler: server.New(pool, discardLogger())}
+	sender := &capturingSender{ch: make(chan push.Delivery, 64)}
+	disp := push.NewDispatcher(map[string]push.Sender{
+		store.PushProviderFCM:         sender,
+		store.PushProviderUnifiedPush: sender,
+	}, discardLogger())
+	t.Cleanup(disp.Close)
+	notifier := push.NewEventNotifier(pool, disp, discardLogger())
+
+	return &harness{t: t, pool: pool, handler: server.New(pool, notifier, discardLogger()), pushes: sender}
 }
 
 // enroll creates a family and a device in it, returning the device id and its freshly issued token —

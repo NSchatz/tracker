@@ -39,6 +39,24 @@ type DB interface {
 	db.Querier
 }
 
+// Notifier is the server's view of S6 push delivery: hand it the crossings the evaluator just
+// recorded and it fans them out to the family's registered phones. It is deliberately fire-and-forget
+// — no return value — because a push must NEVER block or fail ingestion (§5.3): the implementation
+// (internal/push.EventNotifier) enqueues onto a bounded, retrying worker and returns immediately.
+//
+// Keeping it an interface is what lets the ingestion tests run without a real push backend (a
+// capturing stub stands in) and lets a deployment with push disabled drop in a no-op.
+type Notifier interface {
+	NotifyGeofenceEvents(ctx context.Context, dev store.Device, events []store.GeofenceEvent)
+}
+
+// noopNotifier is the Notifier a deployment with push disabled (or a test that does not care) gets. It
+// does nothing, so a crossing is still recorded to the event log and readable — there is simply no
+// push. New substitutes it for a nil Notifier so no call site has to nil-check.
+type noopNotifier struct{}
+
+func (noopNotifier) NotifyGeofenceEvents(context.Context, store.Device, []store.GeofenceEvent) {}
+
 // healthTimeout bounds the health check's database ping. A /healthz that hangs is worse than one
 // that fails: an orchestrator waiting on it cannot tell "slow" from "wedged".
 const healthTimeout = 2 * time.Second
@@ -48,8 +66,14 @@ const healthTimeout = 2 * time.Second
 // working. http.MaxBytesReader turns an over-large body into a clean 400, not an OOM.
 const maxBodyBytes = 64 << 10
 
-// New builds the HTTP handler.
-func New(database DB, logger *slog.Logger) http.Handler {
+// New builds the HTTP handler. notifier delivers S6 push alerts for the crossings ingestion records;
+// a nil notifier means push is disabled (a no-op is substituted), so a deployment without a push
+// backend still ingests, evaluates and serves the event log — it just sends no alerts.
+func New(database DB, notifier Notifier, logger *slog.Logger) http.Handler {
+	if notifier == nil {
+		notifier = noopNotifier{}
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -67,8 +91,8 @@ func New(database DB, logger *slog.Logger) http.Handler {
 	// device_id in either payload for a caller to forge.
 	r.Group(func(r chi.Router) {
 		r.Use(requireDevice(database, logger))
-		r.Post("/v1/fixes", postFix(database, logger))
-		r.Post("/owntracks", postOwnTracks(database, logger))
+		r.Post("/v1/fixes", postFix(database, notifier, logger))
+		r.Post("/owntracks", postOwnTracks(database, notifier, logger))
 	})
 
 	// The read surface (S3). Every route requires a valid VIEWER token — a separate credential from
@@ -86,6 +110,12 @@ func New(database DB, logger *slog.Logger) http.Handler {
 		// over HTTP (§7 — see geofence.go).
 		r.Get("/v1/places", getPlaces(database, logger))
 		r.Get("/v1/geofence-events", getGeofenceEvents(database, logger))
+
+		// The S6 push-registration surface: a viewer registers the push endpoint of its phone so a
+		// family's crossings can reach it. It is a WRITE by the viewer credential — a viewer registers
+		// only under itself (the viewer id comes from the token, never the body) — which is why it sits
+		// in the viewer group rather than behind the device token.
+		r.Post("/v1/push-subscriptions", registerPushSubscription(database, logger))
 	})
 
 	// The live-map surface (S4). GET /v1/stream is an SSE feed of a family's position updates; it
@@ -183,7 +213,7 @@ type fixRequest struct {
 
 // postFix ingests a first-party report. Strict: unknown fields and trailing data are rejected, so a
 // typo'd or malformed payload is a typed 400 that stores nothing, never a silently half-read guess.
-func postFix(database DB, logger *slog.Logger) http.HandlerFunc {
+func postFix(database DB, notifier Notifier, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req fixRequest
 		if err := decodeStrict(w, r, &req); err != nil {
@@ -212,7 +242,7 @@ func postFix(database DB, logger *slog.Logger) http.HandlerFunc {
 			MsgID:         req.MsgID,
 		}
 
-		inserted, ok := ingest(w, r, database, logger, f)
+		inserted, ok := ingest(w, r, database, notifier, logger, f)
 		if !ok {
 			return
 		}
@@ -246,7 +276,7 @@ type owntracksRequest struct {
 // validation, same idempotent upsert, same partition mitigation — but speaks OwnTracks' wire format
 // and honours its response contract: a 2xx with a JSON array body (here always `[]`, "nothing to
 // send back"), because the app retries on anything else.
-func postOwnTracks(database DB, logger *slog.Logger) http.HandlerFunc {
+func postOwnTracks(database DB, notifier Notifier, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		var req owntracksRequest
@@ -294,7 +324,7 @@ func postOwnTracks(database DB, logger *slog.Logger) http.HandlerFunc {
 			TriggerReason: req.T,
 		}
 
-		if _, ok := ingest(w, r, database, logger, f); !ok {
+		if _, ok := ingest(w, r, database, notifier, logger, f); !ok {
 			return
 		}
 		writeOwnTracksAck(w, logger)
@@ -305,7 +335,7 @@ func postOwnTracks(database DB, logger *slog.Logger) http.HandlerFunc {
 // response itself. It returns (inserted, ok): on ok=false it has already written the error and the
 // caller must stop; on ok=true it has written NOTHING, leaving the success response to the caller
 // (first-party JSON vs the OwnTracks array), which differ.
-func ingest(w http.ResponseWriter, r *http.Request, database DB, logger *slog.Logger, f store.Fix) (inserted, ok bool) {
+func ingest(w http.ResponseWriter, r *http.Request, database DB, notifier Notifier, logger *slog.Logger, f store.Fix) (inserted, ok bool) {
 	inserted, err := store.IngestFix(r.Context(), database, f, time.Now())
 	if err != nil {
 		switch {
@@ -327,8 +357,17 @@ func ingest(w http.ResponseWriter, r *http.Request, database DB, logger *slog.Lo
 	// when its retry would find the fix already stored and skip evaluation again — would be the wrong
 	// trade. So it is logged, loudly, and the fix's success stands.
 	if inserted {
-		if _, err := store.EvaluateDeviceGeofences(r.Context(), database, f.DeviceID, f.TS, store.GeofenceDebounce); err != nil {
+		events, err := store.EvaluateDeviceGeofences(r.Context(), database, f.DeviceID, f.TS, store.GeofenceDebounce)
+		if err != nil {
 			logger.ErrorContext(r.Context(), "evaluate geofences", "error", err, "device_id", f.DeviceID)
+		}
+		// S6: hand the newly-recorded crossings to push delivery. The device carries its own family and
+		// name (from the auth lookup), which is all the notifier needs to fan out and title the alert.
+		// This is fire-and-forget by contract — the notifier enqueues onto a bounded worker and returns
+		// at once — so a push backend can never block or fail the fix ingest. Events that failed to
+		// derive above are simply absent here, so a partial evaluation still pushes what it did record.
+		if len(events) > 0 {
+			notifier.NotifyGeofenceEvents(r.Context(), deviceFrom(r.Context()), events)
 		}
 	}
 	return inserted, true

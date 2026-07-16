@@ -31,7 +31,7 @@ func discardLogger() *slog.Logger {
 func TestHealthzReportsOKWhenTheDatabaseIsReachable(t *testing.T) {
 	t.Parallel()
 
-	h := server.New(stubDB{err: nil}, discardLogger())
+	h := server.New(stubDB{err: nil}, nil, discardLogger())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -57,7 +57,7 @@ func TestHealthzReportsOKWhenTheDatabaseIsReachable(t *testing.T) {
 func TestHealthzReports503WhenTheDatabaseIsDown(t *testing.T) {
 	t.Parallel()
 
-	h := server.New(stubDB{err: errors.New("connection refused")}, discardLogger())
+	h := server.New(stubDB{err: errors.New("connection refused")}, nil, discardLogger())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -81,7 +81,7 @@ func TestHealthzReports503WhenTheDatabaseIsDown(t *testing.T) {
 func TestUnknownRouteIs404(t *testing.T) {
 	t.Parallel()
 
-	h := server.New(stubDB{}, discardLogger())
+	h := server.New(stubDB{}, nil, discardLogger())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/nonexistent", nil))
 
@@ -97,7 +97,7 @@ func TestUnknownRouteIs404(t *testing.T) {
 func TestWriteRoutesRequireAuth(t *testing.T) {
 	t.Parallel()
 
-	h := server.New(stubDB{}, discardLogger())
+	h := server.New(stubDB{}, nil, discardLogger())
 	for _, path := range []string{"/v1/fixes", "/owntracks"} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func TestWriteRoutesRequireAuth(t *testing.T) {
 func TestGetOnAWriteRouteIsMethodNotAllowed(t *testing.T) {
 	t.Parallel()
 
-	h := server.New(stubDB{}, discardLogger())
+	h := server.New(stubDB{}, nil, discardLogger())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/fixes", nil))
 
