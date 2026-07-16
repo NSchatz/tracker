@@ -4,20 +4,22 @@ A **self-hosted, Life360-style family location tracker**. An Android phone repor
 server *you* run; family members see each other on a live map and get alerts when someone arrives at or
 leaves a place you have defined.
 
-> **Status: early. The server spine, its data model, ingestion, a read API, and — as of S4 — a live
-> map.**
+> **Status: early. The server spine, its data model, ingestion, a read API, a live map, and — as of
+> S5 — server-side geofencing.**
 > This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
 > viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, a
 > **token-authenticated ingestion surface** (per-device enrollment, `POST /v1/fixes`, and an interim
 > `POST /owntracks` adapter), a **family-scoped read API** (`GET /v1/positions`,
-> `GET /v1/devices/{id}/history`, `GET /v1/near`) behind a separate **viewer** credential, and now a
-> **live-map SSE stream** — `GET /v1/stream` pushes position updates over Server-Sent Events, with a
-> minimal server-served **Leaflet** page at `GET /map` consuming it. **Location data goes in, reads
-> back, and now streams to a live map end-to-end.**
-> There is still **no Android client**; the native Kotlin app (C-track) is the phase that follows, so
-> today a real phone drives the map through the interim OwnTracks adapter. It is not a finished
-> tracker, and this README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the
-> plan lives in the umbrella at `operations/roadmaps/tracker.md`.
+> `GET /v1/devices/{id}/history`, `GET /v1/near`) behind a separate **viewer** credential, a
+> **live-map SSE stream** (`GET /v1/stream` + a Leaflet page at `GET /map`), and now **server-side
+> geofencing**: operator-managed "Places", a stream evaluator that records **enter/exit** events off
+> the fix stream, and viewer reads for both (`GET /v1/places`, `GET /v1/geofence-events`). **Location
+> data goes in, reads back, streams to a live map, and now fires enter/exit events end-to-end.**
+> Those events are **logged, not yet delivered** — push (FCM/UnifiedPush) is S6. There is still **no
+> Android client**; the native Kotlin app (C-track) is the phase that follows, so today a real phone
+> drives the server through the interim OwnTracks adapter. It is not a finished tracker, and this
+> README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the
+> umbrella at `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -42,6 +44,7 @@ it rather than trusting it.
 | `viewers` | a human who watches the map; same credential shape, deliberately a separate table |
 | `fixes` | the location history: `geography(Point,4326)`, **partitioned by month** |
 | `geofences` | server-side "Places": `geography(Polygon,4326)` |
+| `geofence_events` | the **append-only** enter/exit log, one row per crossing (S5) |
 
 Three decisions in there are load-bearing, and each is pinned by a test that fails if it is undone.
 
@@ -188,6 +191,43 @@ The stream authenticates a **viewer** token (a device/write token is a `401`), p
 > coalescing a burst of fixes to the newest — a live map wants the current position, not a re-run of
 > every fix. The full history is still `GET /v1/devices/{id}/history`.
 
+## Geofencing — "Places" and enter/exit events (S5)
+
+A **Place** is a `geofences` polygon a family cares about — home, school, work. tracker evaluates every
+incoming fix against a device's family's Places and records an **enter** or **exit** when the device
+crosses one, into the append-only `geofence_events` log. The events are **logged, not delivered** yet
+(push is S6); a viewer can already read them back.
+
+- **`GET /v1/places`** — the family's Places, each with its ring as GeoJSON (viewer token).
+- **`GET /v1/geofence-events`** — the family's crossings, newest first (viewer token). Each is
+  `{device_id, place_id, place_name, transition, ts}`, `ts` being the crossing fix's device event-time.
+
+Managing Places is an **operator** act (like device enrollment — there is no admin login yet), a
+command against the database rather than an HTTP write:
+
+```bash
+tracker add-place -family <family-id> -name "Home" \
+  -point 12.0,41.0 -point 13.0,41.0 -point 13.0,42.0 -point 12.0,42.0
+#   → prints the Place id (longitude FIRST in every -point; the ring is closed for you)
+tracker list-places   -family <family-id>
+tracker remove-place  -family <family-id> -id <place-id>
+```
+
+Four properties are load-bearing, and each is pinned by a test:
+
+- **Containment is `ST_Covers` — inclusive of the boundary.** A fix exactly on the edge of a Place
+  counts as inside (§5.3). Remember a geography polygon's edges are *geodesics*, so a "square" drawn on
+  the grid is not quite the region its corners imply (see above).
+- **Transitions are debounced against GPS jitter.** A crossing is recorded only once the new state has
+  **dwelled** for 90 s, so a fix or two flapping across the boundary — a stationary phone at the edge of
+  "home" — never fires a spurious enter/exit.
+- **Events derive from `ts` order, not arrival.** The log is a deterministic projection of the fix
+  history: a replayed fix produces **no duplicate** event (each crossing is keyed by the fix that caused
+  it), and out-of-order fixes are placed by their `ts`, not by when they landed.
+- **A missed fix delays but never fabricates.** An enter is not recorded until later fixes prove the
+  device stayed inside; if the boundary-crossing fix never arrives, the event is attributed to a later
+  fix — it is never invented, and a device tracker only ever *saw* inside a Place gets no phantom enter.
+
 ## Running it
 
 ```bash
@@ -255,10 +295,21 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **Data goes in, reads back, and streams to a live map — but there is no Android client yet.**
-  Ingestion (S2), a family-scoped read API (S3), and the live-map SSE stream + Leaflet page (S4)
-  exist; the native Kotlin app (C-track) is the phase that follows, so today a real phone drives the
-  map through the interim OwnTracks adapter — which is exactly that, interim.
+- **Data goes in, reads back, streams to a live map, and fires geofence events — but there is no
+  Android client yet.** Ingestion (S2), a family-scoped read API (S3), the live-map SSE stream +
+  Leaflet page (S4), and server-side geofencing (S5) exist; the native Kotlin app (C-track) is the
+  phase that follows, so today a real phone drives the server through the interim OwnTracks adapter —
+  which is exactly that, interim.
+- **Geofence events are logged, not delivered.** A crossing appends to `geofence_events` and is
+  readable at `GET /v1/geofence-events`, but nothing pushes it to a phone yet — high-priority FCM /
+  UnifiedPush delivery is S6. Freshness is bounded by the last received fix: an offline phone's
+  crossings fire when its buffered fixes arrive.
+- **Enter/exit is debounced, so it is deliberately not instant.** A crossing must dwell 90 s before it
+  is recorded — the price of not alerting on GPS jitter. And the evaluator advances a (device, Place)'s
+  state *forward* in `ts`: a fix arriving out of order and older than that pair's latest recorded
+  transition is kept as history but does not splice a past event into the log. In practice a crossing
+  is a moving, frequently-reporting phone, and reordered fixes ahead of the last transition are placed
+  exactly by `ts`.
 - **The live map is a position stream, coalesced.** `GET /v1/stream` pushes each device's *current*
   position, collapsing a burst of fixes between polls to the newest. That is deliberate — a live map
   wants where everyone is now — but it means the stream is not a lossless replay of every fix; the

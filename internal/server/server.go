@@ -80,6 +80,12 @@ func New(database DB, logger *slog.Logger) http.Handler {
 		r.Get("/v1/positions", getPositions(database, logger))
 		r.Get("/v1/devices/{id}/history", getDeviceHistory(database, logger))
 		r.Get("/v1/near", getNear(database, logger))
+
+		// The S5 geofencing read surface: the family's Places and the append-only enter/exit log.
+		// Read-only under the viewer credential; Places are created/edited by the operator CLI, not
+		// over HTTP (§7 — see geofence.go).
+		r.Get("/v1/places", getPlaces(database, logger))
+		r.Get("/v1/geofence-events", getGeofenceEvents(database, logger))
 	})
 
 	// The live-map surface (S4). GET /v1/stream is an SSE feed of a family's position updates; it
@@ -311,6 +317,19 @@ func ingest(w http.ResponseWriter, r *http.Request, database DB, logger *slog.Lo
 			writeError(w, logger, http.StatusInternalServerError, "internal", "could not store the fix")
 		}
 		return false, false
+	}
+
+	// S5: drive the geofence evaluator off the freshly-stored fix, only for a genuinely new one — a
+	// replay was already evaluated when it first landed, and re-evaluating is a no-op anyway. A
+	// geofence-evaluation failure does NOT fail the request: the fix itself is safely stored, and the
+	// evaluator is a deterministic projection that self-heals on the next fix (§5.3 "a missed fix
+	// delays but never fabricates"). Failing the client's POST over a downstream projection hiccup —
+	// when its retry would find the fix already stored and skip evaluation again — would be the wrong
+	// trade. So it is logged, loudly, and the fix's success stands.
+	if inserted {
+		if _, err := store.EvaluateDeviceGeofences(r.Context(), database, f.DeviceID, f.TS, store.GeofenceDebounce); err != nil {
+			logger.ErrorContext(r.Context(), "evaluate geofences", "error", err, "device_id", f.DeviceID)
+		}
 	}
 	return inserted, true
 }
