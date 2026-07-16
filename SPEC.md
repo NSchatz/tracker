@@ -19,6 +19,10 @@ As of **S3**, three **read** routes serve that data back to a family — `GET /v
 `GET /v1/devices/{id}/history`, `GET /v1/near` — under a separate **viewer** credential. See
 *Reading data (S3)* below.
 
+As of **S4**, a family's positions also stream live over **`GET /v1/stream`** (Server-Sent Events),
+and a minimal Leaflet map at **`GET /map`** consumes it. This retires the poll-only map. See *The live
+stream (S4)* below.
+
 ---
 
 ## Authentication
@@ -176,6 +180,73 @@ are required; a missing, non-numeric, out-of-range, or negative value is a `400`
   {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"distance_m":12.4}
 ]
 ```
+
+---
+
+## The live stream (S4) — `GET /v1/stream`
+
+A **Server-Sent Events** feed of the caller's family's **position updates**: a long-lived connection
+that pushes each device's current position as it changes, so a map need not poll. It retires the
+poll-only map (S3 remains for one-shot reads).
+
+### Transport & authentication
+
+`Content-Type: text/event-stream`. The connection stays open; the server writes events as they occur
+and a `: keep-alive` comment periodically so idle connections and dead clients are detected.
+
+Authentication is a **viewer** token, exactly as the S3 read routes require — a **device** (write)
+token is a `401` here too. It may be presented **either** way:
+
+- `Authorization: Bearer <token>` — a programmatic caller; **or**
+- **`?token=<token>`** in the query string — the browser `EventSource` API, which **cannot** set an
+  `Authorization` header. This is the only reason the query form exists.
+
+> **A viewer token in a URL is a real trade-off.** URLs land in logs and referrers, so a query-string
+> credential is weaker than a header one. It is accepted here because `EventSource` leaves no
+> alternative for the interim web map; it must travel over **TLS** (S7), and the in-app client map
+> (C5), which *can* set headers, supersedes it. Prefer the header wherever the client allows it.
+
+Every route stays **family-scoped**: a watcher only ever receives its own family's positions.
+
+### Event format
+
+Each position update is one SSE event:
+
+```
+id: 1752566402000000
+event: position
+data: {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"received_at":1752566402}
+
+```
+
+- **`id`** is the fix's **`received_at` in microseconds** — a monotonic, resumable cursor (see below).
+- **`event`** is always `position` for a position update.
+- **`data`** is the same JSON shape as one `GET /v1/positions` entry.
+
+### Snapshot, then live
+
+A **fresh** connection (no `Last-Event-ID`) first receives the **current position of every device**
+in the family — the snapshot that paints the map — then live updates as they arrive.
+
+### Resume — `Last-Event-ID`, no gaps
+
+Because `id` is `received_at`-in-microseconds, it is a **monotonic cursor**. On a dropped connection
+the browser reconnects automatically and re-sends the last id it saw as **`Last-Event-ID`**; the
+server then delivers **every position that arrived strictly after it** — nothing that happened while
+disconnected is skipped, and the boundary row is not re-delivered. A garbled or absent `Last-Event-ID`
+fails **safe**, toward the full snapshot, never toward a silent skip.
+
+### Position-stream semantics (not a breadcrumb replay)
+
+The stream pushes a device's **current** position — the latest fix by event-`ts` — keyed on when the
+server received it. A burst of fixes between polls **coalesces** to the newest: a live map wants where
+everyone is now, not a re-run of every fix. A backlogged older-`ts` fix arriving later does **not**
+re-emit an unchanged current position.
+
+> **HTTP/2.** SSE benefits from HTTP/2, which multiplexes many streams over one connection and lifts
+> the browser's ~6-connections-per-origin cap. tracker serves the stream over whatever HTTP version
+> terminates in front of it; it upgrades to HTTP/2 automatically once TLS is in place (**S7**). Until
+> then, over plaintext HTTP/1.1, more than ~6 simultaneous browser tabs to the same origin can queue.
 
 ---
 

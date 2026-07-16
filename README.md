@@ -4,15 +4,18 @@ A **self-hosted, Life360-style family location tracker**. An Android phone repor
 server *you* run; family members see each other on a live map and get alerts when someone arrives at or
 leaves a place you have defined.
 
-> **Status: early. The server spine, its data model, ingestion, and — as of S3 — a read API.**
+> **Status: early. The server spine, its data model, ingestion, a read API, and — as of S4 — a live
+> map.**
 > This repo has config, `/healthz`, a database pool, the **spatial schema** (families, devices,
 > viewers, monthly-partitioned `fixes`, geofences) with proximity/containment query helpers, a
 > **token-authenticated ingestion surface** (per-device enrollment, `POST /v1/fixes`, and an interim
-> `POST /owntracks` adapter), and now a **family-scoped read API**: `GET /v1/positions`,
-> `GET /v1/devices/{id}/history`, and `GET /v1/near`, behind a separate **viewer** credential.
-> **Location data goes in and can be read back now — poll-only.**
-> There is still **no live map and no Android client**; the live-map SSE stream (S4) and the client
-> are the phases that follow, so today you read by polling, not by watching. It is not a finished
+> `POST /owntracks` adapter), a **family-scoped read API** (`GET /v1/positions`,
+> `GET /v1/devices/{id}/history`, `GET /v1/near`) behind a separate **viewer** credential, and now a
+> **live-map SSE stream** — `GET /v1/stream` pushes position updates over Server-Sent Events, with a
+> minimal server-served **Leaflet** page at `GET /map` consuming it. **Location data goes in, reads
+> back, and now streams to a live map end-to-end.**
+> There is still **no Android client**; the native Kotlin app (C-track) is the phase that follows, so
+> today a real phone drives the map through the interim OwnTracks adapter. It is not a finished
 > tracker, and this README will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the
 > plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
@@ -151,8 +154,39 @@ Two properties are load-bearing and each is pinned by the authz-matrix tests:
   that names a device in another family is a `403`, and an empty result is `[]` — **never** a leak of
   another family's data.
 
-> **The map is poll-only until S4.** These routes answer a request; there is no live push yet. The
-> SSE stream and a web map are S4.
+> These routes answer a one-shot request. For a **live** map that pushes updates without polling,
+> see the SSE stream below (S4).
+
+## Watching the live map (S4)
+
+A **viewer** watches the family move in real time over one long-lived connection, instead of polling.
+
+- **`GET /v1/stream`** — a **Server-Sent Events** feed of the family's **position updates**. On
+  connect it sends the current position of every device (the snapshot that paints the map), then
+  pushes each device's new position as it arrives. Every event carries an `id` (the fix's receive
+  time, in microseconds).
+- **`GET /map`** — a minimal, server-served **Leaflet** page that consumes the stream: paste a viewer
+  token and watch markers move. It loads Leaflet **from tracker itself** (vendored under `/static`),
+  never a third-party CDN — a self-hosted privacy product should not tell someone else's server who is
+  watching. (Map *tiles* still come from OpenStreetMap; markers render and move without them.)
+
+Two properties are load-bearing, each pinned by a test:
+
+- **A watcher only ever receives its own family's stream.** The cursor query is family-scoped in its
+  SQL, so there is no path that could push another family's position onto a connection — the worst
+  failure this product has (§4), now guarded across every open watcher.
+- **A dropped connection resumes with no gaps.** The event `id` is the fix's `received_at`, a
+  monotonic cursor; on reconnect the browser re-sends it as `Last-Event-ID` and the server replays
+  every position that arrived while the watcher was away — and not the one it already had.
+
+The stream authenticates a **viewer** token (a device/write token is a `401`), presented in the
+`Authorization` header **or**, because the browser `EventSource` API cannot set headers, as
+`?token=<token>` in the URL. See [`SPEC.md`](SPEC.md) for the full contract and the honest trade-offs
+(a token in a URL; HTTP/2 vs plaintext HTTP/1.1).
+
+> **The map is a POSITION stream, not a breadcrumb replay.** It shows where everyone is *now*,
+> coalescing a burst of fixes to the newest — a live map wants the current position, not a re-run of
+> every fix. The full history is still `GET /v1/devices/{id}/history`.
 
 ## Running it
 
@@ -221,10 +255,29 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **Data goes in and reads back — but poll-only, and there is no client.** Ingestion (S2) and a
-  family-scoped read API (S3) exist; the live-map SSE stream (S4) and the Android client are the
-  phases that follow, so today you poll the read routes rather than watch a live map. And the interim
-  OwnTracks path is exactly that — interim.
+- **Data goes in, reads back, and streams to a live map — but there is no Android client yet.**
+  Ingestion (S2), a family-scoped read API (S3), and the live-map SSE stream + Leaflet page (S4)
+  exist; the native Kotlin app (C-track) is the phase that follows, so today a real phone drives the
+  map through the interim OwnTracks adapter — which is exactly that, interim.
+- **The live map is a position stream, coalesced.** `GET /v1/stream` pushes each device's *current*
+  position, collapsing a burst of fixes between polls to the newest. That is deliberate — a live map
+  wants where everyone is now — but it means the stream is not a lossless replay of every fix; the
+  full trail is `GET /v1/devices/{id}/history`. The stream polls the database on a short interval
+  rather than being pushed from ingestion, which keeps it stateless across replicas at the cost of up
+  to that interval of latency.
+- **A stream position update can be delayed by one fix under a rare write race.** The stream's cursor
+  is `received_at`; if two fixes for a family commit out of `received_at` order within one poll
+  interval, the later-committing one can be skipped until that device's *next* fix re-establishes it.
+  At family scale (a few devices, seconds apart) this is vanishingly rare and self-heals on the next
+  fix; the durable fix (a strictly monotonic stream sequence, or logical decoding) is a scale-phase
+  concern, not a family-deployment one. The reconnect/resume path itself has no such gap.
+- **The stream token travels in the URL for browsers.** `EventSource` cannot set an `Authorization`
+  header, so the Leaflet page passes the viewer token as `?token=`. URLs leak into logs and referrers;
+  this is an interim trade mitigated by TLS (S7) and retired by the in-app map (C5). Programmatic
+  callers should use the header.
+- **HTTP/2 is not terminated yet.** SSE multiplexes cleanly over HTTP/2, which also lifts the
+  browser's ~6-connections-per-origin cap; tracker upgrades to it automatically once TLS lands (S7).
+  Until then, over plaintext HTTP/1.1, more than ~6 simultaneous tabs to the same origin can queue.
 - **No TLS yet.** The server terminates plaintext HTTP. Bearer tokens and location data must travel
   over TLS in any real deployment; enforcing that (and the threat model) is S7.
 - **Partitions are provisioned at start-up, with a two-month lookahead — plus an on-ingest safety
