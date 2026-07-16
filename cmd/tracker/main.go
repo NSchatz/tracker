@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,8 +64,15 @@ func main() {
 		err = runEnroll(args)
 	case "add-viewer":
 		err = runAddViewer(args)
+	case "add-place":
+		err = runAddPlace(args)
+	case "list-places":
+		err = runListPlaces(args)
+	case "remove-place":
+		err = runRemovePlace(args)
 	default:
-		err = fmt.Errorf("unknown command %q — expected serve, create-family, enroll, or add-viewer", sub)
+		err = fmt.Errorf("unknown command %q — expected serve, create-family, enroll, add-viewer, "+
+			"add-place, list-places, or remove-place", sub)
 	}
 
 	if err != nil {
@@ -255,6 +264,132 @@ func runAddViewer(args []string) error {
 	// stdout only, never the structured logger: a token must not land in the server's logs.
 	fmt.Printf("viewer added\n  id:     %s\n  family: %s\n  email:  %s\n  name:   %s\n\n", viewerID, *familyID, *email, *name)
 	fmt.Printf("bearer token (store it now — it is not recoverable):\n  %s\n", token)
+	return nil
+}
+
+// pointRing collects repeated -point lon,lat flags into a ring, longitude-first — the same axis order
+// as everywhere else in tracker, enforced here at the CLI boundary so a Place cannot be defined with
+// its coordinates swapped. It implements flag.Value.
+type pointRing []store.Point
+
+func (p *pointRing) String() string { return fmt.Sprintf("%d point(s)", len(*p)) }
+
+func (p *pointRing) Set(v string) error {
+	lonStr, latStr, ok := strings.Cut(v, ",")
+	if !ok {
+		return fmt.Errorf("point %q is not \"lon,lat\"", v)
+	}
+	lon, err := strconv.ParseFloat(strings.TrimSpace(lonStr), 64)
+	if err != nil {
+		return fmt.Errorf("point %q: longitude is not a number", v)
+	}
+	lat, err := strconv.ParseFloat(strings.TrimSpace(latStr), 64)
+	if err != nil {
+		return fmt.Errorf("point %q: latitude is not a number", v)
+	}
+	*p = append(*p, store.Point{Lon: lon, Lat: lat})
+	return nil
+}
+
+// runAddPlace creates a family-scoped Place from a ring of -point lon,lat vertices. It is the operator
+// path for "Places CRUD" create, alongside enroll/add-viewer — Places are privileged family config,
+// not something a viewer token writes over HTTP (§7). The ring is validated (a bowtie or out-of-range
+// vertex is refused) by store.CreateGeofence before anything is stored.
+//
+// Longitude first, as everywhere: `-point 12.4964,41.9028` is (lon=12.4964, lat=41.9028). The ring is
+// closed automatically if the last point is not the first.
+func runAddPlace(args []string) error {
+	fs := flag.NewFlagSet("add-place", flag.ContinueOnError)
+	familyID := fs.String("family", "", "the family id this Place belongs to (required)")
+	name := fs.String("name", "", "a label for the Place, e.g. \"Home\" (required)")
+	var ring pointRing
+	fs.Var(&ring, "point", "a ring vertex as lon,lat — repeat at least 3 times (longitude FIRST)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *familyID == "" || *name == "" {
+		return errors.New("add-place needs -family and -name")
+	}
+	if len(ring) < 3 {
+		return fmt.Errorf("add-place needs at least 3 -point lon,lat vertices, got %d", len(ring))
+	}
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	id, err := store.CreateGeofence(ctx, pool, *familyID, *name, ring)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("place created\n  id:     %s\n  family: %s\n  name:   %s\n  points: %d\n", id, *familyID, *name, len(ring))
+	return nil
+}
+
+// runListPlaces prints a family's Places — the read side of the operator CRUD path.
+func runListPlaces(args []string) error {
+	fs := flag.NewFlagSet("list-places", flag.ContinueOnError)
+	familyID := fs.String("family", "", "the family id whose Places to list (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *familyID == "" {
+		return errors.New("list-places needs -family")
+	}
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	places, err := store.ListGeofences(ctx, pool, *familyID)
+	if err != nil {
+		return err
+	}
+	if len(places) == 0 {
+		fmt.Printf("no places for family %s\n", *familyID)
+		return nil
+	}
+	fmt.Printf("places for family %s:\n", *familyID)
+	for _, p := range places {
+		fmt.Printf("  %s  %s\n", p.ID, p.Name)
+	}
+	return nil
+}
+
+// runRemovePlace deletes a Place, family-scoped so a mistyped id in another family removes nothing.
+// Its geofence_events go with it (ON DELETE CASCADE) — removing a Place forgets its crossings.
+func runRemovePlace(args []string) error {
+	fs := flag.NewFlagSet("remove-place", flag.ContinueOnError)
+	familyID := fs.String("family", "", "the family id the Place belongs to (required)")
+	id := fs.String("id", "", "the Place id to remove (see list-places) (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *familyID == "" || *id == "" {
+		return errors.New("remove-place needs -family and -id")
+	}
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	removed, err := store.DeleteGeofence(ctx, pool, *familyID, *id)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("no place %s in family %s", *id, *familyID)
+	}
+	fmt.Printf("place removed\n  id:     %s\n  family: %s\n", *id, *familyID)
 	return nil
 }
 

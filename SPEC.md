@@ -23,6 +23,10 @@ As of **S4**, a family's positions also stream live over **`GET /v1/stream`** (S
 and a minimal Leaflet map at **`GET /map`** consumes it. This retires the poll-only map. See *The live
 stream (S4)* below.
 
+As of **S5**, tracker evaluates incoming fixes against a family's **"Places"** (geofences) and records
+**enter/exit** events. A viewer reads the Places and the event log over **`GET /v1/places`** and
+**`GET /v1/geofence-events`**; Places are managed by the operator CLI. See *Geofencing (S5)* below.
+
 ---
 
 ## Authentication
@@ -247,6 +251,72 @@ re-emit an unchanged current position.
 > the browser's ~6-connections-per-origin cap. tracker serves the stream over whatever HTTP version
 > terminates in front of it; it upgrades to HTTP/2 automatically once TLS is in place (**S7**). Until
 > then, over plaintext HTTP/1.1, more than ~6 simultaneous browser tabs to the same origin can queue.
+
+---
+
+## Geofencing (S5) — Places and enter/exit events
+
+A **Place** is a family-scoped polygon (`geofences`). tracker evaluates every incoming fix against the
+device's family's Places and appends an **enter** or **exit** to the append-only `geofence_events` log
+when the device crosses one. The events are **recorded, not delivered** — push (FCM/UnifiedPush) is S6.
+
+### Evaluation semantics
+
+- **Containment is `ST_Covers`, inclusive of the boundary.** A fix exactly on a Place's edge counts as
+  inside. (On `geography` a polygon's edges are geodesics, so a grid-drawn "square" is not exactly the
+  region its corners imply — see the README.)
+- **Debounced against GPS jitter.** A change of containment is recorded only once it has **dwelled** for
+  **90 seconds**; a fix or two flapping across the boundary is not a crossing and fires nothing.
+- **Derived from `ts` order, not arrival.** The log is a deterministic projection of the stored fixes.
+  A **replayed** fix produces **no duplicate** event — each transition is identified by the crossing
+  fix's `(device, place, ts)`. Out-of-order fixes are placed by their `ts`.
+- **A missed fix delays but never fabricates.** An enter is confirmed only once later fixes prove the
+  device stayed inside, so a missing boundary-crossing fix delays the event (it is attributed to a
+  later fix), never invents one. A device only ever seen inside a Place gets no phantom enter. The
+  evaluator advances a (device, place)'s state forward in `ts`; a fix older than that pair's latest
+  recorded transition is history, not a spliced-in past event.
+
+### `GET /v1/places`
+
+The caller's family's Places, ordered by name. **Viewer** token; family-scoped; empty is `[]`.
+
+```json
+[
+  {"id":"…","name":"Home","area":{"type":"Polygon","coordinates":[[[12,41],[13,41],[13,42],[12,42],[12,41]]]}}
+]
+```
+
+`area` is a GeoJSON geometry (longitude-first coordinates, as GeoJSON requires).
+
+### `GET /v1/geofence-events`
+
+The caller's family's crossings, **newest first**. **Viewer** token; family-scoped; empty is `[]`.
+`?limit=` sets the page size (default 100, clamped to 1..1000). A present-but-unparseable `limit` is a
+`400`.
+
+```json
+[
+  {"device_id":"…","place_id":"…","place_name":"Home","transition":"enter","ts":1752566400}
+]
+```
+
+`transition` is `"enter"` or `"exit"`; `ts` is the crossing fix's device event-time, in epoch seconds.
+
+### Managing Places (operator CLI)
+
+Creating and editing Places is a privileged act, issued by the operator out of band — the same reason
+enrollment is (there is no admin login yet), so a **viewer** token reads Places but does not write them.
+
+```bash
+tracker add-place -family <family-id> -name "Home" \
+  -point 12.0,41.0 -point 13.0,41.0 -point 13.0,42.0 -point 12.0,42.0
+#   → place created; prints the Place id. Longitude FIRST in every -point; ≥ 3 points; ring auto-closed.
+tracker list-places  -family <family-id>
+tracker remove-place -family <family-id> -id <place-id>
+```
+
+A self-intersecting ring (a "bowtie") or an out-of-range vertex is refused — such a ring encloses no
+area and would be a Place that never fires.
 
 ---
 
