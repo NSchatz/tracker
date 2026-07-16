@@ -80,6 +80,74 @@ func LatestPositions(ctx context.Context, q db.Querier, familyID string) ([]Posi
 	return out, nil
 }
 
+// positionsSinceSQL is the S4 stream's cursor query: the latest position per device in one family
+// whose current position ARRIVED after `since`, ordered by that arrival time.
+//
+// It is latestPositionsSQL with two deliberate differences, and both are what make it a stream
+// cursor rather than a snapshot:
+//
+//   - It filters the latest-per-device result by received_at > $2. received_at is the SERVER's
+//     receive-time (§5.2 liveness), and it is the fix's ARRIVAL, not the device's event `ts`. That
+//     is the right cursor for a live stream: a phone flushing an offline backlog reports fixes with
+//     old `ts` but a fresh received_at, and the stream should push the device's newly-known position
+//     when it arrives — keyed on when the server learned it, monotonically.
+//   - It orders by received_at ASC (device_id breaks a tie), so a watcher consuming the rows in order
+//     can use each row's received_at as a resumable, non-decreasing Last-Event-ID: after a drop it
+//     asks for everything strictly newer than the last id it saw, and misses nothing that arrived
+//     while it was gone.
+//
+// received_at here is the received_at OF the latest-by-ts row — a device's CURRENT position — so a
+// backlogged older-ts fix arriving later does not spuriously re-emit an unchanged position (its
+// received_at is not this row's). The stream therefore pushes a device only when its current
+// position actually changes.
+//
+// Scoped to one family in the SQL, exactly as latestPositionsSQL is: the worst failure this product
+// has (§4, risk path #1) is one family seeing another's location, and a stream that trusted its
+// caller to filter would be one forgotten line from being that breach — across every open watcher.
+const positionsSinceSQL = `
+	SELECT device_id, name, ts, lon, lat, received_at
+	FROM (
+		SELECT DISTINCT ON (f.device_id)
+		       f.device_id,
+		       d.name AS name,
+		       f.ts,
+		       ST_X(f.location::geometry) AS lon,
+		       ST_Y(f.location::geometry) AS lat,
+		       f.received_at
+		FROM fixes f
+		JOIN devices d ON d.id = f.device_id
+		WHERE d.family_id = $1
+		ORDER BY f.device_id, f.ts DESC
+	) latest
+	WHERE latest.received_at > $2
+	ORDER BY latest.received_at ASC, device_id ASC`
+
+// PositionsSince returns the latest position per device in the family whose current position arrived
+// (received_at) strictly after `since`, ordered by received_at ascending. It is the query the S4 SSE
+// stream polls: pass the zero time for a fresh watcher (the current snapshot of everyone) and the
+// last received_at delivered to resume. `since` is EXCLUSIVE, so re-passing the last id never
+// re-delivers the row that produced it — the property that makes received_at a clean stream cursor.
+func PositionsSince(ctx context.Context, q db.Querier, familyID string, since time.Time) ([]Position, error) {
+	rows, err := q.Query(ctx, positionsSinceSQL, familyID, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("query positions since %s for family %s: %w", since.UTC().Format(time.RFC3339Nano), familyID, err)
+	}
+	defer rows.Close()
+
+	var out []Position
+	for rows.Next() {
+		var p Position
+		if err := rows.Scan(&p.DeviceID, &p.DeviceName, &p.TS, &p.Lon, &p.Lat, &p.ReceivedAt); err != nil {
+			return nil, fmt.Errorf("scan position: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query positions since %s for family %s: %w", since.UTC().Format(time.RFC3339Nano), familyID, err)
+	}
+	return out, nil
+}
+
 // HistoryFix is one row of a device's location history. The optional metrics are pointers because
 // absent must stay absent (§5.2): a missing battery reading is unknown, not 0%, and it is emitted
 // as JSON null / omitted rather than fabricated.

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tracker — live map</title>
+
+  <!-- Leaflet is VENDORED and served by tracker itself (/static), never a third-party CDN. For a
+       self-hosted privacy product that matters: loading the map's script from someone else's server
+       would tell them who is watching the family's location. The one thing still fetched from a third
+       party is the map TILES (OpenStreetMap, below) — device markers render and move with or without
+       them, and the in-app map (roadmap C5) removes even that. This page is the interim viewer. -->
+  <link rel="stylesheet" href="/static/leaflet.css">
+  <script src="/static/leaflet.js"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+    #bar {
+      display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+      padding: .5rem .75rem; border-bottom: 1px solid #8884;
+    }
+    #bar strong { font-size: 1rem; }
+    #token { flex: 1 1 16rem; min-width: 8rem; padding: .35rem .5rem; font: inherit; }
+    #watch { padding: .35rem .8rem; font: inherit; cursor: pointer; }
+    #status { color: #888; }
+    #status.live { color: #16794b; }
+    #status.error { color: #b00020; }
+    #map { height: calc(100% - 3rem); width: 100%; }
+    @media (prefers-color-scheme: dark) { #status.live { color: #5ad19a; } }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <strong>tracker</strong>
+    <input id="token" type="password" placeholder="viewer token" autocomplete="off" spellcheck="false">
+    <button id="watch">Watch</button>
+    <span id="status">enter a viewer token to watch your family's map</span>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    // A live family map with no build step: open the SSE stream, drop a marker per device, move it
+    // when the device moves. Every event carries an `id` (the fix's receive time); EventSource echoes
+    // the last one in Last-Event-ID automatically on reconnect, so a dropped connection resumes with
+    // no gaps — the browser and the server agree on the cursor without any client-side bookkeeping.
+
+    var map = L.map('map').setView([20, 0], 2);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    var statusEl = document.getElementById('status');
+    var tokenEl = document.getElementById('token');
+    var watchEl = document.getElementById('watch');
+
+    var markers = {};        // device_id -> Leaflet marker
+    var source = null;       // the current EventSource
+    var fitted = false;      // have we auto-framed the first positions yet?
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls || '';
+    }
+
+    // A token may also arrive in the URL (?token=…), so a bookmarked link opens straight into the map.
+    // It is deliberately NOT persisted anywhere else — the token is a live read credential.
+    var urlToken = new URLSearchParams(location.search).get('token');
+    if (urlToken) { tokenEl.value = urlToken; }
+
+    function watch() {
+      var tok = tokenEl.value.trim();
+      if (!tok) { setStatus('enter a viewer token first', 'error'); return; }
+
+      if (source) { source.close(); }
+      for (var id in markers) { map.removeLayer(markers[id]); }
+      markers = {};
+      fitted = false;
+
+      // The token travels in the query string because EventSource cannot set an Authorization header.
+      // It must go over TLS in a real deployment (roadmap S7); this is the interim viewer.
+      source = new EventSource('/v1/stream?token=' + encodeURIComponent(tok));
+      setStatus('connecting…');
+
+      source.addEventListener('open', function () {
+        setStatus('live', 'live');
+      });
+
+      source.addEventListener('position', function (e) {
+        var p;
+        try { p = JSON.parse(e.data); } catch (err) { return; }
+        upsert(p);
+        var when = new Date(p.received_at * 1000).toLocaleTimeString();
+        setStatus('live — last update ' + when, 'live');
+      });
+
+      source.addEventListener('error', function () {
+        // EventSource reconnects on its own (re-sending Last-Event-ID); surface the gap honestly
+        // rather than freezing the map and implying it is still live.
+        setStatus('reconnecting…', 'error');
+      });
+    }
+
+    function upsert(p) {
+      var pos = [p.lat, p.lon];
+      var label = p.device_name + ' · ' + new Date(p.received_at * 1000).toLocaleTimeString();
+      if (markers[p.device_id]) {
+        markers[p.device_id].setLatLng(pos).setTooltipContent(label);
+      } else {
+        markers[p.device_id] = L.circleMarker(pos, {
+          radius: 8, color: '#1d6fe0', fillColor: '#1d6fe0', fillOpacity: 0.85, weight: 2
+        }).addTo(map).bindTooltip(label, { permanent: false });
+      }
+      if (!fitted) {
+        map.setView(pos, 15);
+        fitted = true;
+      }
+    }
+
+    watchEl.addEventListener('click', watch);
+    tokenEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') { watch(); } });
+    if (urlToken) { watch(); }
+  </script>
+</body>
+</html>

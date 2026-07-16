@@ -82,6 +82,16 @@ func New(database DB, logger *slog.Logger) http.Handler {
 		r.Get("/v1/near", getNear(database, logger))
 	})
 
+	// The live-map surface (S4). GET /v1/stream is an SSE feed of a family's position updates; it
+	// authenticates the viewer INSIDE the handler rather than via the middleware above, because the
+	// browser EventSource that consumes it cannot set an Authorization header and must pass the token
+	// in the query string (see getStream / SPEC.md). /map and /static are the minimal Leaflet page and
+	// its vendored assets — a static shell that carries no family data itself; the data behind it is
+	// still the authenticated stream.
+	r.Get("/v1/stream", getStream(database, logger))
+	r.Get("/map", serveMapPage(logger))
+	r.Handle("/static/*", mapAssets())
+
 	return r
 }
 
