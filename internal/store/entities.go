@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/NSchatz/tracker/internal/db"
 	"github.com/jackc/pgx/v5"
@@ -85,7 +86,13 @@ func AuthenticateDevice(ctx context.Context, q db.Querier, tokenHash []byte) (De
 	}
 	var d Device
 	err := q.QueryRow(ctx,
-		`SELECT id, family_id, name FROM devices WHERE token_hash = $1`, tokenHash).
+		// The expiry test is part of the WHERE, not a field read back and checked in Go, so an
+		// expired token matches NO row and is indistinguishable from an unknown one — the same
+		// uniform ErrUnknownToken, the same 401, nothing for an attacker to tell apart. now() is
+		// the DATABASE's clock: expiry is a server-side decision, never one a client could move by
+		// lying about the time. A NULL expires_at (the default, and every pre-S7 token) never expires.
+		`SELECT id, family_id, name FROM devices
+		 WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())`, tokenHash).
 		Scan(&d.ID, &d.FamilyID, &d.Name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrUnknownToken
@@ -94,6 +101,27 @@ func AuthenticateDevice(ctx context.Context, q db.Querier, tokenHash []byte) (De
 		return Device{}, fmt.Errorf("authenticate device: %w", err)
 	}
 	return d, nil
+}
+
+// RotateDeviceToken replaces a device's credential: it writes a new token_hash and a new expiry in
+// ONE statement, so the previous token stops authenticating the instant the new one is minted —
+// there is no window in which both are live. expiresAt is nil for a token that never expires, or a
+// future instant for a short-lived one (§7). It returns false (found) if no device has that id, so
+// the caller can tell "rotated" from "no such device" rather than silently succeeding over nothing.
+//
+// newHash is a SHA-256 digest (auth.Token.Hash), never a raw token — the same length guard
+// CreateDevice applies, for the same reason: a raw token stored where the hash belongs turns the
+// row into a live credential.
+func RotateDeviceToken(ctx context.Context, q db.Querier, deviceID string, newHash []byte, expiresAt *time.Time) (bool, error) {
+	if len(newHash) != TokenHashLen {
+		return false, fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(newHash), TokenHashLen)
+	}
+	tag, err := q.Exec(ctx,
+		`UPDATE devices SET token_hash = $2, expires_at = $3 WHERE id = $1`, deviceID, newHash, expiresAt)
+	if err != nil {
+		return false, fmt.Errorf("rotate device token: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ErrUnknownDevice is returned when no device has the given id. It is the read-side counterpart
@@ -164,7 +192,11 @@ func AuthenticateViewer(ctx context.Context, q db.Querier, tokenHash []byte) (Vi
 	}
 	var v Viewer
 	err := q.QueryRow(ctx,
-		`SELECT id, family_id, email, display_name FROM viewers WHERE token_hash = $1`, tokenHash).
+		// Same expiry enforcement as AuthenticateDevice: the (expires_at IS NULL OR expires_at >
+		// now()) test is in the WHERE, so an expired viewer token matches nothing and is the same
+		// uniform ErrUnknownToken as an unknown one, decided by the database's clock.
+		`SELECT id, family_id, email, display_name FROM viewers
+		 WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())`, tokenHash).
 		Scan(&v.ID, &v.FamilyID, &v.Email, &v.DisplayName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Viewer{}, ErrUnknownToken
@@ -173,6 +205,21 @@ func AuthenticateViewer(ctx context.Context, q db.Querier, tokenHash []byte) (Vi
 		return Viewer{}, fmt.Errorf("authenticate viewer: %w", err)
 	}
 	return v, nil
+}
+
+// RotateViewerToken is the read-side mirror of RotateDeviceToken: a new token_hash and expiry for a
+// viewer, written in one statement so the old token dies as the new one is born. expiresAt is nil for
+// no expiry or a future instant for a short-lived token; it returns false (found) for an unknown id.
+func RotateViewerToken(ctx context.Context, q db.Querier, viewerID string, newHash []byte, expiresAt *time.Time) (bool, error) {
+	if len(newHash) != TokenHashLen {
+		return false, fmt.Errorf("%w: got %d bytes, want a %d-byte SHA-256 digest", ErrInvalidTokenHash, len(newHash), TokenHashLen)
+	}
+	tag, err := q.Exec(ctx,
+		`UPDATE viewers SET token_hash = $2, expires_at = $3 WHERE id = $1`, viewerID, newHash, expiresAt)
+	if err != nil {
+		return false, fmt.Errorf("rotate viewer token: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ErrInvalidGeofence is returned when a ring does not describe a usable Place.

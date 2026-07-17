@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 	"github.com/NSchatz/tracker/internal/config"
 	"github.com/NSchatz/tracker/internal/db"
 	"github.com/NSchatz/tracker/internal/push"
+	"github.com/NSchatz/tracker/internal/retention"
+	"github.com/NSchatz/tracker/internal/secretscan"
 	"github.com/NSchatz/tracker/internal/server"
 	"github.com/NSchatz/tracker/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,9 +74,15 @@ func main() {
 		err = runListPlaces(args)
 	case "remove-place":
 		err = runRemovePlace(args)
+	case "rotate-device-token":
+		err = runRotateDeviceToken(args)
+	case "rotate-viewer-token":
+		err = runRotateViewerToken(args)
+	case "config-lint":
+		err = runConfigLint(args)
 	default:
 		err = fmt.Errorf("unknown command %q — expected serve, create-family, enroll, add-viewer, "+
-			"add-place, list-places, or remove-place", sub)
+			"add-place, list-places, remove-place, rotate-device-token, rotate-viewer-token, or config-lint", sub)
 	}
 
 	if err != nil {
@@ -89,6 +98,13 @@ func runServe() error {
 	if err != nil {
 		// The fail-safe. We do not start with a default DSN, an empty DSN, or a guess: a tracker
 		// pointed at the wrong database is worse than one that refused to boot.
+		return err
+	}
+
+	// The §7 serving fail-safe: refuse to expose an endpoint in plaintext unless that is an explicit
+	// choice. Enforced here, not in config.Load, because it is a property of SERVING — the operator DB
+	// commands share the config but open no port and must keep working without a TLS cert.
+	if err := cfg.RequireServable(); err != nil {
 		return err
 	}
 
@@ -137,15 +153,43 @@ func runServe() error {
 	}
 	defer closeNotifier()
 
+	// S7 retention. The purge runs only when a positive window is configured; 0 (the default) keeps
+	// history forever and starts no job (see config.RetentionDays). The job's goroutine unwinds when
+	// the root context is cancelled on shutdown. A daily tick is the right cadence for a monthly-
+	// partition purge — checking more often would drop nothing new until a month rolls over.
+	if cfg.RetentionDays > 0 {
+		job := retention.NewJob(pool, time.Duration(cfg.RetentionDays)*24*time.Hour, 24*time.Hour, logger)
+		go job.Run(ctx)
+	} else {
+		logger.Info("retention purge disabled (TRACKER_RETENTION_DAYS unset or 0 — history kept forever)")
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           server.New(pool, notifier, logger),
 		ReadHeaderTimeout: 10 * time.Second,
+		// TLS 1.2 floor (roadmap §7: TLS 1.3 preferred, 1.2 fallback). Harmless when the server runs
+		// plaintext — it only takes effect on the TLS path below.
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", cfg.Addr)
+		if cfg.ServesTLS() {
+			logger.Info("listening", "addr", cfg.Addr, "tls", true)
+			// The cert/key were already validated as a pair by config.Load; ListenAndServeTLS reads
+			// them here and fails loudly if either file is missing or malformed.
+			if err := srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("listen (tls): %w", err)
+				return
+			}
+			errCh <- nil
+			return
+		}
+		// Plaintext, only reached because config.Load saw TRACKER_ALLOW_PLAINTEXT (the fail-safe
+		// refuses to get here otherwise). Say so at WARN so it is visible in the logs of a deployment
+		// that did not mean to run without TLS.
+		logger.Warn("listening WITHOUT TLS (TRACKER_ALLOW_PLAINTEXT set) — terminate TLS at a trusted proxy", "addr", cfg.Addr, "tls", false)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("listen: %w", err)
 			return
@@ -436,6 +480,141 @@ func runRemovePlace(args []string) error {
 		return fmt.Errorf("no place %s in family %s", *id, *familyID)
 	}
 	fmt.Printf("place removed\n  id:     %s\n  family: %s\n", *id, *familyID)
+	return nil
+}
+
+// runRotateDeviceToken mints a NEW bearer token for an already-enrolled device, invalidating the old
+// one the instant it writes (store.RotateDeviceToken does both in one statement). -ttl gives the new
+// token a lifetime (§7 short-lived tokens); omitted or 0 means it never expires. The new token is
+// printed ONCE, exactly like enroll — it is not stored, only its hash is.
+func runRotateDeviceToken(args []string) error {
+	fs := flag.NewFlagSet("rotate-device-token", flag.ContinueOnError)
+	deviceID := fs.String("id", "", "the device id whose token to rotate (see enroll) (required)")
+	ttl := fs.Duration("ttl", 0, "how long the new token is valid, e.g. 720h; 0 means it never expires")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *deviceID == "" {
+		return errors.New("rotate-device-token needs -id")
+	}
+
+	token, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+	hash := token.Hash()
+	expiresAt := expiryFromTTL(*ttl)
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	found, err := store.RotateDeviceToken(ctx, pool, *deviceID, hash[:], expiresAt)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no device has id %s", *deviceID)
+	}
+
+	fmt.Printf("device token rotated\n  id:      %s\n  expires: %s\n\n", *deviceID, expiryDescription(expiresAt))
+	fmt.Printf("new bearer token (store it now — it is not recoverable, and the previous token no longer works):\n  %s\n", token)
+	return nil
+}
+
+// runRotateViewerToken is the read-side counterpart to runRotateDeviceToken.
+func runRotateViewerToken(args []string) error {
+	fs := flag.NewFlagSet("rotate-viewer-token", flag.ContinueOnError)
+	viewerID := fs.String("id", "", "the viewer id whose token to rotate (see add-viewer) (required)")
+	ttl := fs.Duration("ttl", 0, "how long the new token is valid, e.g. 720h; 0 means it never expires")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *viewerID == "" {
+		return errors.New("rotate-viewer-token needs -id")
+	}
+
+	token, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+	hash := token.Hash()
+	expiresAt := expiryFromTTL(*ttl)
+
+	ctx := context.Background()
+	pool, err := openForCommand(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	found, err := store.RotateViewerToken(ctx, pool, *viewerID, hash[:], expiresAt)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("no viewer has id %s", *viewerID)
+	}
+
+	fmt.Printf("viewer token rotated\n  id:      %s\n  expires: %s\n\n", *viewerID, expiryDescription(expiresAt))
+	fmt.Printf("new bearer token (store it now — it is not recoverable, and the previous token no longer works):\n  %s\n", token)
+	return nil
+}
+
+// expiryFromTTL turns a TTL duration into an absolute expiry instant, or nil for "never expires" when
+// the TTL is zero or negative. now is captured once so the printed and stored values agree.
+func expiryFromTTL(ttl time.Duration) *time.Time {
+	if ttl <= 0 {
+		return nil
+	}
+	t := time.Now().Add(ttl).UTC()
+	return &t
+}
+
+func expiryDescription(t *time.Time) string {
+	if t == nil {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
+}
+
+// runConfigLint is the §7 pre-deploy gate: it fails on a plaintext endpoint OR a checked-in secret.
+// Unlike the server's start-up validation it does NOT accept TRACKER_ALLOW_PLAINTEXT — a linted
+// (production) config must terminate TLS — and it also scans the repository for committed secrets. It
+// reports EVERY problem it finds before returning non-zero, so one run surfaces all of them.
+func runConfigLint(args []string) error {
+	fs := flag.NewFlagSet("config-lint", flag.ContinueOnError)
+	repo := fs.String("repo", ".", "path to the repository tree to scan for checked-in secrets")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var problems []string
+
+	// (1) Plaintext endpoint. Reads the same two files the server would serve TLS from.
+	if err := config.LintTLS(os.Getenv(config.EnvPrefix+"TLS_CERT_FILE"), os.Getenv(config.EnvPrefix+"TLS_KEY_FILE")); err != nil {
+		problems = append(problems, err.Error())
+	}
+
+	// (2) Checked-in secrets.
+	findings, err := secretscan.Scan(*repo)
+	if err != nil {
+		return fmt.Errorf("config-lint: %w", err)
+	}
+	for _, f := range findings {
+		problems = append(problems, "checked-in secret: "+f.String())
+	}
+
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintf(os.Stderr, "config-lint: %s\n", p)
+		}
+		return fmt.Errorf("config-lint found %d problem(s)", len(problems))
+	}
+	fmt.Println("config-lint: OK — TLS enforced and no checked-in secrets found")
 	return nil
 }
 

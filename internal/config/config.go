@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,6 +54,29 @@ type Config struct {
 	// tokens from. Required when PushProvider is "fcm"; ignored otherwise. The file is read at start-up
 	// (the token source fails loudly if it is missing or malformed), never a secret in the repo.
 	FCMCredentialsFile string
+
+	// TLSCertFile and TLSKeyFile are the PEM certificate and private key the server terminates HTTPS
+	// with. Both set → the server serves TLS (roadmap §7: HTTPS-only, no plaintext endpoint). Both
+	// empty is only allowed with AllowPlaintext; one without the other is a start-up error, because a
+	// half-configured TLS pair is a deploy that THINKS it is encrypted and is not. The key file is a
+	// secret and lives on disk / in a secret store, never in the repo.
+	TLSCertFile string
+	TLSKeyFile  string
+
+	// AllowPlaintext is the EXPLICIT opt-out from TLS. Location is maximally sensitive (§7), so the
+	// fail-safe is that the server refuses to start with neither TLS nor this flag: a plaintext
+	// deployment must be a decision someone made on purpose (local dev, or a trusted reverse proxy
+	// terminating TLS upstream), never an accident of an unset variable. `config-lint` fails on it
+	// regardless — it is a start-up escape hatch, not a production-blessed configuration.
+	AllowPlaintext bool
+
+	// RetentionDays is the history retention window: the background purge (internal/retention) drops
+	// monthly `fixes` partitions whose entire range is older than this many days (§7, GDPR Art. 5(1)(e)
+	// storage-limitation as design guidance). 0 — the default — DISABLES the purge: keep history
+	// forever. That default is deliberate and honest: silently deleting a family's location history on
+	// a window nobody chose would be worse than keeping it, so purging is opt-in with a number the
+	// operator sets, not a guess the server makes.
+	RetentionDays int
 }
 
 // Push backend identifiers. These match internal/store's push_provider values and internal/push's
@@ -82,6 +106,11 @@ func Load() (*Config, error) {
 		return nil, ErrMissingDatabaseURL
 	}
 
+	retentionDays, err := envInt(EnvPrefix+"RETENTION_DAYS", 0)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
 		DatabaseURL:        dsn,
 		Addr:               envOr(EnvPrefix+"ADDR", ":8080"),
@@ -89,12 +118,23 @@ func Load() (*Config, error) {
 		PushProvider:       strings.TrimSpace(os.Getenv(EnvPrefix + "PUSH_PROVIDER")),
 		FCMProjectID:       strings.TrimSpace(os.Getenv(EnvPrefix + "FCM_PROJECT_ID")),
 		FCMCredentialsFile: strings.TrimSpace(os.Getenv(EnvPrefix + "FCM_CREDENTIALS_FILE")),
+		TLSCertFile:        strings.TrimSpace(os.Getenv(EnvPrefix + "TLS_CERT_FILE")),
+		TLSKeyFile:         strings.TrimSpace(os.Getenv(EnvPrefix + "TLS_KEY_FILE")),
+		AllowPlaintext:     envBool(EnvPrefix + "ALLOW_PLAINTEXT"),
+		RetentionDays:      retentionDays,
 	}
 
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// ServesTLS reports whether the server terminates HTTPS itself — i.e. both the certificate and key
+// files are configured. When false, the server runs plaintext, which RequireServable only permits
+// under AllowPlaintext.
+func (c *Config) ServesTLS() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
 func (c *Config) validate() error {
@@ -139,6 +179,63 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%sPUSH_PROVIDER %q is not one of \"\" (disabled), %q, or %q",
 			EnvPrefix, c.PushProvider, PushProviderFCM, PushProviderUnifiedPush)
 	}
+
+	// TLS PAIR consistency is always a misconfiguration wherever it appears — a cert without its key
+	// (or vice versa) is a deploy that believes it is encrypted and is not — so it is refused at Load,
+	// for every command. The stronger "must actually serve TLS or explicitly allow plaintext" policy is
+	// a SERVING concern (see RequireServable): it belongs to `serve`, not to the operator DB commands
+	// (enroll, rotate, …) that share this config but expose no endpoint.
+	if err := validateTLSPair(c.TLSCertFile, c.TLSKeyFile); err != nil {
+		return err
+	}
+
+	if c.RetentionDays < 0 {
+		return fmt.Errorf("%sRETENTION_DAYS %d is negative; use 0 to keep history forever or a positive number of days", EnvPrefix, c.RetentionDays)
+	}
+	return nil
+}
+
+// ErrTLSRequired is the server start-up refusal when neither a TLS certificate/key pair nor the
+// explicit AllowPlaintext opt-out is set. It is a sentinel so main and the tests can match the exact
+// fail-safe rather than a substring.
+var ErrTLSRequired = errors.New(EnvPrefix + "TLS_CERT_FILE/" + EnvPrefix + "TLS_KEY_FILE are not set: refusing to serve a family location tracker in plaintext — set both, or set " + EnvPrefix + "ALLOW_PLAINTEXT=1 to run without TLS behind a trusted terminating proxy")
+
+// RequireServable is the §7 serving fail-safe: the HTTP server refuses to start with neither TLS nor
+// the explicit AllowPlaintext opt-out. It is separate from Load so that only the `serve` path enforces
+// it — the operator DB commands (enroll, rotate, add-place, …) share this config but expose no
+// endpoint, and requiring a TLS cert to enroll a phone would be a fail-safe pointed at the wrong thing.
+func (c *Config) RequireServable() error {
+	if !c.ServesTLS() && !c.AllowPlaintext {
+		return ErrTLSRequired
+	}
+	return nil
+}
+
+// validateTLSPair refuses a certificate without a key or a key without a certificate — a
+// half-configured pair is the dangerous case, because it reads as "TLS is set up" while the server
+// would actually fall through to plaintext.
+func validateTLSPair(certFile, keyFile string) error {
+	switch {
+	case certFile != "" && keyFile == "":
+		return fmt.Errorf("%sTLS_CERT_FILE is set but %sTLS_KEY_FILE is not: a certificate without its key cannot serve TLS", EnvPrefix, EnvPrefix)
+	case keyFile != "" && certFile == "":
+		return fmt.Errorf("%sTLS_KEY_FILE is set but %sTLS_CERT_FILE is not: a key without its certificate cannot serve TLS", EnvPrefix, EnvPrefix)
+	}
+	return nil
+}
+
+// LintTLS is the STRICTER production check `config-lint` runs, distinct from validate()'s start-up
+// rule. validate() lets AllowPlaintext through as a deliberate escape hatch; LintTLS does not — a
+// linted (production) configuration must terminate TLS, full stop, so "there is a plaintext endpoint"
+// is always a failure here whatever ALLOW_PLAINTEXT says. It reads the same two files as the server.
+func LintTLS(certFile, keyFile string) error {
+	certFile, keyFile = strings.TrimSpace(certFile), strings.TrimSpace(keyFile)
+	if err := validateTLSPair(certFile, keyFile); err != nil {
+		return err
+	}
+	if certFile == "" && keyFile == "" {
+		return fmt.Errorf("plaintext endpoint: %sTLS_CERT_FILE and %sTLS_KEY_FILE are not set, so the server would serve location data unencrypted. A production deployment must terminate TLS", EnvPrefix, EnvPrefix)
+	}
 	return nil
 }
 
@@ -161,4 +258,32 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool reads a boolean-ish flag: "1", "true", "yes", "on" (any case) are true; anything else,
+// including unset, is false. It is deliberately permissive on the true side and defaults false so an
+// unset flag is never accidentally "on".
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// envInt reads an integer with a default when unset/blank. A present-but-unparseable value is a
+// typed error, not a silent fallback to the default: a deployment that set RETENTION_DAYS=thirty
+// means to retain for a bounded window, and quietly treating that as "keep forever" is exactly the
+// silent-wrong-default the fail-safe forbids.
+func envInt(key string, def int) (int, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not an integer: %w", key, v, err)
+	}
+	return n, nil
 }

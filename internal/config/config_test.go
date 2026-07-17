@@ -35,6 +35,10 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvPrefix+"DATABASE_URL", validDSN)
 	t.Setenv(EnvPrefix+"ADDR", "")
 	t.Setenv(EnvPrefix+"LOG_LEVEL", "")
+	// Clear the TLS env for hygiene so the ambient environment cannot decide this test's outcome.
+	t.Setenv(EnvPrefix+"ALLOW_PLAINTEXT", "")
+	t.Setenv(EnvPrefix+"TLS_CERT_FILE", "")
+	t.Setenv(EnvPrefix+"TLS_KEY_FILE", "")
 
 	c, err := Load()
 	if err != nil {
@@ -100,6 +104,10 @@ func TestLoadPushProvider(t *testing.T) {
 		t.Setenv(EnvPrefix+"PUSH_PROVIDER", "")
 		t.Setenv(EnvPrefix+"FCM_PROJECT_ID", "")
 		t.Setenv(EnvPrefix+"FCM_CREDENTIALS_FILE", "")
+		// Clear TLS env for hygiene — these subtests are about push config.
+		t.Setenv(EnvPrefix+"ALLOW_PLAINTEXT", "")
+		t.Setenv(EnvPrefix+"TLS_CERT_FILE", "")
+		t.Setenv(EnvPrefix+"TLS_KEY_FILE", "")
 	}
 
 	t.Run("disabled by default", func(t *testing.T) {
@@ -156,7 +164,9 @@ func TestLoadPushProvider(t *testing.T) {
 func TestRedactedHidesThePassword(t *testing.T) {
 	// The DSN is the only config value carrying a credential, and start-up logging is
 	// where it would leak. This test is the tripwire on that.
-	t.Setenv(EnvPrefix+"DATABASE_URL", "postgres://tracker:hunter2@localhost:5432/tracker")
+	t.Setenv(EnvPrefix+"DATABASE_URL", "postgres://tracker:hunter2@localhost:5432/tracker") // secretscan:allow — synthetic redaction-test DSN, not a real credential
+	t.Setenv(EnvPrefix+"TLS_CERT_FILE", "")
+	t.Setenv(EnvPrefix+"TLS_KEY_FILE", "")
 
 	c, err := Load()
 	if err != nil {
@@ -172,4 +182,147 @@ func TestRedactedHidesThePassword(t *testing.T) {
 	if !strings.Contains(red, "localhost:5432/tracker") {
 		t.Errorf("Redacted() = %q, want it to keep the host and database", red)
 	}
+}
+
+// TestLoadTLS pins the §7 TLS handling: Load always refuses a half-configured cert/key pair (a deploy
+// that thinks it is encrypted and is not), while the "must serve TLS or explicitly allow plaintext"
+// policy lives in RequireServable — the serve path — so the operator DB commands are not made to carry
+// a TLS cert to enroll a phone.
+func TestLoadTLS(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Setenv(EnvPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(EnvPrefix+"ALLOW_PLAINTEXT", "")
+		t.Setenv(EnvPrefix+"TLS_CERT_FILE", "")
+		t.Setenv(EnvPrefix+"TLS_KEY_FILE", "")
+	}
+
+	t.Run("no TLS and no opt-out: Load succeeds but the serve path refuses", func(t *testing.T) {
+		base(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load without TLS should succeed (the DB commands need it): %v", err)
+		}
+		if err := c.RequireServable(); !errors.Is(err, ErrTLSRequired) {
+			t.Fatalf("RequireServable without TLS or ALLOW_PLAINTEXT = %v; want ErrTLSRequired", err)
+		}
+	})
+
+	t.Run("explicit plaintext opt-out is servable", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"ALLOW_PLAINTEXT", "1")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load with ALLOW_PLAINTEXT: %v", err)
+		}
+		if c.ServesTLS() {
+			t.Errorf("ServesTLS() is true with no cert/key configured")
+		}
+		if err := c.RequireServable(); err != nil {
+			t.Errorf("RequireServable with ALLOW_PLAINTEXT = %v; want nil", err)
+		}
+	})
+
+	t.Run("a cert without a key is refused at Load", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"TLS_CERT_FILE", "/etc/tracker/tls.crt")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TLS_KEY_FILE") {
+			t.Fatalf("cert without key: err = %v, want it to name the missing key", err)
+		}
+	})
+
+	t.Run("a key without a cert is refused at Load", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"TLS_KEY_FILE", "/etc/tracker/tls.key")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TLS_CERT_FILE") {
+			t.Fatalf("key without cert: err = %v, want it to name the missing cert", err)
+		}
+	})
+
+	t.Run("a full cert/key pair serves TLS", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"TLS_CERT_FILE", "/etc/tracker/tls.crt")
+		t.Setenv(EnvPrefix+"TLS_KEY_FILE", "/etc/tracker/tls.key")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load with a full TLS pair: %v", err)
+		}
+		if !c.ServesTLS() {
+			t.Errorf("ServesTLS() is false with both cert and key configured")
+		}
+		if err := c.RequireServable(); err != nil {
+			t.Errorf("RequireServable with a full pair = %v; want nil", err)
+		}
+	})
+}
+
+// TestLoadRetentionDays covers the retention window: unset is 0 (keep forever), a valid number is
+// carried through, a negative is refused, and a non-integer is a typed error rather than a silent
+// fall back to "keep forever".
+func TestLoadRetentionDays(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Setenv(EnvPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(EnvPrefix+"ALLOW_PLAINTEXT", "1")
+		t.Setenv(EnvPrefix+"TLS_CERT_FILE", "")
+		t.Setenv(EnvPrefix+"TLS_KEY_FILE", "")
+		t.Setenv(EnvPrefix+"RETENTION_DAYS", "")
+	}
+
+	t.Run("unset is keep-forever (0)", func(t *testing.T) {
+		base(t)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.RetentionDays != 0 {
+			t.Errorf("RetentionDays = %d, want 0 when unset", c.RetentionDays)
+		}
+	})
+
+	t.Run("a positive window is carried through", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"RETENTION_DAYS", "90")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.RetentionDays != 90 {
+			t.Errorf("RetentionDays = %d, want 90", c.RetentionDays)
+		}
+	})
+
+	t.Run("a negative window is refused", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"RETENTION_DAYS", "-1")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RETENTION_DAYS") {
+			t.Fatalf("negative retention: err = %v, want a refusal naming RETENTION_DAYS", err)
+		}
+	})
+
+	t.Run("a non-integer is a typed error, not a silent default", func(t *testing.T) {
+		base(t)
+		t.Setenv(EnvPrefix+"RETENTION_DAYS", "thirty")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "RETENTION_DAYS") {
+			t.Fatalf("non-integer retention: err = %v, want a typed error naming RETENTION_DAYS", err)
+		}
+	})
+}
+
+// TestLintTLS is the stricter production check: unlike Load it does NOT accept AllowPlaintext, so a
+// plaintext endpoint is always a failure, while a configured pair passes and a half-pair is named.
+func TestLintTLS(t *testing.T) {
+	t.Run("no TLS is a plaintext-endpoint failure", func(t *testing.T) {
+		if err := LintTLS("", ""); err == nil || !strings.Contains(err.Error(), "plaintext endpoint") {
+			t.Fatalf("LintTLS(\"\",\"\") = %v; want a plaintext-endpoint failure", err)
+		}
+	})
+	t.Run("a full pair passes", func(t *testing.T) {
+		if err := LintTLS("/etc/tracker/tls.crt", "/etc/tracker/tls.key"); err != nil {
+			t.Fatalf("LintTLS(full pair) = %v; want nil", err)
+		}
+	})
+	t.Run("a half pair is named, not passed", func(t *testing.T) {
+		if err := LintTLS("/etc/tracker/tls.crt", ""); err == nil || !strings.Contains(err.Error(), "TLS_KEY_FILE") {
+			t.Fatalf("LintTLS(cert only) = %v; want it to name the missing key", err)
+		}
+	})
 }
