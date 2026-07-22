@@ -24,9 +24,11 @@ leaves a place you have defined.
 > start in plaintext unless you say so explicitly), history **auto-purges** on a retention timer,
 > database **roles are least-privilege**, tokens can be **rotated and expired**, `tracker config-lint`
 > fails on a plaintext endpoint or a checked-in secret, and the honest server-holds-plaintext boundary
-> is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). It is not a finished tracker, and this README
-> will say so until it is. The wire contract is in [`SPEC.md`](SPEC.md); the plan lives in the umbrella
-> at `operations/roadmaps/tracker.md`.
+> is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). As of **C0** the **Android client exists as a
+> scaffold** — a Kotlin/Compose app (`android/`) that builds, installs, and shows one screen saying so;
+> it collects **no location yet** (all location logic is deferred to the C-track phases that follow).
+> It is not a finished tracker, and this README will say so until it is. The wire contract is in
+> [`SPEC.md`](SPEC.md); the plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
 ## Stack
 
@@ -34,7 +36,7 @@ leaves a place you have defined.
 |---|---|
 | **Server** | Go — `chi` router, `pgx` pool, `goose` migrations; a single static binary |
 | **Database** | **PostgreSQL + PostGIS**, `geography(Point,4326)` |
-| **Client** *(not started)* | native Kotlin (Android) |
+| **Client** *(scaffold)* | native Kotlin — Jetpack Compose + WorkManager; AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
 
 **PostGIS is not incidental.** Location math is the product, and it is where a tracker gets things
 quietly, confidently wrong. `geography` returns real **metres on the spheroid**; the `geometry` type on

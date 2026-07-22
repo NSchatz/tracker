@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">tracker</string>
+    <string name="scaffold_title">tracker</string>
+    <string name="scaffold_body">Client scaffold. Location collection is not implemented yet.</string>
+</resources>

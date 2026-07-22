@@ -1,0 +1,13 @@
+# Android / Gradle build outputs and machine-local files.
+.gradle/
+build/
+/build/
+app/build/
+captures/
+# The SDK location is provided via ANDROID_SDK_ROOT / ANDROID_HOME (see android/README.md),
+# never a committed local.properties — that path is machine-specific.
+local.properties
+*.iml
+.idea/
+# Lint report artifacts (written under build/ already, but be explicit).
+lint-report.*

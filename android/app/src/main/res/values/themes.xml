@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A Compose app still needs an Android XML theme for the Activity window before the
+      first frame. Material3's NoActionBar base is the minimal correct choice; the in-app
+      surface is Compose Material3.
+    -->
+    <style name="Theme.Tracker" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>

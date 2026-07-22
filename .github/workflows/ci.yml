@@ -30,7 +30,21 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
+      # The Android half of `make check` needs a JDK 17 (AGP 8.5 requires it) and an
+      # Android SDK. These steps only PROVISION the toolchain — exactly as setup-go does for
+      # the Go half. The version pins (AGP, Kotlin, SDK levels, Gradle via the committed
+      # wrapper) live in the repo's build files, never here, so CI cannot drift from the
+      # gate a human runs. setup-android installs cmdline-tools and accepts licenses;
+      # Gradle/AGP then fetch platforms;android-34 + build-tools;34.0.0 on demand.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
       # THE gate — the same target a human runs and the same one scripts/verify.sh runs.
+      # It is now BOTH stacks: the Go server and the Android client.
       #
       # `make test` inside it starts a REAL PostGIS via testcontainers (ubuntu-latest ships
       # a Docker daemon, so this works unmodified). Those tests FAIL rather than skip if

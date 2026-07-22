@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple location-pin glyph centered in the adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#7FE7C4"
+        android:pathData="M54,30c-9.94,0 -18,8.06 -18,18c0,13.5 18,30 18,30s18,-16.5 18,-30c0,-9.94 -8.06,-18 -18,-18zM54,54.5c-3.59,0 -6.5,-2.91 -6.5,-6.5s2.91,-6.5 6.5,-6.5s6.5,2.91 6.5,6.5s-2.91,6.5 -6.5,6.5z" />
+</vector>

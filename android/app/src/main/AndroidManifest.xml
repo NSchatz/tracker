@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      INTERNET is the only permission the scaffold declares: the client's whole job is to
+      report fixes to the server, so it needs the network from day one.
+
+      The location permissions this product ultimately needs — ACCESS_FINE_LOCATION,
+      ACCESS_BACKGROUND_LOCATION, FOREGROUND_SERVICE + FOREGROUND_SERVICE_LOCATION, and the
+      foreground service `type=location` — are DEFERRED to C1, together with the two-step
+      runtime grant flow. Declaring them here before the collection code exists would ask a
+      user for background location the app cannot yet use. They arrive with the code.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Tracker">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Tracker">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
