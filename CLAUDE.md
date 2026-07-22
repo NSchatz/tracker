@@ -16,7 +16,9 @@ don't build the next one because it seems easy.
 ## The gate
 
 ```bash
-make check     # gofmt · vet · build · test -race · staticcheck · govulncheck
+make check     # BOTH stacks: check-go + android
+make check-go  # gofmt · vet · build · test -race · staticcheck · govulncheck
+make android   # ./gradlew assembleDebug lintDebug testDebugUnitTest
 make smoke     # the real compose stack; asserts /healthz answers 200
 ```
 
@@ -24,6 +26,15 @@ make smoke     # the real compose stack; asserts /healthz answers 200
 `scripts/verify.sh tracker` — one gate, defined once, in the `Makefile`. Tool versions are pinned there
 and **nowhere else**: restating them in `ci.yml` is how CI silently drifts away from the gate a human
 runs.
+
+As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
+(`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable
+Docker daemon (for the PostGIS tests) **and** a JDK 17 + an Android SDK. The Android half resolves the
+SDK from `ANDROID_SDK_ROOT` (or `ANDROID_HOME`) and — like the PostGIS tests — **fails loudly when it is
+missing, never skips**. The one-time rootless SDK install is documented in
+[`android/README.md`](android/README.md). Android version pins (AGP, Kotlin, SDK levels) live in
+`android/gradle/libs.versions.toml` and `android/app/build.gradle.kts`, and Gradle in the committed
+wrapper — the same "pinned in one place, never restated in `ci.yml`" rule as the Go tools.
 
 ### The rule that is not negotiable: the tests FAIL, they never SKIP
 
