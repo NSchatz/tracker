@@ -2,17 +2,44 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      INTERNET is the only permission the scaffold declares: the client's whole job is to
-      report fixes to the server, so it needs the network from day one.
-
-      The location permissions this product ultimately needs — ACCESS_FINE_LOCATION,
-      ACCESS_BACKGROUND_LOCATION, FOREGROUND_SERVICE + FOREGROUND_SERVICE_LOCATION, and the
-      foreground service `type=location` — are DEFERRED to C1, together with the two-step
-      runtime grant flow. Declaring them here before the collection code exists would ask a
-      user for background location the app cannot yet use. They arrive with the code.
+      The client reports fixes to the family's server, so it needs the network from day one.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      C1 — location collection.
+
+      ACCESS_COARSE_LOCATION is declared alongside FINE deliberately, not as a fallback afterthought:
+      from Android 12 the user can answer the location prompt with "Approximate", and an app that
+      declares only FINE still ends up with a coarse grant. Declaring both is what lets that state be
+      detected and labelled honestly rather than mistaken for precise.
+
+      ACCESS_BACKGROUND_LOCATION is what makes collection survive the app being closed. It became a
+      separate runtime permission in Android 10 (API 29) — this app's minSdk — and it is requested as
+      a SECOND, separate step, never bundled with the foreground request. On Android 11+ the runtime
+      prompt has no "Allow all the time" option at all and only the settings page can grant it; see
+      permission/LocationPermissionFlow.kt.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!--
+      The foreground service. FOREGROUND_SERVICE_LOCATION is required for a service of
+      type=location, and from Android 14 (API 34 — this app's target) declaring the type is
+      mandatory, not optional.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!--
+      Android 13+: without this, the service's ongoing notification is suppressed. The service still
+      runs, but the person carrying the phone loses the always-visible signal that it is collecting —
+      which is the whole bargain a location foreground service is built on. Requested at runtime with
+      the foreground-location step, and its absence is surfaced in the UI rather than ignored.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
@@ -30,6 +57,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          exported="false": nothing outside this app may start location collection. An exported
+          service that collects location would let any app on the device turn the family tracker on.
+        -->
+        <service
+            android:name=".collect.LocationCollectionService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
     </application>
 
 </manifest>

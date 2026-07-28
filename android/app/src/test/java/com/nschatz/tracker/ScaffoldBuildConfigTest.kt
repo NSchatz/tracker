@@ -5,13 +5,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The C0 gate's JVM unit-test leg. Its job at scaffold stage is narrow and honest: prove
- * the `testDebugUnitTest` task is wired into `make check` and can see the app module's own
- * generated configuration. It asserts the scaffold's build metadata — nothing about
- * location, enrollment, or the server contract, all of which are later phases (C1+).
+ * The app module's generated build configuration.
  *
- * Real unit tests arrive with the logic they cover; this one keeps the gate leg live in the
- * meantime, so a later phase inherits a working test harness rather than wiring one up.
+ * This started life in C0 as a placeholder that only proved `testDebugUnitTest` was wired into the
+ * gate. It is kept because one of its assertions stopped being decorative in C1:
+ * `VERBOSE_LOGGING` is now **read by real code** — `LocationCollectionService.logDebug` gates every
+ * diagnostic on it, and the release variant sets it false so that location and credential
+ * diagnostics cannot reach a release logcat. Pinning the two variants' values here keeps that switch
+ * from being flipped by accident before C3 turns it into a tested guarantee.
  */
 class ScaffoldBuildConfigTest {
 

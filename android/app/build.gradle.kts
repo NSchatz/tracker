@@ -83,6 +83,8 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.material)
+    // C1: the fused location provider that drives the foreground service's continuous updates.
+    implementation(libs.play.services.location)
 
     testImplementation(libs.junit)
 }

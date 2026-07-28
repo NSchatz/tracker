@@ -1,6 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">tracker</string>
-    <string name="scaffold_title">tracker</string>
-    <string name="scaffold_body">Client scaffold. Location collection is not implemented yet.</string>
+
+    <!-- Home screen -->
+    <string name="app_title">tracker</string>
+    <string name="app_subtitle">Reports this phone\'s location to your family\'s own server.</string>
+
+    <!-- The foreground service's mandatory ongoing notification. Deliberately unambiguous: the
+         person carrying the phone must be able to tell, at a glance, that location is being
+         collected. It never contains a coordinate — a lock screen is not a private surface. -->
+    <string name="collection_channel_name">Location sharing</string>
+    <string name="collection_channel_description">Shows while tracker is sharing this phone\'s location with your family.</string>
+    <string name="collection_notification_title">Sharing your location</string>
+    <string name="collection_notification_body">tracker is reporting this phone\'s position to your family server.</string>
+
+    <!-- Permission flow -->
+    <string name="permission_step_foreground_title">Allow location access</string>
+    <string name="permission_step_foreground_body">tracker needs location access to report where this phone is. The next screen is the system permission prompt.</string>
+    <string name="permission_step_foreground_action">Allow location</string>
+
+    <string name="permission_step_background_dialog_title">Allow location all the time</string>
+    <string name="permission_step_background_dialog_body">To keep reporting when the app is closed, tracker needs background location. This is a second, separate prompt — Android will not ask for both at once.</string>
+    <string name="permission_step_background_dialog_action">Allow all the time</string>
+
+    <string name="permission_step_background_settings_title">Allow location all the time</string>
+    <string name="permission_step_background_settings_body">On Android 11 and later the permission prompt has no “Allow all the time” option — it can only be set in system settings. Open settings, choose Permissions → Location, and pick “Allow all the time”.</string>
+    <string name="permission_step_background_settings_action">Open settings</string>
+
+    <string name="permission_step_denied_title">Location access is blocked</string>
+    <string name="permission_step_denied_body">Android will no longer show the permission prompt for this app. Open settings and grant location access there.</string>
+    <string name="permission_step_denied_action">Open settings</string>
+
+    <string name="permission_ready_title">Permissions granted</string>
+    <string name="permission_ready_body">tracker can collect location continuously, including while the app is closed.</string>
+
+    <!-- Honest degraded states -->
+    <string name="warning_foreground_only">Background location is not granted. Collection works while the app is open, but Android will stop it once the app is closed — the trail will have gaps.</string>
+    <string name="warning_approximate">Only approximate location is granted, so positions may be off by a city block. Grant precise location for an accurate trail.</string>
+    <string name="warning_notifications_blocked">Notifications are blocked, so the ongoing “sharing your location” notice will not be visible. Collection still runs.</string>
+    <string name="action_upgrade_precise">Use precise location</string>
+
+    <!-- Server configuration -->
+    <string name="config_title">Server</string>
+    <string name="config_url_label">Server URL (https://…)</string>
+    <string name="config_token_label">Device token (from tracker enroll)</string>
+    <string name="config_save">Save</string>
+    <string name="config_saved">Saved.</string>
+    <string name="config_plaintext_note">Stored unencrypted on this device until secure storage ships (C3).</string>
+
+    <!-- Collection controls and status -->
+    <string name="collection_title">Collection</string>
+    <string name="collection_start">Start collecting</string>
+    <string name="collection_stop">Stop collecting</string>
+    <string name="collection_running">Running.</string>
+    <string name="collection_stopped">Stopped.</string>
+    <string name="collection_no_fix_yet">No fix reported yet.</string>
+    <string name="collection_limitation">No offline queue yet: a fix that cannot be sent is counted as dropped and lost. Durable queueing arrives in C2.</string>
 </resources>
