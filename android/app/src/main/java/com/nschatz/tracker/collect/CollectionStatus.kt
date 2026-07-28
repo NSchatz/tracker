@@ -23,8 +23,13 @@ import androidx.compose.runtime.setValue
  * device, which is also the only place C1's real behaviour can be observed at all (see
  * `android/README.md`).
  *
- * State is intentionally **not** persisted. It describes this process's run; after a restart the
- * honest answer is "nothing yet", not a stale number recovered from disk.
+ * The counters are intentionally **not** persisted. They describe this process's run; after a
+ * restart the honest answer is "nothing yet", not a stale number recovered from disk.
+ *
+ * [queued] is the exception, and necessarily so: it reports the depth of the on-disk queue, which
+ * genuinely does survive the process. It is read back from the queue rather than reset, because
+ * showing `0` while fixes are sitting on disk waiting to be sent would misrepresent the one thing
+ * C2 exists to guarantee.
  */
 object CollectionStatus {
 
@@ -37,10 +42,25 @@ object CollectionStatus {
         internal set
 
     /**
-     * Fixes this process gave up on: refused outright, or still failing when the retry budget ran
-     * out. **These are lost** — C1 has no durable queue, and pretending otherwise would be the
-     * silent-loss failure (risk path #3) rather than a documented limitation. C2 is what makes this
-     * counter stop being able to move for a transient outage.
+     * Fixes measured and written to the durable queue but not yet delivered.
+     *
+     * A non-zero value is **normal, not an error** — it is what the queue looks like while the phone
+     * is offline, and it is the number that says "nothing has been lost, it is waiting". It is shown
+     * next to [dropped] precisely so the two are not confused: queued fixes are still owed to the
+     * server, dropped ones never will be.
+     */
+    var queued: Int by mutableIntStateOf(0)
+        internal set
+
+    /**
+     * Fixes that were measured and will never reach the server: the server refused them
+     * permanently, they aged past its 90-day ingest window, they were evicted when the queue hit its
+     * cap, or they could not be written to (or read back from) disk.
+     *
+     * Since **C2** a transient failure can no longer move this counter — that is the whole point of
+     * the durable queue, and it is why the offline case now shows up in [queued] instead. What is
+     * left here is genuine, permanent loss, and it stays as prominent as [delivered] so it cannot be
+     * silent.
      */
     var dropped: Int by mutableIntStateOf(0)
         internal set
@@ -54,13 +74,19 @@ object CollectionStatus {
         internal set
 
     // The mutators are @Synchronized because they are genuinely called from more than one thread:
-    // `recordDelivered` and `recordDropped` run on the reporter's background thread, while the
-    // executor's rejection handler and the service lifecycle callbacks run on the main thread.
-    // `delivered += 1` is a read-modify-write, so without this a concurrent drop and delivery can
-    // lose an increment — on the one counter whose entire purpose is to be trustworthy about
-    // whether the trail has holes in it. Compose's snapshot state makes the *visibility* safe; it
-    // does not make the increment atomic.
+    // `recordFlush` runs on the WorkManager worker's thread, while `recordQueued`, `recordDropped`
+    // and the service lifecycle callbacks run on the main thread. `delivered += 1` is a
+    // read-modify-write, so without this a concurrent drop and delivery can lose an increment — on
+    // the one counter whose entire purpose is to be trustworthy about whether the trail has holes
+    // in it. Compose's snapshot state makes the *visibility* safe; it does not make the increment
+    // atomic.
 
+    /**
+     * Clears this process's counters at the start of a collection run.
+     *
+     * [queued] is deliberately untouched — see the class note. The caller sets it from the queue
+     * itself, which is the only source that can tell the truth about it.
+     */
     @Synchronized
     internal fun reset() {
         delivered = 0
@@ -69,10 +95,35 @@ object CollectionStatus {
         lastError = null
     }
 
+    /**
+     * Records a fix accepted into the durable queue.
+     *
+     * Deliberately does **not** clear [lastError]: a fix landing on disk says nothing about whether
+     * the last delivery attempt worked, and wiping the error here would make an ongoing outage look
+     * resolved every time a new fix was measured.
+     *
+     * @param queueDepth how many fixes are now waiting.
+     */
     @Synchronized
-    internal fun recordDelivered() {
-        delivered += 1
-        lastError = null
+    internal fun recordQueued(queueDepth: Int) {
+        queued = queueDepth
+    }
+
+    /**
+     * Records the result of one flush of the durable queue.
+     *
+     * [lastError] is cleared only when something was delivered and nothing was lost — a flush that
+     * delivered nine fixes and discarded one is not a clean bill of health.
+     */
+    @Synchronized
+    internal fun recordFlush(delivered: Int, discarded: Int, queued: Int, reason: String?) {
+        this.delivered += delivered
+        this.dropped += discarded
+        this.queued = queued
+        when {
+            reason != null -> lastError = reason
+            delivered > 0 && discarded == 0 -> lastError = null
+        }
     }
 
     @Synchronized
@@ -81,7 +132,7 @@ object CollectionStatus {
         lastError = reason
     }
 
-    /** Records [count] fixes lost at once — a queue abandoned on shutdown, say. */
+    /** Records [count] fixes lost at once — evicted from a full queue, say. */
     @Synchronized
     internal fun recordDroppedBatch(count: Int, reason: String) {
         if (count <= 0) return

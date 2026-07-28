@@ -24,16 +24,21 @@ leaves a place you have defined.
 > fails on a plaintext endpoint or a checked-in secret, and the honest server-holds-plaintext boundary
 > is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). As of **C1** the **Android client collects
 > location for real**: a Kotlin/Compose app (`android/`) with a **foreground service** (`type=location`)
-> that streams fixes from the **fused location provider** and reports each one to `POST /v1/fixes`,
-> behind the **two-step background-location permission flow** Android requires (foreground first; then
-> "Allow all the time", which on Android 11+ can only be granted from the settings page). **C1 has no
-> durable queue** — a fix that cannot be delivered is retried with jittered backoff and then counted as
-> dropped in the UI, and lost; the offline-durable WorkManager queue is C2. The device token is stored
-> **in plaintext** until C3, and there is no in-app map until C5. **Much of C1 is device behaviour a
-> headless CI cannot prove** — runtime grants, a live GPS stream, screen-off survival — so the gate
-> covers the pure, provable half (payload, validation, permission state machine, backoff, HTTP contract
-> against a real local server) and the rest is an **operator check on a real device**, written down in
-> [`android/README.md`](android/README.md) rather than faked with a passing test.
+> that streams fixes from the **fused location provider**, behind the **two-step background-location
+> permission flow** Android requires (foreground first; then "Allow all the time", which on Android 11+
+> can only be granted from the settings page). As of **C2** it **no longer loses what it collects**:
+> every fix is written to a **durable on-disk queue** before anything tries to send it, and a
+> **WorkManager** job constrained to `NetworkType.CONNECTED` drains it into `POST /v1/fixes`
+> oldest-first, retrying indefinitely with jittered exponential backoff. Going offline now *delays*
+> reporting instead of losing it, and a replay after a lost response is absorbed by the server's
+> `(device_id, ts)` dedup, so nothing is stored twice. The device token is stored **in plaintext** until
+> C3, and there is no in-app map until C5. **Much of the client is device behaviour a headless CI
+> cannot prove** — runtime grants, a live GPS stream, screen-off survival, and whether WorkManager
+> actually fires when the radio returns — so the gate covers the provable half (payload, validation,
+> permission state machine, the queue against a real filesystem, and the flush loop against a real
+> local server that enforces the same idempotency contract) and the rest is an **operator check on a
+> real device**, written down in [`android/README.md`](android/README.md) rather than faked with a
+> passing test.
 > It is not a finished tracker, and this README will say so until it is. The wire contract is in
 > [`SPEC.md`](SPEC.md); the plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
@@ -43,7 +48,7 @@ leaves a place you have defined.
 |---|---|
 | **Server** | Go — `chi` router, `pgx` pool, `goose` migrations; a single static binary |
 | **Database** | **PostgreSQL + PostGIS**, `geography(Point,4326)` |
-| **Client** *(collecting; C1)* | native Kotlin — Jetpack Compose, foreground service `type=location`, `FusedLocationProviderClient`, WorkManager (wired, used from C2); AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
+| **Client** *(collecting + offline-durable; C2)* | native Kotlin — Jetpack Compose, foreground service `type=location`, `FusedLocationProviderClient`, a file-backed durable fix queue flushed by **WorkManager**; AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
 
 **PostGIS is not incidental.** Location math is the product, and it is where a tracker gets things
 quietly, confidently wrong. `geography` returns real **metres on the spheroid**; the `geometry` type on
@@ -115,7 +120,8 @@ A phone reports its location by POSTing a fix with a **per-device bearer token**
 contract — schema, auth, idempotency, errors — is [`SPEC.md`](SPEC.md); the essentials:
 
 - **`POST /v1/fixes`** — the first-party JSON schema (`lat`, `lon`, `ts` required; `accuracy`,
-  `battery`, `speed`, `trigger`, `msg_id` optional). The Android client will speak this.
+  `battery`, `speed`, `trigger`, `msg_id` optional). The Android client speaks this, and since **C2**
+  it buffers these exact bytes on disk until the server confirms them.
 - **`POST /owntracks`** — an **interim, deprecatable** adapter for the stock OwnTracks Android app,
   so a real phone can drive the server before the first-party client exists. It is not a product
   dependency and is a candidate for retirement in S7.
@@ -402,16 +408,21 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **The Android client collects and reports, but loses fixes it cannot deliver.** As of C1 the app runs
-  a foreground service and POSTs each fix to `/v1/fixes`. It has **no durable queue**: a report that
-  fails is retried with jittered backoff a bounded number of times and then counted as `dropped` in the
-  UI and lost. Airplane mode for long enough *will* leave a gap in the trail. C2 is the phase that makes
-  this lossless; until then the interim OwnTracks adapter remains the battery-tuned alternative.
+- **The Android client's offline queue is bounded, and its scheduling is not gate-proved.** As of C2 a
+  fix is written to disk before delivery is attempted and stays there until the server has it, so a
+  transient failure can no longer lose one. Three honest edges remain: the queue holds **5,000 fixes**
+  (~3.5 days at the current cadence) and evicts the **oldest** past that, counted as `dropped`;
+  WorkManager's retry backoff is indefinite but tops out around **5 hours**, so a flush after a very
+  long outage can lag the reconnection (latency, not loss); and delivery is at-least-once on the wire
+  — the server's `(device_id, ts)` dedup is what makes it exactly-once in the database — so the app's
+  `delivered` counter can over-count replays. The crash-atomicity of the *writer* (temp → `fsync` →
+  rename) is review-only; the reader half of it is tested.
 - **Most of the client's behaviour is not provable in CI, and is not claimed to be.** Runtime permission
-  grants, a live GPS stream, foreground-service survival with the screen off, and OEM battery-killer
-  behaviour all need a real device. The gate covers the pure half — payload construction, coordinate and
-  timestamp validation, the permission state machine, the backoff policy, and the HTTP contract against a
-  real local server — and the rest is an explicit **operator device check** documented in
+  grants, a live GPS stream, foreground-service survival with the screen off, whether WorkManager runs
+  the flush when connectivity returns, and OEM battery-killer behaviour all need a real device. The gate
+  covers the pure half — payload construction, coordinate and timestamp validation, the permission state
+  machine, the durable queue against a real filesystem, and the flush loop against a real local server
+  — and the rest is an explicit **operator device check** documented in
   [`android/README.md`](android/README.md). No test in this repo mocks the platform and then reports the
   mock's answer as evidence.
 - **The client's device token is stored in plaintext** `SharedPreferences` until C3 moves it to

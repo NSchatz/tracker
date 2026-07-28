@@ -67,7 +67,7 @@ class FixReporterTest {
 
     @Test
     fun postsToTheV1FixesPath() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         val request = lastRequest()
         assertEquals("POST", request.method)
         assertEquals("/v1/fixes", request.target)
@@ -76,13 +76,13 @@ class FixReporterTest {
     /** The device (write) credential, in the canonical Bearer form SPEC.md documents. */
     @Test
     fun sendsTheDeviceTokenAsABearerCredential() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         assertEquals("Bearer $exampleCredential", lastRequest().headers["authorization"])
     }
 
     @Test
     fun sendsJsonContentType() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         assertEquals("application/json", lastRequest().headers["content-type"])
     }
 
@@ -92,7 +92,7 @@ class FixReporterTest {
      */
     @Test
     fun sendsExactlyTheFirstPartySchemaBody() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         assertEquals(
             """{"lat":41.9028,"lon":12.4964,"ts":1752566400,"accuracy":5.0,"battery":88,""" +
                 """"speed":1.4,"trigger":"periodic","msg_id":"m-1"}""",
@@ -102,7 +102,7 @@ class FixReporterTest {
 
     @Test
     fun omitsAbsentOptionalFieldsFromTheWireBody() {
-        reporter().report(Fix(lat = 1.0, lon = 2.0, tsEpochSeconds = 3))
+        reporter().post(Fix(lat = 1.0, lon = 2.0, tsEpochSeconds = 3).toJsonBody())
         assertEquals("""{"lat":1.0,"lon":2.0,"ts":3}""", lastRequest().body)
     }
 
@@ -113,7 +113,7 @@ class FixReporterTest {
      */
     @Test
     fun sendsAFixedContentLengthRatherThanChunkedEncoding() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         val request = lastRequest()
         assertNotNull("Content-Length must be declared", request.headers["content-length"])
         assertEquals(request.body.toByteArray(Charsets.UTF_8).size, request.headers["content-length"]!!.toInt())
@@ -122,7 +122,7 @@ class FixReporterTest {
 
     @Test
     fun toleratesATrailingSlashOnTheConfiguredBaseUrl() {
-        reporter("${server.baseUrl}/").report(fix)
+        reporter("${server.baseUrl}/").post(fix.toJsonBody())
         assertEquals("/v1/fixes", lastRequest().target)
     }
 
@@ -131,14 +131,14 @@ class FixReporterTest {
     @Test
     fun a201IsReportedAsStored() {
         server.responseStatus = 201
-        assertEquals(ReportOutcome.Stored, reporter().report(fix))
+        assertEquals(ReportOutcome.Stored, reporter().post(fix.toJsonBody()))
     }
 
     @Test
     fun a200IsReportedAsAnIdempotentDuplicate() {
         server.responseStatus = 200
         server.responseBody = """{"status":"duplicate","deduped":true}"""
-        val outcome = reporter().report(fix)
+        val outcome = reporter().post(fix.toJsonBody())
         assertEquals(ReportOutcome.Duplicate, outcome)
         assertTrue("a replay means the fix is on the server", outcome.isDelivered)
     }
@@ -148,7 +148,7 @@ class FixReporterTest {
     fun a400CarriesTheServersTypedErrorThrough() {
         server.responseStatus = 400
         server.responseBody = """{"error":"invalid_fix","message":"latitude 122.3321 is outside [-90, 90]"}"""
-        val outcome = reporter().report(fix) as ReportOutcome.Rejected
+        val outcome = reporter().post(fix.toJsonBody()) as ReportOutcome.Rejected
         assertEquals(400, outcome.status)
         assertEquals("invalid_fix", outcome.errorCode)
         assertNotNull(outcome.message)
@@ -177,7 +177,7 @@ class FixReporterTest {
     fun a401IsPermanentEvenThoughTheJdkSwallowsItsBody() {
         server.responseStatus = 401
         server.responseBody = """{"error":"unauthorized","message":"unknown or revoked token"}"""
-        val outcome = reporter().report(fix) as ReportOutcome.Rejected
+        val outcome = reporter().post(fix.toJsonBody()) as ReportOutcome.Rejected
         assertEquals(401, outcome.status)
         assertFalse("a 401 must never be retried", outcome.isRetryable)
         assertFalse(outcome.isDelivered)
@@ -193,7 +193,7 @@ class FixReporterTest {
     fun a403IsPermanentAndCarriesTheServersTypedError() {
         server.responseStatus = 403
         server.responseBody = """{"error":"unauthorized","message":"device belongs to another family"}"""
-        val outcome = reporter().report(fix) as ReportOutcome.Rejected
+        val outcome = reporter().post(fix.toJsonBody()) as ReportOutcome.Rejected
         assertEquals(403, outcome.status)
         assertFalse(outcome.isRetryable)
         assertTrue(outcome.describe().contains("token"))
@@ -203,7 +203,7 @@ class FixReporterTest {
     fun a500IsRetryable() {
         server.responseStatus = 500
         server.responseBody = """{"error":"internal","message":"could not store the fix"}"""
-        val outcome = reporter().report(fix)
+        val outcome = reporter().post(fix.toJsonBody())
         assertTrue(outcome.isRetryable)
         assertFalse(outcome.isDelivered)
     }
@@ -216,7 +216,7 @@ class FixReporterTest {
     @Test
     fun anUnreachableServerIsRetryableRatherThanAnException() {
         // Port 1 on loopback: reliably refused, no DNS lookup, no timeout wait.
-        val outcome = FixReporter("http://127.0.0.1:1", exampleCredential).report(fix)
+        val outcome = FixReporter("http://127.0.0.1:1", exampleCredential).post(fix.toJsonBody())
         assertTrue("expected retryable, got $outcome", outcome.isRetryable)
         assertFalse(outcome.isDelivered)
     }
@@ -224,7 +224,7 @@ class FixReporterTest {
     /** One report is one request. Any retry loop is the caller's, never a hidden one in here. */
     @Test
     fun oneReportSendsExactlyOneRequest() {
-        reporter().report(fix)
+        reporter().post(fix.toJsonBody())
         assertEquals(1, server.requests.size)
     }
 
@@ -237,11 +237,11 @@ class FixReporterTest {
     fun anUnparseableErrorBodyDoesNotChangeTheClassification() {
         server.responseStatus = 503
         server.responseBody = "<html><body>Gateway Timeout</body></html>"
-        assertTrue(reporter().report(fix).isRetryable)
+        assertTrue(reporter().post(fix.toJsonBody()).isRetryable)
 
         server.responseStatus = 400
         server.responseBody = "not json at all"
-        val rejected = reporter().report(fix) as ReportOutcome.Rejected
+        val rejected = reporter().post(fix.toJsonBody()) as ReportOutcome.Rejected
         assertEquals(400, rejected.status)
         assertNull(rejected.errorCode)
     }
@@ -255,7 +255,7 @@ class FixReporterTest {
         val outcomes = Collections.synchronizedList(mutableListOf<ReportOutcome>())
         repeat(4) { index ->
             Thread {
-                outcomes.add(reporter.report(fix.copy(tsEpochSeconds = 1_752_566_400L + index)))
+                outcomes.add(reporter.post(fix.copy(tsEpochSeconds = 1_752_566_400L + index).toJsonBody()))
                 latch.countDown()
             }.start()
         }
