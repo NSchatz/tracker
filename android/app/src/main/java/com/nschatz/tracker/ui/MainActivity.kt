@@ -60,6 +60,8 @@ import com.nschatz.tracker.permission.LocationGrants
 import com.nschatz.tracker.permission.LocationPermissionFlow
 import com.nschatz.tracker.permission.PermissionStep
 import com.nschatz.tracker.permission.SettingsReason
+import com.nschatz.tracker.queue.FixQueues
+import com.nschatz.tracker.queue.FixUploadWorker
 
 /**
  * The client's single screen: the **two-step permission flow**, the server configuration, and an
@@ -75,6 +77,11 @@ import com.nschatz.tracker.permission.SettingsReason
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Show the truth about the durable queue, and give a backlog left by a killed process a
+        // chance to drain just because the app was opened. Both are cheap: the depth is a directory
+        // listing, and the flush is unique work that a pending one absorbs.
+        CollectionStatus.recordQueued(FixQueues.of(this).size())
+        FixUploadWorker.enqueueFlush(this)
         enableEdgeToEdge()
         setContent {
             TrackerTheme {
@@ -304,7 +311,14 @@ private fun ServerConfigCard() {
                     // Report the validated verdict, not a blanket "Saved": a URL the client will
                     // refuse to use must say so here, not fail silently at the first fix.
                     message = when (val status = prefs.readConfig()) {
-                        is ConfigStatus.Configured -> context.getString(R.string.config_saved)
+                        is ConfigStatus.Configured -> {
+                            // A usable configuration is the one thing that unblocks a queue parked
+                            // by a `Result.failure()` for want of a URL or a token, so ask for a
+                            // flush the moment one exists.
+                            FixUploadWorker.enqueueFlush(context)
+                            context.getString(R.string.config_saved)
+                        }
+
                         is ConfigStatus.Incomplete -> status.reason
                     }
                 }) { Text(stringResource(R.string.config_save)) }
@@ -338,11 +352,19 @@ private fun CollectionCard(canCollect: Boolean) {
 
             // The counters. `dropped` is shown with the same prominence as `delivered` on purpose:
             // a client that only ever displays its successes is how silent fix loss stays silent.
-            if (CollectionStatus.lastFixAtMillis == 0L && CollectionStatus.delivered == 0) {
+            // `queued` sits between them because it is the number that distinguishes the two — a
+            // rising queue during an outage means nothing has been lost, which is the guarantee C2
+            // adds and the thing a worried user most needs to be able to see.
+            if (CollectionStatus.lastFixAtMillis == 0L &&
+                CollectionStatus.delivered == 0 &&
+                CollectionStatus.queued == 0
+            ) {
                 Text(stringResource(R.string.collection_no_fix_yet), style = MaterialTheme.typography.bodySmall)
             } else {
                 Text(
-                    "delivered: ${CollectionStatus.delivered}   dropped: ${CollectionStatus.dropped}",
+                    "delivered: ${CollectionStatus.delivered}   " +
+                        "queued: ${CollectionStatus.queued}   " +
+                        "dropped: ${CollectionStatus.dropped}",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

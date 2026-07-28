@@ -17,11 +17,10 @@ import java.nio.charset.StandardCharsets
  *
  * ### What this is not
  *
- * It is a **single attempt**, with no queue behind it. A fix that fails is the caller's problem;
- * there is no on-disk buffer, so a fix that cannot be delivered while the app is running is lost.
- * The durable, offline-surviving queue — persisted across process death, flushed by WorkManager on
- * `NetworkType.CONNECTED` — is **C2**, and it is the phase that closes risk path #3. C1 proves the
- * contract; C2 makes it lossless. See `android/README.md`.
+ * It is a **single attempt**, and it holds nothing. A fix that fails is the caller's problem: this
+ * class neither retries nor stores. Durability and the retry schedule belong to
+ * [com.nschatz.tracker.queue.FixQueue] and [com.nschatz.tracker.queue.FixUploadWorker] (C2), which
+ * is what keeps this class a plain, exactly-testable statement of the wire contract.
  *
  * @param baseUrl the server root, e.g. `https://tracker.example.org`. Trailing slashes are fine.
  * @param deviceToken the per-device bearer token issued by `tracker enroll`.
@@ -35,14 +34,25 @@ class FixReporter(
     private val endpoint: URL = URL(baseUrl.trimEnd('/') + FIXES_PATH)
 
     /**
-     * Sends one fix and classifies the result.
+     * Sends one **already-encoded** `/v1/fixes` body and classifies the result.
+     *
+     * It takes bytes rather than a [Fix] on purpose. Since C2 the only route from a measured fix to
+     * the wire runs through [com.nschatz.tracker.queue.FixQueue], which encodes the body once, at
+     * enqueue, and stores *those* bytes — so what was validated is what is sent, and a fix replayed
+     * after a lost response carries the same `msg_id` rather than a freshly generated one. A
+     * convenience `report(fix)` overload here would be a second, un-queued path to the server: it
+     * would be the one thing in the app that could send a fix without persisting it first, which is
+     * exactly the C1 behaviour this phase removed.
      *
      * Never throws for a network failure — an unreachable server is an expected, transient state on
      * a phone, so it comes back as [ReportOutcome.Retryable] like any other. It also never *stores*
-     * anything: a caller that wants the fix to survive this failure has to hold it itself (C2).
+     * anything: holding the fix across a failure is the queue's job.
+     *
+     * @param body a complete JSON object in the first-party schema; see [Fix.toJsonBody].
      */
-    fun report(fix: Fix): ReportOutcome {
-        val body = fix.toJsonBody().toByteArray(StandardCharsets.UTF_8)
+    fun post(body: String): ReportOutcome = postBytes(body.toByteArray(StandardCharsets.UTF_8))
+
+    private fun postBytes(body: ByteArray): ReportOutcome {
         var connection: HttpURLConnection? = null
         return try {
             connection = (endpoint.openConnection() as HttpURLConnection).apply {

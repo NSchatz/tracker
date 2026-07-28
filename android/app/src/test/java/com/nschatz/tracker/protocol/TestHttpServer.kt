@@ -37,13 +37,25 @@ internal class TestHttpServer : Closeable {
     /** Recorded requests, in arrival order. */
     val requests: MutableList<RecordedRequest> = Collections.synchronizedList(mutableListOf())
 
-    /** The status to answer with. Changed per test. */
+    /** The status to answer with. Changed per test. Ignored when [responder] is set. */
     @Volatile
     var responseStatus: Int = 201
 
-    /** The body to answer with. */
+    /** The body to answer with. Ignored when [responder] is set. */
     @Volatile
     var responseBody: String = """{"status":"stored","deduped":false}"""
+
+    /**
+     * Decides the response per request, overriding [responseStatus]/[responseBody] when set.
+     *
+     * Added for the C2 queue tests, which need a server that behaves like the real one rather than
+     * a constant: `POST /v1/fixes` answers `201` the first time it sees a `(device, ts)` and `200`
+     * on a replay, so "delivered exactly once" is a claim the *server* can contradict. A fixed
+     * status could not — every replay would look like a fresh store, and a queue that sent each fix
+     * twice would pass.
+     */
+    @Volatile
+    var responder: ((RecordedRequest) -> Pair<Int, String>)? = null
 
     @Volatile
     private var closed = false
@@ -93,24 +105,24 @@ internal class TestHttpServer : Closeable {
             read += n
         }
 
-        requests.add(
-            RecordedRequest(
-                method = method,
-                target = target,
-                headers = headers.toMap(),
-                body = String(body, 0, read, StandardCharsets.UTF_8),
-            ),
+        val request = RecordedRequest(
+            method = method,
+            target = target,
+            headers = headers.toMap(),
+            body = String(body, 0, read, StandardCharsets.UTF_8),
         )
+        requests.add(request)
 
-        val payload = responseBody.toByteArray(StandardCharsets.UTF_8)
+        val (status, bodyText) = responder?.invoke(request) ?: (responseStatus to responseBody)
+        val payload = bodyText.toByteArray(StandardCharsets.UTF_8)
         val response = ByteArrayOutputStream()
         // The real server sends `WWW-Authenticate: Bearer` on a 401 (see server.go's `unauthorized`),
         // so this one does too — otherwise the test would be exercising a response shape the client
         // will never actually meet.
-        val authenticateHeader = if (responseStatus == 401) "WWW-Authenticate: Bearer\r\n" else ""
+        val authenticateHeader = if (status == 401) "WWW-Authenticate: Bearer\r\n" else ""
         response.write(
             (
-                "HTTP/1.1 $responseStatus ${reasonFor(responseStatus)}\r\n" +
+                "HTTP/1.1 $status ${reasonFor(status)}\r\n" +
                     authenticateHeader +
                     "Content-Type: application/json\r\n" +
                     "Content-Length: ${payload.size}\r\n" +

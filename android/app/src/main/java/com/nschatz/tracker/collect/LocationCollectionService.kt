@@ -23,18 +23,16 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.nschatz.tracker.BuildConfig
 import com.nschatz.tracker.R
-import com.nschatz.tracker.protocol.BackoffPolicy
 import com.nschatz.tracker.protocol.FixFactory
 import com.nschatz.tracker.protocol.FixResult
-import com.nschatz.tracker.protocol.FixReporter
 import com.nschatz.tracker.protocol.FixTrigger
 import com.nschatz.tracker.protocol.LocationReading
-import com.nschatz.tracker.protocol.ReportOutcome
+import com.nschatz.tracker.queue.EnqueueResult
+import com.nschatz.tracker.queue.FixQueue
+import com.nschatz.tracker.queue.FixQueues
+import com.nschatz.tracker.queue.FixUploadWorker
 import com.nschatz.tracker.ui.MainActivity
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
-import kotlin.random.Random
+import java.util.UUID
 
 /**
  * The **foreground service** that collects location continuously and reports each fix to
@@ -69,25 +67,16 @@ import kotlin.random.Random
 class LocationCollectionService : Service() {
 
     private var fusedClient: FusedLocationProviderClient? = null
-    private var reporter: FixReporter? = null
 
     /**
-     * One background thread for network reports, fed by a **small bounded queue**.
+     * The durable queue every measured fix is written to before anything tries to send it.
      *
-     * Bounded on purpose. A single thread that blocks through a retry chain while fixes keep
-     * arriving would, with an unbounded queue, grow until the process died — turning a network
-     * outage into a crash. With a bounded queue the overflow is a *counted, visible* drop
-     * ([CollectionStatus.dropped]) instead. Neither is good; C1's honest position is that fixes can
-     * be lost and the app says how many, and **C2** is the phase that replaces this with a durable
-     * on-disk queue that survives both the outage and the process.
+     * Since **C2** the service does no networking at all. It measures, validates, persists, and asks
+     * WorkManager to flush — which is what makes a fix survive an outage, a process death and a
+     * reboot. C1's in-memory bounded executor is gone with it: its overflow was a counted but real
+     * loss, and there is nothing left for it to do now that "hold the fix" means "write it to disk".
      */
-    private val reportExecutor = ThreadPoolExecutor(
-        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(REPORT_QUEUE_CAPACITY),
-    ) { runnable, _ ->
-        // Rejected because the queue is full: count it and say so, never fail silently.
-        CollectionStatus.recordDropped("report queue full — a fix was dropped (no durable queue until C2)")
-        logDebug("dropping a fix: report queue is full ($runnable)")
-    }
+    private val queue: FixQueue by lazy { FixQueues.of(this) }
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -172,10 +161,13 @@ class LocationCollectionService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val config = (status as ConfigStatus.Configured).config
-        reporter = FixReporter(baseUrl = config.baseUrl, deviceToken = config.deviceToken)
-
         CollectionStatus.reset()
+        // The queue may already hold fixes from a previous run — that is exactly what C2 buys — so
+        // the depth is read from disk rather than assumed to be zero, and a flush is asked for
+        // straight away so a backlog left by a killed process starts draining without waiting for
+        // the next fix.
+        CollectionStatus.recordQueued(queue.size())
+        FixUploadWorker.enqueueFlush(this)
         CollectionStatus.running = true
         startLocationUpdates()
         // START_STICKY: if the system kills us for memory, ask to be restarted. It is a request,
@@ -187,19 +179,10 @@ class LocationCollectionService : Service() {
 
     override fun onDestroy() {
         fusedClient?.removeLocationUpdates(locationCallback)
-        // shutdownNow returns the tasks it never ran — up to REPORT_QUEUE_CAPACITY fixes that were
-        // measured and are now gone. COUNT THEM. `dropped` is the one number whose whole job is to
-        // be trustworthy about holes in the trail, and silently discarding a queue on shutdown is
-        // exactly the kind of loss that would make it a lie. (The in-flight task counts itself when
-        // its sleep is interrupted — see deliver().)
-        val abandoned = reportExecutor.shutdownNow().size
-        if (abandoned > 0) {
-            CollectionStatus.recordDroppedBatch(
-                abandoned,
-                "$abandoned fix(es) were still waiting to send when collection stopped, and were lost " +
-                    "(no durable queue until C2).",
-            )
-        }
+        // Nothing to abandon. C1 had to count the fixes its in-memory executor still held when the
+        // service stopped, because they were lost at that moment. Since C2 an undelivered fix is on
+        // disk and the flush job is WorkManager's, so stopping collection ends measurement and
+        // leaves delivery running — a stop is no longer a loss.
         CollectionStatus.running = false
         super.onDestroy()
     }
@@ -232,6 +215,11 @@ class LocationCollectionService : Service() {
             nowEpochSeconds = nowSeconds,
             batteryPct = readBatteryPercent(),
             trigger = FixTrigger.PERIODIC,
+            // The correlator is generated HERE, once, and is then persisted with the fix. It must
+            // not be regenerated on a retry: `msg_id` is how a human correlates one report across
+            // the client log and the server's history, and a replayed fix that invented a new one
+            // would look like a second, different report of the same instant.
+            msgId = UUID.randomUUID().toString(),
         )
         when (result) {
             is FixResult.Refused -> {
@@ -244,63 +232,41 @@ class LocationCollectionService : Service() {
 
             is FixResult.Valid -> {
                 CollectionStatus.lastFixAtMillis = System.currentTimeMillis()
-                val activeReporter = reporter ?: return
-                reportExecutor.execute { deliver(activeReporter, result) }
+                enqueue(result)
             }
         }
     }
 
     /**
-     * Sends one fix, retrying only what is worth retrying.
+     * Persists one fix and asks for a flush.
      *
-     * The retry loop lives here rather than in [FixReporter] so the reporter stays a single, testable
-     * request. The *policy* it follows — exponential, capped, full-jitter, bounded attempts — is
-     * [BackoffPolicy], which is pure and unit-tested; this method only supplies the clock.
+     * This is the whole of C2's write path in the service: measure, store, ask. Nothing here blocks
+     * on the network, so a dead radio no longer backs up behind the location callback, and nothing
+     * is held in memory that a process death could take.
      */
-    private fun deliver(activeReporter: FixReporter, result: FixResult.Valid) {
-        val policy = BackoffPolicy()
-        var attempt = 1
-        while (true) {
-            val outcome = activeReporter.report(result.fix)
-            when {
-                outcome.isDelivered -> {
-                    CollectionStatus.recordDelivered()
-                    return
-                }
-
-                !outcome.isRetryable -> {
-                    // A 400 or a 401: this payload or this credential will never be accepted.
-                    // Retrying is an infinite loop, so stop and surface why.
-                    CollectionStatus.recordDropped(
-                        (outcome as? ReportOutcome.Rejected)?.describe() ?: "The server refused the fix.",
+    private fun enqueue(result: FixResult.Valid) {
+        when (val outcome = queue.enqueue(result.fix)) {
+            is EnqueueResult.Queued -> {
+                if (outcome.evicted > 0) {
+                    // The queue was full, so the oldest fixes were sacrificed for this one. Real
+                    // loss, and the only kind an outage can still cause — say so.
+                    CollectionStatus.recordDroppedBatch(
+                        outcome.evicted,
+                        "The offline queue is full, so ${outcome.evicted} of the oldest waiting " +
+                            "fix(es) were discarded. The server has not been reachable for a long time.",
                     )
-                    return
                 }
+                CollectionStatus.recordQueued(queue.size())
+                FixUploadWorker.enqueueFlush(this)
+            }
 
-                !policy.shouldRetry(attempt) -> {
-                    CollectionStatus.recordDropped(
-                        "gave up after $attempt attempts: ${(outcome as ReportOutcome.Retryable).reason}",
-                    )
-                    return
-                }
+            // Same instant, already waiting. The server would dedup it anyway; absorbing it here is
+            // the identical outcome without the round trip.
+            is EnqueueResult.AlreadyQueued -> logDebug("a fix for this instant was already queued")
 
-                else -> {
-                    val delay = policy.delayMillis(attempt, Random.nextDouble())
-                    try {
-                        Thread.sleep(delay)
-                    } catch (_: InterruptedException) {
-                        // Collection is shutting down mid-backoff. This fix was measured and is now
-                        // lost, so it is counted — an uncounted loss here would understate `dropped`
-                        // precisely when the app is being stopped, which is when a user is most
-                        // likely to look at it.
-                        CollectionStatus.recordDropped(
-                            "A fix was still being retried when collection stopped, and was lost.",
-                        )
-                        Thread.currentThread().interrupt()
-                        return
-                    }
-                    attempt += 1
-                }
+            is EnqueueResult.Failed -> {
+                CollectionStatus.recordDropped(outcome.reason)
+                logDebug("failed to queue a fix: ${outcome.reason}")
             }
         }
     }
@@ -391,7 +357,6 @@ class LocationCollectionService : Service() {
         private const val TAG = "TrackerCollection"
         private const val CHANNEL_ID = "tracker_collection"
         private const val NOTIFICATION_ID = 1001
-        private const val REPORT_QUEUE_CAPACITY = 32
 
         /**
          * Stops collection, delivered by the **notification's Stop action**.

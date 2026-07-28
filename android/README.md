@@ -2,11 +2,12 @@
 
 The native **Kotlin / Jetpack Compose** client for tracker.
 
-As of **C1** it does the first real thing: a **foreground service** collects location continuously
-from the **fused location provider** and reports each fix to the server's already-shipped
-`POST /v1/fixes`, behind the **two-step background-location permission flow** that Android requires.
-It does **not** yet queue fixes durably (C2), store its token securely (C3), adapt its cadence to
-save battery (C4), or show a map (C5).
+As of **C2** it collects and it **does not lose what it collects**: a **foreground service** takes
+continuous fixes from the **fused location provider** behind the **two-step background-location
+permission flow**, writes each one to a **durable on-disk queue**, and a **WorkManager** job
+constrained to `NetworkType.CONNECTED` drains that queue into the server's already-shipped
+`POST /v1/fixes`. Going offline now delays reporting instead of losing it. It does **not** yet store
+its token securely (C3), adapt its cadence to save battery (C4), or show a map (C5).
 
 ## What exists
 
@@ -14,9 +15,11 @@ save battery (C4), or show a map (C5).
 |---|---|
 | **Collection** | `collect/LocationCollectionService` — a foreground service, `type=location`, with the mandatory ongoing notification. Continuous updates from `FusedLocationProviderClient`. |
 | **Permission flow** | `permission/LocationPermissionFlow` — the two-step grant, as a pure state machine. Foreground first; background second, and on Android 11+ that second step is the **settings page**, not a dialog. |
-| **Wire contract** | `protocol/` — the `POST /v1/fixes` payload, its validation, the response classifier, the retry/backoff policy, and the HTTP reporter. All pure JDK/Kotlin, no framework classes. |
+| **Wire contract** | `protocol/` — the `POST /v1/fixes` payload, its validation, the response classifier, and the HTTP reporter. All pure JDK/Kotlin, no framework classes. |
+| **Durable queue** | `queue/FixQueue` — one atomically-written file per fix under `filesDir`, named by its `ts`, holding the exact wire body. Survives the process, a reboot, and a long outage. |
+| **Flush** | `queue/QueueFlusher` (pure: what to send, keep, discard) driven by `queue/FixUploadWorker` (WorkManager, `NetworkType.CONNECTED`, exponential backoff jittered by `queue/FlushBackoff`). |
 | **Configuration** | `collect/ClientPreferences` — server URL + device token, entered in-app. **Plaintext for now** (see *Known limitations*). |
-| **UI** | `ui/MainActivity` — one screen: the current permission step, the server settings, start/stop, and honest counters. |
+| **UI** | `ui/MainActivity` — one screen: the current permission step, the server settings, start/stop, and honest counters (`delivered` / `queued` / `dropped`). |
 
 ### The shape of the code, and why
 
@@ -59,12 +62,31 @@ Android 10 phone was caught by `lintDebug` on the first run of this phase, not b
   location is never bundled into the foreground request; that API 29 gets a dialog and API 30+ gets
   the settings page; that a permanently-denied grant routes to settings instead of re-requesting into
   silence; that an approximate-only grant is not re-prompted forever.
-- **The retry policy**: exponential growth, saturation at the ceiling instead of Long overflow into a
-  negative (instant, infinite) delay, full jitter across the window, bounded attempts.
 - **The response classifier**: that `200` (idempotent replay) counts as delivered, that `400`/`401`
   are permanent, that `5xx`/`429` are retryable, and that no status is ever both.
 - **Configuration validation**, including the refusal to send a bearer credential over plaintext
   `http://` in a release build.
+- **The durable queue, against a real filesystem** (`FixQueueTest`): that a queued fix is visible to
+  a *different* `FixQueue` instance on the same directory (the stand-in for a process death); that
+  entries come back oldest-first whatever order they arrived in, including the zero-padding that
+  stops `"10"` sorting before `"9"`; that enqueueing the same `ts` twice is an idempotent no-op and
+  the **first** report for an instant wins, matching the server's rule; that the stored bytes are
+  byte-for-byte the wire body and the `msg_id` is fixed at enqueue rather than regenerated; that a
+  crash mid-write (a leftover `.tmp`) is invisible and swept; that an unreadable entry is discarded
+  **and counted** rather than blocking the FIFO forever; that a full queue trims to the oldest and
+  reports how many.
+- **The flush loop, over real HTTP** (`QueueFlusherTest`), against a fake `/v1/fixes` that keeps the
+  server's actual idempotency contract — `201` the first time it sees a `ts`, `200 duplicate` on a
+  replay — so a client that sent anything twice would be caught rather than flattered. It pins the
+  acceptance criterion directly: **25 fixes buffered while the server is unreachable, then delivered
+  exactly once when it returns** — every `ts` stored, in ascending order, zero duplicates, queue
+  empty. Also: that a transient failure or an unreachable server leaves **every** fix queued (there
+  is no attempt counter to run out); that a `401` stops the flush *whole* after one request and
+  discards nothing; that a `400` drops just that fix so the queue keeps moving; that a replay after a
+  lost response is absorbed as a `200` rather than wedging the head of the queue; and that one run is
+  bounded by its batch limit and says so.
+- **The backoff jitter** (`FlushBackoffTest`): that the initial WorkManager delay is spread across a
+  window rather than identical on every device, and never falls under WorkManager's own 10 s floor.
 
 ### NOT proven by the gate — operator checks on a real device
 
@@ -79,6 +101,19 @@ be evidence about the mock, not about Android.
 - **That the foreground service starts, posts its notification, and survives screen-off.**
 - **That the fused provider actually delivers fixes** at the configured cadence, or at all.
 - **That fixes land in the server's `fixes` table** end to end.
+- **That the queue's writer is crash-atomic, or that it trims in the right order.** `FixQueue`
+  writes to a `.tmp`, `fsync`s, renames into place, and only *then* trims the queue back to its cap —
+  so a write that fails destroys nothing. The *reader* half of that is tested (a `.tmp` is never
+  returned, it is swept, a zero-length entry is discarded and counted). The *writer* half is
+  **review-only**: a JVM test cannot interrupt a write mid-syscall or cut the power, and no test
+  fills the queue to its cap *and* fails the write, so reversing the trim/write order would keep the
+  suite green. Said out loud here because an untested invariant nobody wrote down is the one that
+  vanishes in a refactor — and one written down in the wrong list is worse.
+- **That WorkManager actually schedules the flush when connectivity returns.** The queue and the
+  flush loop are proved above; that `NetworkType.CONNECTED` fires on a real radio, survives Doze, and
+  is restored after a reboot is platform behaviour on a device. `work-testing` would need a
+  `Context` — i.e. an instrumented run or Robolectric — and would then be asserting WorkManager's
+  own scheduler back to itself, which is why `FixUploadWorker` was kept free of decisions instead.
 - **Battery cost**, and whether an OEM battery manager (Samsung, Xiaomi, …) kills the service anyway.
 
 #### Why there are no instrumented tests in this phase
@@ -114,9 +149,14 @@ the exact trade this repo refuses elsewhere when it forbids `t.Skip` in the Go t
    climbing and **dropped** should be 0.
 7. Close the app entirely (swipe from recents). Confirm collection continues — this is the step that
    actually exercises the background-location grant.
-8. Enable airplane mode for a few minutes, then disable it. **Expect gaps**: C1 has no durable queue,
-   so fixes generated while offline are retried a bounded number of times and then counted as
-   `dropped`. Losing them here is the documented C1 behaviour, and it is what C2 fixes.
+8. Enable airplane mode for a few minutes, then disable it. **Expect no gaps.** This is C2's
+   acceptance check. While offline the app's **queued** counter should climb and **dropped** should
+   stay at 0; when the radio comes back the queue should drain, **delivered** should climb by the
+   same amount, and `GET /v1/devices/{id}/history` should show the buffered fixes in order with no
+   duplicates. A gap here means the flush is not being scheduled — the one part of C2 the gate
+   cannot prove.
+9. Force-stop the app with fixes still queued, then reopen it. The **queued** counter should come
+   back non-zero (it is read from disk, not from memory) and the queue should drain.
 
 This mirrors how `holdfast` documented its CI-unprovable power-loss limitation rather than faking a
 test for it. Writing the limitation down is the deliverable; a green test that proved nothing would
@@ -124,12 +164,30 @@ be worse than no test.
 
 ---
 
-## Known limitations after C1
+## Known limitations after C2
 
-- **No durable queue.** A fix that cannot be delivered while the app is running is retried with
-  backoff and then **lost**, and counted in the UI's `dropped`. The in-memory report queue is bounded
-  (32) so an outage cannot grow into an OOM — overflow is a counted drop. **C2** replaces this with a
-  persistent, WorkManager-flushed queue that survives the outage and the process.
+- **The queue is bounded at 5,000 fixes** (~3.5 days at the current one-a-minute cadence). Past that
+  the **oldest** waiting fixes are evicted to make room, and the count surfaces in the UI's
+  `dropped`. A cap has to exist — an unbounded queue on a phone offline for a month is a disk-full
+  bug — and the oldest end is the right one to sacrifice: the recent trail is what answers "where are
+  they now", and the oldest entries are nearest the server's 90-day ingest floor anyway.
+- **A fix older than 90 days is dropped by the *server*, not locally.** It is sent, refused with a
+  `400`, and then removed and counted like any other permanent refusal — one wasted request rather
+  than a client-side copy of a server constant judged against the phone's own clock, which would
+  silently delete deliverable fixes on a device whose clock ran fast. Only reachable after an outage
+  measured in months.
+- **A recovered server can wait out a long backoff.** WorkManager's exponential retry runs
+  indefinitely (which is the point) but its ceiling is ~5 hours, and a new fix deliberately does not
+  reset it — resetting on every fix would hammer a dead server once a minute. So after a very long
+  outage the first successful flush can lag the reconnection by hours. Nothing is lost; it is
+  latency, and the fixes carry their original `ts`.
+- **Delivery is at-least-once on the wire.** A crash between the server's `201` and the local delete
+  replays that fix; the server absorbs it as a `200 duplicate` on `(device_id, ts)`, so the database
+  is exactly-once. The app's `delivered` counter can therefore over-count by the number of replays,
+  which is the honest trade for never under-delivering.
+- **The scheduling half is not gate-provable.** The queue and the flush loop are unit-tested against
+  a real filesystem and a real socket; that WorkManager actually runs the job when the radio returns
+  is an operator check (above).
 - **The device token is stored in plaintext** `SharedPreferences`. Not readable by other apps on a
   non-rooted device, but readable with root, an unlocked bootloader, or a full-device backup.
   `allowBackup="false"` is set. **C3** moves it to `EncryptedSharedPreferences` with an Android
