@@ -18,15 +18,22 @@ leaves a place you have defined.
 > delivered as a **high-priority FCM HTTP v1** message — or via **UnifiedPush/ntfy** for a degoogled
 > deployment. **Location data goes in, reads back, streams to a live map, fires enter/exit events, and
 > now pushes them to registered phones end-to-end.** Delivery is **best-effort** (FCM's own contract),
-> and push is **off unless a backend is configured**. There is still **no Android client**; the native
-> Kotlin app (C-track) is the phase that follows, so today a real phone drives the server through the
-> interim OwnTracks adapter. As of **S7** the server is **hardened**: TLS is enforced (it refuses to
+> and push is **off unless a backend is configured**. As of **S7** the server is **hardened**: TLS is enforced (it refuses to
 > start in plaintext unless you say so explicitly), history **auto-purges** on a retention timer,
 > database **roles are least-privilege**, tokens can be **rotated and expired**, `tracker config-lint`
 > fails on a plaintext endpoint or a checked-in secret, and the honest server-holds-plaintext boundary
-> is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). As of **C0** the **Android client exists as a
-> scaffold** — a Kotlin/Compose app (`android/`) that builds, installs, and shows one screen saying so;
-> it collects **no location yet** (all location logic is deferred to the C-track phases that follow).
+> is written down in [`THREAT-MODEL.md`](THREAT-MODEL.md). As of **C1** the **Android client collects
+> location for real**: a Kotlin/Compose app (`android/`) with a **foreground service** (`type=location`)
+> that streams fixes from the **fused location provider** and reports each one to `POST /v1/fixes`,
+> behind the **two-step background-location permission flow** Android requires (foreground first; then
+> "Allow all the time", which on Android 11+ can only be granted from the settings page). **C1 has no
+> durable queue** — a fix that cannot be delivered is retried with jittered backoff and then counted as
+> dropped in the UI, and lost; the offline-durable WorkManager queue is C2. The device token is stored
+> **in plaintext** until C3, and there is no in-app map until C5. **Much of C1 is device behaviour a
+> headless CI cannot prove** — runtime grants, a live GPS stream, screen-off survival — so the gate
+> covers the pure, provable half (payload, validation, permission state machine, backoff, HTTP contract
+> against a real local server) and the rest is an **operator check on a real device**, written down in
+> [`android/README.md`](android/README.md) rather than faked with a passing test.
 > It is not a finished tracker, and this README will say so until it is. The wire contract is in
 > [`SPEC.md`](SPEC.md); the plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
@@ -36,7 +43,7 @@ leaves a place you have defined.
 |---|---|
 | **Server** | Go — `chi` router, `pgx` pool, `goose` migrations; a single static binary |
 | **Database** | **PostgreSQL + PostGIS**, `geography(Point,4326)` |
-| **Client** *(scaffold)* | native Kotlin — Jetpack Compose + WorkManager; AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
+| **Client** *(collecting; C1)* | native Kotlin — Jetpack Compose, foreground service `type=location`, `FusedLocationProviderClient`, WorkManager (wired, used from C2); AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
 
 **PostGIS is not incidental.** Location math is the product, and it is where a tracker gets things
 quietly, confidently wrong. `geography` returns real **metres on the spheroid**; the `geometry` type on
@@ -395,11 +402,23 @@ while proving nothing, so a missing daemon is an error here, not a pass.
 
 Things that are true today and are not hidden:
 
-- **Data goes in, reads back, streams to a live map, fires geofence events, and pushes them — but there
-  is no Android client yet.** Ingestion (S2), a family-scoped read API (S3), the live-map SSE stream +
-  Leaflet page (S4), server-side geofencing (S5), and push alerts (S6) exist; the native Kotlin app
-  (C-track) is the phase that follows, so today a real phone drives the server through the interim
-  OwnTracks adapter — which is exactly that, interim.
+- **The Android client collects and reports, but loses fixes it cannot deliver.** As of C1 the app runs
+  a foreground service and POSTs each fix to `/v1/fixes`. It has **no durable queue**: a report that
+  fails is retried with jittered backoff a bounded number of times and then counted as `dropped` in the
+  UI and lost. Airplane mode for long enough *will* leave a gap in the trail. C2 is the phase that makes
+  this lossless; until then the interim OwnTracks adapter remains the battery-tuned alternative.
+- **Most of the client's behaviour is not provable in CI, and is not claimed to be.** Runtime permission
+  grants, a live GPS stream, foreground-service survival with the screen off, and OEM battery-killer
+  behaviour all need a real device. The gate covers the pure half — payload construction, coordinate and
+  timestamp validation, the permission state machine, the backoff policy, and the HTTP contract against a
+  real local server — and the rest is an explicit **operator device check** documented in
+  [`android/README.md`](android/README.md). No test in this repo mocks the platform and then reports the
+  mock's answer as evidence.
+- **The client's device token is stored in plaintext** `SharedPreferences` until C3 moves it to
+  `EncryptedSharedPreferences` behind an Android Keystore key. `allowBackup="false"` limits the blast
+  radius in the meantime.
+- **The client needs Google Play services.** `FusedLocationProviderClient` has no AOSP equivalent and
+  there is no `LocationManager` fallback, so a fully degoogled phone cannot run it today.
 - **Push delivery is best-effort, and off by default.** A crossing is delivered to registered phones
   (S6) via FCM or UnifiedPush, but delivery is **not guaranteed** — FCM's own contract — and a missed
   alert is possible; the freshest state arrives on the device's next crossing. Push is disabled unless a

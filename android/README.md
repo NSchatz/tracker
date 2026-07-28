@@ -1,28 +1,154 @@
 # tracker — Android client
 
-The native **Kotlin / Jetpack Compose** client for tracker. Today it is a **scaffold**: it builds,
-installs, and shows a single screen saying so. **It collects no location.** All location logic — the
-`FusedLocationProvider` foreground service, the two-step background-permission flow, the offline report
-queue — is deferred to the C-track phases that follow (C1, C2, …) per the roadmap at
-`operations/roadmaps/tracker.md`.
+The native **Kotlin / Jetpack Compose** client for tracker.
+
+As of **C1** it does the first real thing: a **foreground service** collects location continuously
+from the **fused location provider** and reports each fix to the server's already-shipped
+`POST /v1/fixes`, behind the **two-step background-location permission flow** that Android requires.
+It does **not** yet queue fixes durably (C2), store its token securely (C3), adapt its cadence to
+save battery (C4), or show a map (C5).
 
 ## What exists
 
-- A Gradle project (`:app`) on **AGP 8.5.2 / Kotlin 1.9.24**, driven by the committed **Gradle 8.9
-  wrapper** (`./gradlew`).
-- **Compose** UI (Material3) and **WorkManager** wired as dependencies — the libraries the client is
-  designed around — with no work enqueued yet.
-- The three gate legs live and green: it assembles, Android Lint is clean, and a JVM unit test
-  (`app/src/test/`) exercises the scaffold's own build metadata so the `testDebugUnitTest` leg is
-  wired for the phases that follow. No product logic yet — location, enrollment, and the server
-  contract all belong to later phases (C1+).
+| | |
+|---|---|
+| **Collection** | `collect/LocationCollectionService` — a foreground service, `type=location`, with the mandatory ongoing notification. Continuous updates from `FusedLocationProviderClient`. |
+| **Permission flow** | `permission/LocationPermissionFlow` — the two-step grant, as a pure state machine. Foreground first; background second, and on Android 11+ that second step is the **settings page**, not a dialog. |
+| **Wire contract** | `protocol/` — the `POST /v1/fixes` payload, its validation, the response classifier, the retry/backoff policy, and the HTTP reporter. All pure JDK/Kotlin, no framework classes. |
+| **Configuration** | `collect/ClientPreferences` — server URL + device token, entered in-app. **Plaintext for now** (see *Known limitations*). |
+| **UI** | `ui/MainActivity` — one screen: the current permission step, the server settings, start/stop, and honest counters. |
+
+### The shape of the code, and why
+
+Everything that can be decided without a device was pushed **out** of the Android classes and into
+pure Kotlin: the fix payload, the coordinate and timestamp validation, the millis→seconds
+conversion, the permission state machine, the HTTP status classifier, the backoff schedule. What is
+left in `LocationCollectionService` and `MainActivity` is the thin framework edge — reading a
+`Location`'s fields, calling `checkSelfPermission`, posting a notification.
+
+That split is not stylistic. It is the only way this phase can be honestly gated: the pure half is
+genuinely provable in CI, and the framework half genuinely is not. Blurring them would have meant
+either testing nothing, or writing tests that mock the platform and prove only that the mock was
+configured.
+
+---
+
+## What the gate proves — and what it cannot
+
+**This is the honest part of C1 and it should be read before trusting a green build.**
+
+`make check` on this module runs `assembleDebug lintDebug testDebugUnitTest`. That is a real gate and
+it catches real defects — the `readNBytes` call that would have been a `NoSuchMethodError` on every
+Android 10 phone was caught by `lintDebug` on the first run of this phase, not by review.
+
+### Proven by the gate
+
+- **The exact bytes of a fix report.** `FixReporterTest` stands up a real HTTP server on a loopback
+  `ServerSocket` (`TestHttpServer`, which parses the request itself — `com.sun.net.httpserver` is
+  **not** on the Android unit-test classpath) and asserts the method, the `/v1/fixes` target, the
+  `Authorization: Bearer …` header, the `Content-Type`, the fixed `Content-Length`, and the **exact
+  JSON body**. Real sockets, real bytes — not a mocked client returning what the test told it to.
+- **Payload construction.** Required fields present; absent optionals **omitted, never zeroed**;
+  present zeros preserved; strings escaped; coordinate precision not truncated; exactly the eight
+  fields `SPEC.md` documents and no ninth.
+- **Coordinate validation**, including the lon/lat swap that PostGIS would otherwise silently coerce
+  into a real-looking point in the South Atlantic — and, explicitly, a test recording that a swap
+  which *stays in range* (Rome ↔ Indian Ocean) is **not** detectable here.
+- **The ingest window**, matching the server's ±24 h / −90 d bounds exactly.
+- **The permission state machine**, exhaustively across API 29/30/31/32/33/34: that background
+  location is never bundled into the foreground request; that API 29 gets a dialog and API 30+ gets
+  the settings page; that a permanently-denied grant routes to settings instead of re-requesting into
+  silence; that an approximate-only grant is not re-prompted forever.
+- **The retry policy**: exponential growth, saturation at the ceiling instead of Long overflow into a
+  negative (instant, infinite) delay, full jitter across the window, bounded attempts.
+- **The response classifier**: that `200` (idempotent replay) counts as delivered, that `400`/`401`
+  are permanent, that `5xx`/`429` are retryable, and that no status is ever both.
+- **Configuration validation**, including the refusal to send a bearer credential over plaintext
+  `http://` in a release build.
+
+### NOT proven by the gate — operator checks on a real device
+
+None of the following can be established by a headless build, and **no test in this repo pretends
+otherwise**. A test asserting that a mocked `checkSelfPermission` returned `PERMISSION_GRANTED` would
+be evidence about the mock, not about Android.
+
+- **That a runtime permission can actually be granted.** A real grant needs a human tapping a system
+  dialog. The gate proves which step the app *decides* to take; it cannot take it.
+- **That the "Allow all the time" settings round-trip works** on a given Android version and OEM
+  skin. The settings page layout is vendor-specific.
+- **That the foreground service starts, posts its notification, and survives screen-off.**
+- **That the fused provider actually delivers fixes** at the configured cadence, or at all.
+- **That fixes land in the server's `fixes` table** end to end.
+- **Battery cost**, and whether an OEM battery manager (Samsung, Xiaomi, …) kills the service anyway.
+
+#### Why there are no instrumented tests in this phase
+
+The roadmap sketched instrumented tests with `LocationManager` mock providers for C1. There are none,
+for two reasons, in order of importance:
+
+1. **They would not prove the thing that matters.** An instrumented test grants permissions with
+   `GrantPermissionRule`, which hands them over programmatically. That bypasses the entire two-step
+   flow — the dialog, the settings round-trip, the Android 11 behaviour change — which *is* the risky
+   part of C1. A green instrumented test would say "permissions we granted ourselves are granted".
+   Mock providers have the same shape of problem: they prove the app can read a location the test
+   injected, not that the fused provider delivers one on a real phone under Doze.
+2. **The CI environment cannot run them.** There is no `/dev/kvm` in this container, so a
+   hardware-accelerated emulator is unavailable, and no emulator or system image is installed.
+
+So the pure logic is unit-tested for real, and the device behaviour is an operator check. Adding an
+instrumented suite that only restates its own fixtures would grow the gate while proving nothing —
+the exact trade this repo refuses elsewhere when it forbids `t.Skip` in the Go tests.
+
+#### The device check to run before believing C1 works
+
+1. `tracker create-family` / `tracker enroll` on the server; copy the printed device token.
+2. Install the debug APK; enter the server URL and token; **Save**. Confirm the app reports the
+   configuration as valid.
+3. Walk the permission flow. Confirm it asks for **foreground location first**, and only then offers
+   the background step — and that on Android 11+ the background step opens **settings**, not a
+   dialog.
+4. Start collection. Confirm the **ongoing notification appears** and names what it is doing.
+5. Turn the screen off, wait past two collection intervals, walk more than 25 m.
+6. Check the server: `GET /v1/positions` (viewer token) should show this device moving, and
+   `GET /v1/devices/{id}/history` should show the fixes. The app's **delivered** counter should be
+   climbing and **dropped** should be 0.
+7. Close the app entirely (swipe from recents). Confirm collection continues — this is the step that
+   actually exercises the background-location grant.
+8. Enable airplane mode for a few minutes, then disable it. **Expect gaps**: C1 has no durable queue,
+   so fixes generated while offline are retried a bounded number of times and then counted as
+   `dropped`. Losing them here is the documented C1 behaviour, and it is what C2 fixes.
+
+This mirrors how `holdfast` documented its CI-unprovable power-loss limitation rather than faking a
+test for it. Writing the limitation down is the deliverable; a green test that proved nothing would
+be worse than no test.
+
+---
+
+## Known limitations after C1
+
+- **No durable queue.** A fix that cannot be delivered while the app is running is retried with
+  backoff and then **lost**, and counted in the UI's `dropped`. The in-memory report queue is bounded
+  (32) so an outage cannot grow into an OOM — overflow is a counted drop. **C2** replaces this with a
+  persistent, WorkManager-flushed queue that survives the outage and the process.
+- **The device token is stored in plaintext** `SharedPreferences`. Not readable by other apps on a
+  non-rooted device, but readable with root, an unlocked bootloader, or a full-device backup.
+  `allowBackup="false"` is set. **C3** moves it to `EncryptedSharedPreferences` with an Android
+  Keystore master key.
+- **No enrollment flow.** The token is pasted in by hand from `tracker enroll` output. **C3**.
+- **Static cadence.** 60 s target, 25 m displacement filter, 2 min batching — the same whether the
+  phone is parked or on a motorway. **C4** makes it adaptive.
+- **No map.** **C5**.
+- **Google Play services required.** `FusedLocationProviderClient` is Play services, not AOSP; there
+  is no `LocationManager` fallback, so a fully degoogled phone cannot run this client today.
+- **Background reliability is not absolute** — Doze, App Standby and OEM battery-killers can throttle
+  or stop collection regardless of correct implementation. Roadmap §9; not solvable in-app.
 
 ## SDK levels — and why
 
 | | | why |
 |---|---|---|
 | `compileSdk` | 34 | build against the current platform (Android 14). |
-| `targetSdk` | 34 | opt into current behavior, incl. foreground-service **`type=location`** (required at 34) that C1 needs. |
+| `targetSdk` | 34 | opt into current behavior, incl. foreground-service **`type=location`**, which Android 14 makes **required**. |
 | `minSdk` | **29** | Android 10 is where `ACCESS_BACKGROUND_LOCATION` became its own runtime permission. The product is built around the background-location model that starts here (two-step "Allow all the time" on 30+); the floor is set where that model exists rather than carrying a separate legacy path below it. |
 
 ## The gate
@@ -34,15 +160,17 @@ here). The Android half is:
 make android    # ./gradlew assembleDebug lintDebug testDebugUnitTest
 ```
 
-`assembleDebug` proves it builds an APK, `lintDebug` proves it is clean, `testDebugUnitTest` runs the
-JVM unit tests. All three must pass; lint errors fail the build (`abortOnError = true`).
+`assembleDebug` proves it builds an APK, `lintDebug` proves it is clean (lint **errors** fail the
+build — `abortOnError = true`), `testDebugUnitTest` runs the JVM unit tests described above.
 
 ## Toolchain — one-time, rootless
 
 AGP 8.5 needs **JDK 17**; the build needs an **Android SDK**. Both install without root:
 
 ```bash
-mise use -g java@temurin-17          # JDK 17
+mise use -g java@temurin-17          # JDK 17 — and note the -g: without a GLOBAL pin the
+                                     # `java` shim errors with "No version is set for shim: java"
+                                     # and `make android` fails before Gradle even starts.
 # Android SDK (cmdline-tools + platform-34 + build-tools 34.0.0 + platform-tools):
 #   download commandlinetools-linux from dl.google.com, extract, accept licenses, install.
 #   `unzip` is NOT baked in this container — extract with `python3 -m zipfile -e clt.zip <dir>`
@@ -50,19 +178,20 @@ mise use -g java@temurin-17          # JDK 17
 export ANDROID_SDK_ROOT=/path/to/android-sdk   # or ANDROID_HOME
 ```
 
-The gate resolves the SDK from `ANDROID_SDK_ROOT` (or `ANDROID_HOME`) and **fails loudly** when neither
-points at an SDK — it never silently skips. Point it at an SDK cached under `/cache` so parallel and
-subsequent runs hit it warm (it is hundreds of MB).
+The gate resolves the SDK from `ANDROID_SDK_ROOT` (or `ANDROID_HOME`) and **fails loudly** when
+neither points at an SDK — it never silently skips. Point it at an SDK cached under `/cache` so
+parallel and subsequent runs hit it warm (it is hundreds of MB).
 
 **Under egress lockdown** (`CLAUDE_EGRESS_LOCKDOWN=1`) the build needs these hosts allow-listed via
 `CLAUDE_EGRESS_EXTRA_HOSTS`, **or** a fully vendored/cached SDK + offline Gradle:
 `dl.google.com`, Google's Maven (`dl.google.com/dl/android/maven2`), `repo.maven.apache.org`,
-`services.gradle.org` (the wrapper distribution), and Adoptium (the mise JDK).
+`services.gradle.org` (the wrapper distribution), and Adoptium (the mise JDK). C1 adds
+`com.google.android.gms:play-services-location`, which resolves from Google's Maven.
 
 ## CI
 
 `.github/workflows/ci.yml` provisions JDK 17 (`setup-java`) and the SDK (`setup-android`) for the
-`check` job, then runs `make check` — the same target a human runs. Version pins live in the build files
-(`gradle/libs.versions.toml`, `app/build.gradle.kts`) and the Gradle wrapper, **never** restated in CI.
-Note the gate now carries **both** stacks: the Go server (a real PostGIS via testcontainers, Docker
-required) and this Android client (JDK 17 + Android SDK). Size the runner for both.
+`check` job, then runs `make check` — the same target a human runs. Version pins live in the build
+files (`gradle/libs.versions.toml`, `app/build.gradle.kts`) and the Gradle wrapper, **never** restated
+in CI. Note the gate carries **both** stacks: the Go server (a real PostGIS via testcontainers,
+Docker required) and this Android client (JDK 17 + Android SDK). Size the runner for both.

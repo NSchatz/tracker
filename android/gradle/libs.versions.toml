@@ -14,6 +14,13 @@ lifecycle = "2.8.3"
 activityCompose = "1.9.0"
 workManager = "2.9.0"
 material = "1.12.0"
+# FusedLocationProviderClient and the LocationRequest builder used by C1's foreground service. This
+# is Google Play services, not AOSP: it is the fused provider (GPS + wifi + cell + sensors, with the
+# batching and power management that makes continuous collection survivable on a battery), and there
+# is no AOSP equivalent. It is also the one dependency that ties the client to a Play-services
+# device — a fully degoogled phone would need a LocationManager path, which is not built here and is
+# noted as a limitation in android/README.md.
+playServicesLocation = "21.3.0"
 junit = "4.13.2"
 
 [libraries]
@@ -31,6 +38,7 @@ androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx"
 # Supplies the Activity window's XML theme (Theme.Material3.*) shown before Compose's first
 # frame. The in-app surface itself is Compose Material3.
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
