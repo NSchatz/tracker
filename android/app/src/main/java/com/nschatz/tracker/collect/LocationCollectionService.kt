@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.location.Location
 import android.os.BatteryManager
+import android.os.Handler
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -53,6 +54,21 @@ import java.util.UUID
  * one location runtime permission granted before `startForeground` is called. All three are wired:
  * see `AndroidManifest.xml` and [LocationPermissionFlow][com.nschatz.tracker.permission.LocationPermissionFlow].
  *
+ * ### A session is a transition into collecting
+ *
+ * One live instance of this service is exactly one **transition into collecting**, whatever caused
+ * it: an automatic start after a boot, the operator's start button, or the platform recreating the
+ * service. That equivalence is what makes the two reboot rules hold at once without a special case
+ * for either. A repeat start on a live session is absorbed ([sessionActive]), so a boot signal the
+ * platform delivers twice for one boot produces one session and one restart position; and a stop
+ * followed by a start produces a new instance, so an operator toggling collection inside one boot
+ * gets a genuine second transition with a restart position of its own.
+ *
+ * Each session opens one [FilterExemption] - the permission to send a single position without the
+ * 25 m displacement filter - and closes it on the position, on the stop, or by being replaced.
+ * Everything else about collection is exactly as it was: the cadence, the filter and the durable
+ * queue are untouched, and the position after the restart position is filtered like any other.
+ *
  * ### What this class is NOT covered by
  *
  * Everything in this file is **device behaviour**, and the gate cannot prove any of it. A headless
@@ -78,10 +94,72 @@ class LocationCollectionService : Service() {
      */
     private val queue: FixQueue by lazy { FixQueues.of(this) }
 
+    /** The durable record of the operator's intent and the single recorded reason. */
+    private val collectionState: CollectionState by lazy { CollectionState(this) }
+
+    /**
+     * The permission to send ONE position without the displacement filter, for the transition this
+     * session is.
+     *
+     * Instance state, not process state, and that is the design: a session IS a transition into
+     * collecting, so an exemption that lives and dies with the service instance is opened exactly
+     * once per transition and cannot outlive the collection it belongs to.
+     */
+    private val exemption = FilterExemption()
+
+    /**
+     * Whether this instance has already begun collecting.
+     *
+     * The whole of the duplicate-boot-signal handling. `onStartCommand` runs again on the SAME
+     * instance for every extra `startForegroundService`, and the platform is free to deliver the
+     * boot signal more than once for one boot, so without this a duplicate would reset the
+     * counters, open a second exemption and send a second restart position for one transition. With
+     * it, a repeat start on a live session is absorbed.
+     *
+     * It is not a per-boot latch and must never become one. It belongs to the service instance, so
+     * an operator who stops collection and starts it again gets a new instance, a new session and
+     * a genuine second transition with its own restart position - which is the behaviour a latch
+     * keyed on the boot would wrongly suppress.
+     */
+    private var sessionActive = false
+
+    /** Runs the five-minute mark for [exemption]. The main looper: the service has no other. */
+    private val restartHandler: Handler by lazy { Handler(mainLooper) }
+
+    /**
+     * Tells the operator, five minutes in, that no restart position has been obtained.
+     *
+     * Changes nothing about collection: the exemption stays open, the obligation stands, the
+     * position is still sent whenever one first becomes available. All it does is replace silence
+     * with a sentence, so that a phone with no view of the sky is distinguishable from one that
+     * never restarted at all.
+     */
+    private val restartReasonCheck = Runnable {
+        if (exemption.reasonDue(System.currentTimeMillis())) {
+            collectionState.recordReason(ReasonCase.NO_RESTART_POSITION_YET)
+            logDebug("no restart position within the five-minute mark; still waiting")
+        }
+    }
+
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             for (location in result.locations) {
-                handleLocation(location)
+                deliver(location, FixTrigger.PERIODIC)
+            }
+        }
+    }
+
+    /**
+     * The one-shot stream that produces the restart position.
+     *
+     * Separate from [locationCallback] on purpose: it is the only thing carrying the filter
+     * exemption, and it is removed the moment it yields a qualifying position. The steady-state
+     * stream and its 25 m filter are never touched.
+     */
+    private val restartCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            for (location in result.locations) {
+                offerAsRestartPosition(location)
             }
         }
     }
@@ -96,6 +174,12 @@ class LocationCollectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // The Stop action in the notification shade is an explicit operator choice, exactly like
+            // the button on the screen, so it is recorded as one. Without this the phone would
+            // resume collecting at the next reboot against the wishes of the person who just told
+            // the notification to stop - and the notification is the control the person being
+            // tracked is most likely to reach for.
+            collectionState.setIntent(CollectionIntent.OFF)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -147,9 +231,25 @@ class LocationCollectionService : Service() {
                     "(${e.javaClass.simpleName}). Check that location permission is granted, then " +
                     "start it again from this screen.",
             )
+            // Also recorded DURABLY. The message above lives in this process's memory, and the
+            // process this ran in may be gone long before anybody opens the app - which is exactly
+            // the case when the refusal happened during an automatic start after a reboot. A
+            // refusal nobody is ever told about is indistinguishable from collection working.
+            collectionState.recordReason(RecordedReasons.refusalReason(e))
             logDebug("startForeground refused: ${e.javaClass.simpleName}: ${e.message}")
             stopSelf()
             return START_NOT_STICKY
+        }
+
+        if (sessionActive) {
+            // A repeat start for a session that is already collecting: a duplicate boot signal, or
+            // any other second ask. Absorbed. The counters are not reset, no second exemption is
+            // opened, and no second restart position is sent - there has been ONE transition into
+            // collecting and it already has one. `startForeground` above has run again, which is
+            // harmless (it refreshes the same notification) and is what keeps the platform's
+            // "call startForeground promptly" contract met on this delivery too.
+            logDebug("absorbing a repeat start for a session that is already collecting")
+            return START_STICKY
         }
 
         val status = ClientPreferences(this).readConfig()
@@ -158,6 +258,10 @@ class LocationCollectionService : Service() {
             // showing "sharing your location" while posting to an unset URL is precisely the
             // looks-like-it's-working failure this project treats as worse than an outage.
             CollectionStatus.recordBlocked(status.reason)
+            // Durably too. An automatic start after a boot can meet this in a process that is
+            // reclaimed before anybody opens the app, and a stop with no surviving explanation
+            // reads as a force-stop - a confident wrong answer about a ten-second fix.
+            collectionState.recordReason(ReasonCase.SERVER_NOT_CONFIGURED)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -169,7 +273,24 @@ class LocationCollectionService : Service() {
         CollectionStatus.recordQueued(queue.size())
         FixUploadWorker.enqueueFlush(this)
         CollectionStatus.running = true
+        sessionActive = true
+        // THE TRANSITION INTO COLLECTING. Everything below hangs off this instant: a position is
+        // the restart position only if the provider took it at or after this, and the five-minute
+        // mark is measured from it.
+        //
+        // Read once, from the wall clock, because the provider timestamps a location on the same
+        // clock and the two have to be comparable. A clock adjustment between this read and a
+        // position's timestamp can delay the restart position - the exemption stays open and it is
+        // sent when a qualifying position arrives, so a jumped clock costs freshness, never the
+        // position itself.
+        val transitionAtMillis = System.currentTimeMillis()
+        // A start that succeeded clears a refusal or a failure. It does NOT clear the
+        // no-restart-position case, which exists precisely while collection runs.
+        collectionState.clearReasonOn(ReasonClearingEvent.START_SUCCEEDED)
+        exemption.open(transitionAtMillis)
         startLocationUpdates()
+        requestRestartPosition()
+        restartHandler.postDelayed(restartReasonCheck, FilterExemption.REASON_AFTER_MILLIS)
         // START_STICKY: if the system kills us for memory, ask to be restarted. It is a request,
         // not a guarantee — and on Android 12+ a background restart cannot re-enter the foreground
         // without ACCESS_BACKGROUND_LOCATION, which is exactly why the two-step permission flow
@@ -179,42 +300,101 @@ class LocationCollectionService : Service() {
 
     override fun onDestroy() {
         fusedClient?.removeLocationUpdates(locationCallback)
+        fusedClient?.removeLocationUpdates(restartCallback)
+        restartHandler.removeCallbacks(restartReasonCheck)
+        // Collection stopping CLOSES the filter exemption. The obligation to deliver a restart
+        // position lapses with the transition it belonged to: nothing is delivered retrospectively,
+        // and the next transition opens a fresh exemption of its own.
+        exemption.close()
+        collectionState.clearReasonOn(ReasonClearingEvent.COLLECTION_STOPPED)
         // Nothing to abandon. C1 had to count the fixes its in-memory executor still held when the
         // service stopped, because they were lost at that moment. Since C2 an undelivered fix is on
         // disk and the flush job is WorkManager's, so stopping collection ends measurement and
         // leaves delivery running — a stop is no longer a loss.
         CollectionStatus.running = false
+        sessionActive = false
         super.onDestroy()
     }
 
     private fun startLocationUpdates() {
-        val policy = CollectionPolicy()
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, policy.intervalMillis)
-            .setMinUpdateIntervalMillis(policy.minUpdateIntervalMillis)
-            .setMinUpdateDistanceMeters(policy.minUpdateDistanceMeters)
-            .setMaxUpdateDelayMillis(policy.maxUpdateDelayMillis)
-            .setWaitForAccurateLocation(false)
-            .build()
+        val spec = CollectionRequests.steadyState()
         try {
-            fusedClient?.requestLocationUpdates(request, locationCallback, mainLooper)
+            fusedClient?.requestLocationUpdates(requestFrom(spec), locationCallback, mainLooper)
         } catch (e: SecurityException) {
             // The permission was revoked between the UI check and here — a real race, because the
             // user can revoke from Settings while the service runs. Stop rather than sit alive
             // producing nothing.
             CollectionStatus.recordBlocked("Location permission was revoked, so collection stopped.")
+            // Durable too, for the same reason the startForeground refusal is: when this happens on
+            // an automatic start after a reboot, the process that saw it may be long gone before
+            // anyone opens the app.
+            collectionState.recordReason(RecordedReasons.refusalReason(e))
             logDebug("requestLocationUpdates denied: ${e.message}")
             stopSelf()
         }
     }
 
-    private fun handleLocation(location: Location) {
+    /**
+     * Asks the provider for the one position that proves this transition happened.
+     *
+     * Note what this is NOT: it is not `getLastLocation`. A cached position from before the
+     * transition is exactly what must not be sent - it is what the family map is already drawing,
+     * and re-sending it would make a phone that never restarted look identical to one that did. So
+     * a fresh stream is opened, and [offerAsRestartPosition] discards anything the provider hands
+     * over that it timestamped before the transition, leaving the exemption open for the next one.
+     *
+     * The failure here is deliberately quiet. The steady-state stream is already running by this
+     * point; if the provider refuses this second request, collection continues and the five-minute
+     * mark reports the missing restart position through the ordinary path. Nothing in the boot path
+     * waits on it.
+     */
+    private fun requestRestartPosition() {
+        val spec = CollectionRequests.restartPosition()
+        try {
+            fusedClient?.requestLocationUpdates(requestFrom(spec), restartCallback, mainLooper)
+        } catch (e: SecurityException) {
+            logDebug("restart-position request denied: ${e.message}")
+        }
+    }
+
+    /**
+     * Considers one position as this transition's restart position.
+     *
+     * Accepts at most one, and only one taken at or after the transition. On acceptance the
+     * exemption is closed and its stream removed in the same breath, so every position that follows
+     * arrives through the untouched steady-state stream and its 25 m displacement filter - which is
+     * what makes a stationary device fall silent again immediately afterwards.
+     */
+    private fun offerAsRestartPosition(location: Location) {
+        when (exemption.offer(location.time)) {
+            RestartOffer.IGNORE ->
+                logDebug("ignoring a position the provider took before the transition")
+
+            RestartOffer.ACCEPT -> {
+                fusedClient?.removeLocationUpdates(restartCallback)
+                restartHandler.removeCallbacks(restartReasonCheck)
+                collectionState.clearReasonOn(ReasonClearingEvent.RESTART_POSITION_OBTAINED)
+                deliver(location, FixTrigger.RESTART)
+            }
+        }
+    }
+
+    private fun requestFrom(spec: LocationRequestSpec): LocationRequest =
+        LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, spec.intervalMillis)
+            .setMinUpdateIntervalMillis(spec.minUpdateIntervalMillis)
+            .setMinUpdateDistanceMeters(spec.minUpdateDistanceMeters)
+            .setMaxUpdateDelayMillis(spec.maxUpdateDelayMillis)
+            .setWaitForAccurateLocation(false)
+            .build()
+
+    private fun deliver(location: Location, trigger: String) {
         val reading = readingFrom(location)
         val nowSeconds = System.currentTimeMillis() / 1000
         val result = FixFactory.build(
             reading = reading,
             nowEpochSeconds = nowSeconds,
             batteryPct = readBatteryPercent(),
-            trigger = FixTrigger.PERIODIC,
+            trigger = trigger,
             // The correlator is generated HERE, once, and is then persisted with the fix. It must
             // not be regenerated on a retry: `msg_id` is how a human correlates one report across
             // the client log and the server's history, and a replayed fix that invented a new one

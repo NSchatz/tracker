@@ -31,7 +31,15 @@ leaves a place you have defined.
 > **WorkManager** job constrained to `NetworkType.CONNECTED` drains it into `POST /v1/fixes`
 > oldest-first, retrying indefinitely with jittered exponential backoff. Going offline now *delays*
 > reporting instead of losing it, and a replay after a lost response is absorbed by the server's
-> `(device_id, ts)` dedup, so nothing is stored twice. The device token is stored **in plaintext** until
+> `(device_id, ts)` dedup, so nothing is stored twice. As of the device half of **REBOOT-1** the
+> client also **comes back after a reboot**: a `BOOT_COMPLETED` receiver restarts collection from the
+> operator's own persisted intent with nobody touching the phone, every case where it cannot - no
+> background-location grant, a platform refusal, an intent it cannot read - is recorded and shown in
+> the app instead of being silent, and each transition into collecting sends **one position exempt
+> from the 25 m displacement filter**, so a phone that restarted is distinguishable from one that did
+> not. Steady-state collection is untouched. A **force-stopped** app is still not covered and cannot
+> be: Android does not deliver `ACTION_BOOT_COMPLETED` to an app in the stopped state, so that case is
+> surfaced honestly rather than claimed. The device token is stored **in plaintext** until
 > C3, and there is no in-app map until C5. **Much of the client is device behaviour a headless CI
 > cannot prove** — runtime grants, a live GPS stream, screen-off survival, and whether WorkManager
 > actually fires when the radio returns — so the gate covers the provable half (payload, validation,
@@ -48,7 +56,7 @@ leaves a place you have defined.
 |---|---|
 | **Server** | Go — `chi` router, `pgx` pool, `goose` migrations; a single static binary |
 | **Database** | **PostgreSQL + PostGIS**, `geography(Point,4326)` |
-| **Client** *(collecting + offline-durable; C2)* | native Kotlin — Jetpack Compose, foreground service `type=location`, `FusedLocationProviderClient`, a file-backed durable fix queue flushed by **WorkManager**; AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
+| **Client** *(collecting + offline-durable + reboot-surviving; C2 and the REBOOT-1 device half)* | native Kotlin - Jetpack Compose, foreground service `type=location`, `FusedLocationProviderClient`, a file-backed durable fix queue flushed by **WorkManager**, and a `BOOT_COMPLETED` receiver that restarts collection from the operator's persisted intent; AGP 8.5 / Gradle 8.9. See [`android/`](android/) |
 
 **PostGIS is not incidental.** Location math is the product, and it is where a tracker gets things
 quietly, confidently wrong. `geography` returns real **metres on the spheroid**; the `geometry` type on
@@ -425,6 +433,16 @@ Things that are true today and are not hidden:
   — and the rest is an explicit **operator device check** documented in
   [`android/README.md`](android/README.md). No test in this repo mocks the platform and then reports the
   mock's answer as evidence.
+- **A reboot is covered; a force-stop is not, and cannot be.** The client restarts collection after
+  `ACTION_BOOT_COMPLETED`, but Android does **not** deliver that broadcast to an app in the **stopped
+  state** until a user action removes it from that state - so an app force-stopped from Settings, or
+  stopped by an OEM battery manager, does not come back on its own. The app is honest about it rather
+  than covering it: the running state it shows is read from a live signal, never from the stored
+  setting, so opening it shows collection as **not running**, and when the setting says on with
+  nothing recorded to explain the silence it says exactly that. Whether the broadcast arrives at all
+  on a given OEM skin, and when it arrives relative to the lock screen, are open questions no claim
+  here rests on; the nine reboot device checks in [`android/README.md`](android/README.md) all unlock
+  once so that no verdict depends on either.
 - **The client's device token is stored in plaintext** `SharedPreferences` until C3 moves it to
   `EncryptedSharedPreferences` behind an Android Keystore key. `allowBackup="false"` limits the blast
   radius in the meantime.

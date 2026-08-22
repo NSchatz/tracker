@@ -102,4 +102,17 @@ object FixTrigger {
      * history vocabulary that nothing on either side has ever produced.
      */
     const val PERIODIC = "periodic"
+
+    /**
+     * The one position sent on each transition into collecting, exempt from the displacement
+     * filter.
+     *
+     * Declared by the phase that actually emits it, which is the rule [PERIODIC]'s note states.
+     * It is not a wire change: `trigger` is free-form and optional in the first-party schema, the
+     * server stores whatever arrives in `trigger_reason` without judging it, and the eight field
+     * names are untouched. What it buys is that a restart position is greppable in the server's
+     * history as the thing it is - the evidence a device came back - rather than being
+     * indistinguishable from an ordinary sample that happened to land at the right moment.
+     */
+    const val RESTART = "restart"
 }
