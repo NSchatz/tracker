@@ -24,6 +24,7 @@ import (
 
 	"github.com/NSchatz/tracker/internal/auth"
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/NSchatz/tracker/internal/presentation"
 	"github.com/NSchatz/tracker/internal/push"
 	"github.com/NSchatz/tracker/internal/server"
 	"github.com/NSchatz/tracker/internal/store"
@@ -43,6 +44,7 @@ type harness struct {
 	pool    *pgxpool.Pool
 	handler http.Handler
 	pushes  *capturingSender
+	windows presentation.Windows
 }
 
 // capturingSender is a push.Sender that records every delivery to a buffered channel instead of
@@ -69,7 +71,21 @@ func (h *harness) nextPush(t *testing.T) push.Delivery {
 	}
 }
 
+// defaultWindows is what a deployment that configures neither window runs with (config's
+// DefaultLiveWindowSeconds / DefaultStaleWindowSeconds). The suites that do not care about
+// presentation timing get these; the ones that do build a harness with their own.
+var defaultWindows = presentation.Windows{LiveSeconds: 120, StaleSeconds: 900}
+
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWithWindows(t, defaultWindows)
+}
+
+// newHarnessWithWindows is newHarness with the presentation windows chosen by the caller, so a test
+// can put a device across an age boundary by construction — a one-second live window makes "this
+// device has gone quiet" reachable in a test that finishes in under a second, without a sleep that
+// races a production-length window.
+func newHarnessWithWindows(t *testing.T, windows presentation.Windows) *harness {
 	t.Helper()
 	ctx := context.Background()
 
@@ -91,7 +107,13 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(disp.Close)
 	notifier := push.NewEventNotifier(pool, disp, discardLogger())
 
-	return &harness{t: t, pool: pool, handler: server.New(pool, notifier, discardLogger()), pushes: sender}
+	return &harness{
+		t:       t,
+		pool:    pool,
+		handler: server.New(pool, notifier, windows, discardLogger()),
+		pushes:  sender,
+		windows: windows,
+	}
 }
 
 // enroll creates a family and a device in it, returning the device id and its freshly issued token —

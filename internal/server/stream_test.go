@@ -404,7 +404,7 @@ func streamAuth(t *testing.T, h *harness, srv *httptest.Server) {
 // a stub DB and a one-shot recorder suffice.
 func TestMapPageAndAssets(t *testing.T) {
 	t.Parallel()
-	handler := server.New(stubDB{}, nil, discardLogger())
+	handler := server.New(stubDB{}, nil, defaultWindows, discardLogger())
 
 	t.Run("GET /map is the HTML page", func(t *testing.T) {
 		rec := httptest.NewRecorder()

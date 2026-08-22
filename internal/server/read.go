@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/tracker/internal/auth"
+	"github.com/NSchatz/tracker/internal/presentation"
 	"github.com/NSchatz/tracker/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -66,40 +67,42 @@ func viewerFrom(ctx context.Context) store.Viewer {
 	return v
 }
 
-// positionResponse is one device's latest whereabouts on the wire. Timestamps are epoch seconds, to
-// match the ingestion protocol's `ts` (SPEC.md) — one time convention across the API.
-type positionResponse struct {
-	DeviceID   string  `json:"device_id"`
-	DeviceName string  `json:"device_name"`
-	Lat        float64 `json:"lat"`
-	Lon        float64 `json:"lon"`
-	TS         int64   `json:"ts"`
-	ReceivedAt int64   `json:"received_at"`
-}
-
-// getPositions serves GET /v1/positions: the latest fix per device in the caller's family.
-func getPositions(database DB, logger *slog.Logger) http.HandlerFunc {
+// getPositions serves GET /v1/positions: EVERY device in the caller's family, each carrying exactly
+// one presentation value.
+//
+// The behavioural change this endpoint carries is the enumeration. It used to serve the latest fix
+// per device and a phone that had never reported simply did not appear — which made "this phone has
+// never checked in" and "this phone stopped checking in an hour ago" both render as an absence, the
+// first a setup problem and the second the only one worth worrying about. Now every device appears,
+// the ones holding no fix as the three-key unlocated entry, and the presentation value says which
+// case a viewer is looking at.
+//
+// Enumerating never-reported devices is a NEW DISCLOSURE SURFACE — a device id and a human-chosen
+// name for a phone that has produced no data — so the family scope is enforced in the query itself
+// (store.FamilyDeviceStates), not here.
+func getPositions(database DB, windows presentation.Windows, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		v := viewerFrom(r.Context())
 
-		positions, err := store.LatestPositions(r.Context(), database, v.FamilyID)
+		states, err := store.FamilyDeviceStates(r.Context(), database, v.FamilyID)
 		if err != nil {
-			logger.ErrorContext(r.Context(), "latest positions", "error", err, "family_id", v.FamilyID)
+			// No partial list and no fabricated value: a device the server could not evaluate must
+			// not be reported at all, least of all as `live`. The whole response is the error.
+			logger.ErrorContext(r.Context(), "family device states", "error", err, "family_id", v.FamilyID)
 			writeError(w, logger, http.StatusInternalServerError, "internal", "could not read positions")
 			return
 		}
 
-		// Always a JSON array, never null: an empty family is [], the fail-safe answer.
-		out := make([]positionResponse, 0, len(positions))
-		for _, p := range positions {
-			out = append(out, positionResponse{
-				DeviceID:   p.DeviceID,
-				DeviceName: p.DeviceName,
-				Lat:        p.Lat,
-				Lon:        p.Lon,
-				TS:         p.TS.Unix(),
-				ReceivedAt: p.ReceivedAt.Unix(),
-			})
+		// One evaluation instant for the whole response, so two devices in the same body are never
+		// judged against clocks a few microseconds apart.
+		at := time.Now()
+		sortDeviceStates(states)
+
+		// Always a JSON array, never null: an empty family is [], the fail-safe answer. A family with
+		// devices but no fixes is NOT that case — it is one unlocated entry per device.
+		out := make([]any, 0, len(states))
+		for _, s := range states {
+			out = append(out, entryFor(s, at, windows))
 		}
 		writeJSON(w, logger, http.StatusOK, out)
 	}
