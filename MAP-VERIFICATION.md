@@ -26,17 +26,29 @@ harness as an operator ask; it does not fill this table in.
 
 ## 1. Bring the stack up
 
-From the repository root. The windows are set deliberately wide so that a device seeded into a state
-STAYS in it for the length of an unhurried observation session - under the 120/900 defaults the
-`live` fixture would age out in two minutes and the four-state screenshot would be unreproducible.
+**Every command in sections 1 to 4 is complete and uses the one project name `tracker-mapverify`.**
+Run them from the root of a `tracker` checkout at the commit under review; nothing here depends on a
+stack somebody else left running.
+
+The windows are set deliberately wide so that a device seeded into a state STAYS in it for the length
+of an unhurried observation session - under the 120/900 defaults the `live` fixture would age out in
+two minutes and the four-state screen would be unreproducible.
 
 ```bash
-export TRACKER_DB_PASSWORD=choose-something-alphanumeric
-export TRACKER_LIVE_WINDOW_SECONDS=3600     # 1 hour  -> `live`
-export TRACKER_STALE_WINDOW_SECONDS=21600   # 6 hours -> past this, `stale`
+cd /path/to/tracker                          # the checkout at the commit under review
+
+export TRACKER_DB_PASSWORD=choosesomethingalphanumeric   # no @ / : # % ? - it goes into a DSN
+export TRACKER_LIVE_WINDOW_SECONDS=3600      # 1 hour  -> at or under this age, `live`
+export TRACKER_STALE_WINDOW_SECONDS=21600    # 6 hours -> past this, `stale`
 
 docker compose -p tracker-mapverify up -d --build
 ```
+
+> **If your shell cannot export** (a sandboxed agent session, for instance), put those same three
+> `NAME=value` lines in a file **outside the repository** - say `~/tracker-mapverify.env` - and add
+> `--env-file ~/tracker-mapverify.env` to **every** `docker compose` line below, plus
+> `-f docker-compose.yml --project-directory .` if you are not running from the checkout root. Delete
+> that file when you tear the stack down: it carries a database password, synthetic or not.
 
 Wait for health, and confirm the server picked the windows up (this is AC6's start-up log line, and
 it is worth reading before anything else - a typo here would make every state below wrong):
@@ -52,22 +64,28 @@ docker compose -p tracker-mapverify logs tracker | grep 'presentation windows'
 
 Two families: one holding a device in each of the four presentation states, and one with no devices
 at all (which is AC29's case, and is NOT the same thing as a family whose devices have never
-reported).
+reported). Every token and id below is printed **once**; capture each as you go.
 
 ```bash
 C="docker compose -p tracker-mapverify exec -T tracker tracker"
 
-$C create-family -name "Verification family"          # note the id -> $FAM
-$C enroll -family $FAM -name "a-never-reported"       # enrolled, never reports: no-position
-$C enroll -family $FAM -name "b-live"
-$C enroll -family $FAM -name "c-recent"
-$C enroll -family $FAM -name "d-stale"
-$C add-viewer -family $FAM -email map@example.test -name "Map viewer"
-#   -> the VIEWER token, printed once. Call it $VIEWER.
+$C create-family -name "Verification family"
+#   prints "family created / id: <uuid>"  ->  export FAM=<uuid>
 
-$C create-family -name "Empty family"                 # note the id -> $EMPTY
-$C add-viewer -family $EMPTY -email empty@example.test -name "Empty viewer"
-#   -> call this token $EMPTY_VIEWER.
+$C enroll -family "$FAM" -name a-never-reported   # enrolled, never reports: no-position
+$C enroll -family "$FAM" -name b-live
+$C enroll -family "$FAM" -name c-recent
+$C enroll -family "$FAM" -name d-stale
+#   each prints "id: <uuid>" and a DEVICE token. Keep the four ids - section 3 needs them as
+#   ID('b-live') and friends. The device tokens are NOT used here; the fixes are seeded in SQL.
+
+$C add-viewer -family "$FAM" -email map@example.test -name "Map viewer"
+#   prints a VIEWER token  ->  export VIEWER=<token>
+
+$C create-family -name "Empty family"
+#   prints an id  ->  export EMPTY=<uuid>
+$C add-viewer -family "$EMPTY" -email empty@example.test -name "Empty viewer"
+#   prints a VIEWER token  ->  export EMPTY_VIEWER=<token>
 ```
 
 Now the fixes. Both clocks are chosen here on purpose: `received_at` is what the presentation value
@@ -89,12 +107,27 @@ FROM (VALUES
 JOIN devices d ON d.name = i.device_name
 JOIN families f ON f.id = d.family_id AND f.name = 'Verification family';
 SQL
+#   expect: INSERT 0 3
 ```
 
 > `fixes` is partitioned by month and the server provisions the current month and the next one at
 > start-up, so every `ts` above must fall in the current month. If the local clock is within 12 hours
 > of the start of a month, use `interval '2 hours'` for `d-stale` and set
 > `TRACKER_STALE_WINDOW_SECONDS=3600` instead; the four states are unaffected.
+
+`b-live` stays `live` for one hour from seeding. If a session runs long, refresh its last contact
+(this is a new fix arriving, exactly as a phone reporting would be) and it becomes `live` again:
+
+```bash
+$PSQL <<'SQL'
+INSERT INTO fixes (device_id, ts, location, received_at)
+SELECT d.id, now(), ST_Point(12.4964, 41.9028, 4326)::geography, now()
+FROM devices d
+JOIN families f ON f.id = d.family_id AND f.name = 'Verification family'
+WHERE d.name = 'b-live'
+ON CONFLICT (device_id, ts) DO NOTHING;
+SQL
+```
 
 Confirm the server agrees before opening a browser. This is the reference the rendered labels are
 compared against - if these four values are not what you expect, the map is not what is wrong:
@@ -269,6 +302,7 @@ response did not revert a device the stream had already described.
 
 ```bash
 docker compose -p tracker-mapverify down -v
+rm -f ~/tracker-mapverify.env      # only if you used the env-file route in section 1
 ```
 
 ---
@@ -298,7 +332,14 @@ Stack: `docker compose -p tracker-mapverify`, `TRACKER_LIVE_WINDOW_SECONDS=3600`
 | AC29 (b) stream wins | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
 | AC30 | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
 
-**Every row above is deliberately unfilled.** The implementer who wrote this procedure has no
-browser, so nothing here has been seen; writing a predicted outcome into this table is exactly what
-this document forbids. The row is filled by the actor who runs the step, naming the element or label
-they read it off.
+**Every row above is deliberately unfilled, and that is a true statement about the world rather than
+an unfinished draft.** Two roles tried and neither could observe anything. The implementer session has
+no browser at all. The stage session that dispatched it HAS one - `/usr/bin/chromium` is installed and
+the `chrome-devtools` MCP server is connected - but every call into it was refused at the permission
+layer, as was `curl` against `localhost:8080`, and a non-interactive session has nobody to grant the
+grant. So nothing on this page has been seen by anybody, and writing a predicted outcome into this
+table is exactly what this document forbids.
+
+A row is filled only by the actor who ran the step, naming the element or label they read the outcome
+off. The block, the decision it needs and the two ways out are in
+`work/specs/S0010-tracker-server-1/blocked-report.md` in the umbrella.
