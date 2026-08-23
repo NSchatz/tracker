@@ -153,7 +153,7 @@ func TestSweepBound(t *testing.T) {
 		w    Windows
 		want int64
 	}{
-		{defaults, 60},                                  // min(120, 780)/2
+		{defaults, 60}, // min(120, 780)/2
 		{Windows{LiveSeconds: 5, StaleSeconds: 10}, 2},  // min(5, 5)/2 — the narrow band
 		{Windows{LiveSeconds: 1, StaleSeconds: 2}, 1},   // floored at 1, never 0
 		{Windows{LiveSeconds: 10, StaleSeconds: 11}, 1}, // min(10, 1)/2 = 0, floored

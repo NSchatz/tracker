@@ -31,6 +31,11 @@ As of **S6**, a viewer registers its phone over **`POST /v1/push-subscriptions`*
 delivered as a **high-priority FCM HTTP v1** message, or via **UnifiedPush/ntfy** for a degoogled
 deployment. Delivery is best-effort and off unless a backend is configured. See *Push alerts (S6)* below.
 
+As of **S0010**, every device a viewer can read carries a server-computed **presentation state** -
+one of `no-position`, `live`, `recent`, `stale` - on `GET /v1/positions` and on `GET /v1/stream`,
+and `GET /v1/positions` now lists **every device in the family**, including one that has never
+reported. See *Presentation state* below; it is normative for both surfaces.
+
 ---
 
 ## Authentication
@@ -143,14 +148,29 @@ Timestamps on the wire are **epoch seconds**, the same convention as ingestion's
 
 ### `GET /v1/positions`
 
-The **latest fix per device** in the caller's family, ordered by device name. A device that has
-never reported does not appear; a family with no fixes is `[]`.
+**Every device in the caller's family**, in the total order below, each carrying exactly one
+presentation value. A device holding at least one fix is a **located entry** and carries its latest
+fix by event-`ts`; a device tracker holds no fix for is an **unlocated entry** and carries three keys
+and nothing else. A family with **no devices** is `[]`.
 
 ```json
 [
-  {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"received_at":1752566402}
+  {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"received_at":1752566402,"presentation":"live","last_contact_at":1752566402},
+  {"device_id":"…","device_name":"Bobs new phone","presentation":"no-position"}
 ]
 ```
+
+> **This changed in S0010.** A device that had never reported used to be *absent* here. It is now
+> listed as an unlocated entry, because "this phone has never checked in" is a setup problem and
+> "this phone stopped checking in an hour ago" is a liveness problem, and rendering both as an
+> absence made them indistinguishable. **A family with devices but no fixes is NOT `[]`** - it is one
+> unlocated entry per device.
+
+The order is a **total** order over located and unlocated entries together (never located first):
+device name compared case-insensitively under Unicode simple lowercase mapping, then, for equal
+folded names, the raw name in UTF-8 byte order, then `device_id` ascending by byte order. It is
+computed in the server, not by the database's collation, so two consecutive requests are
+byte-identical and two deployments serve one family in one order.
 
 ### `GET /v1/devices/{id}/history`
 
@@ -191,11 +211,146 @@ are required; a missing, non-numeric, out-of-range, or negative value is a `400`
 
 ---
 
-## The live stream (S4) — `GET /v1/stream`
+## Presentation state
 
-A **Server-Sent Events** feed of the caller's family's **position updates**: a long-lived connection
-that pushes each device's current position as it changes, so a map need not poll. It retires the
-poll-only map (S3 remains for one-shot reads).
+Every device a viewer can read carries exactly one **presentation value**, computed by the **server**
+at the moment the response or event is produced and transmitted on the wire. **No client re-derives
+it.** A browser whose clock disagrees with the server's by hours must still render what the server
+sent, which is the whole reason this is a server-side computation and not a timestamp comparison in
+a page.
+
+### The four values
+
+`presentation` is a JSON **string** key on every device entry and every presentation-carrying event.
+Its value is exactly one of these four lowercase ASCII tokens. Note the hyphen; no other spelling,
+casing or synonym is ever emitted, and none is ever accepted as equivalent.
+
+| token | meaning |
+|---|---|
+| `no-position` | tracker holds **no fix at all** for this device. It has never reported, or every fix it ever sent has since been purged. |
+| `live` | the device reached the server within the live window. |
+| `recent` | past the live window, still inside the staleness window. |
+| `stale` | past the staleness window. Something is wrong with this phone. |
+
+### Last contact, and the fact it is NOT
+
+Two receive-times ride the wire and they are **different facts**:
+
+| key | what it is | unit |
+|---|---|---|
+| `received_at` | the **current position row's own** arrival - the receive-time of the fix being displayed. Unchanged from S3 in name, type, unit and meaning. | epoch **seconds** |
+| `last_contact_at` | **`max(received_at)` over ALL of the device's fixes** - the largest server receive-time, an aggregate over the whole set. | epoch **seconds** |
+
+The SSE `id:` line carries the same kind of receive instant at **microsecond** resolution; that is
+unchanged too. Every cross-field comparison between these is an equality of **instant**, never of
+integer: convert to one unit before comparing.
+
+**Age is `now - last_contact_at`, never `now - received_at`.** They differ exactly when a fix arrived
+that did not become the current position, and in both real cases the device is plainly alive while
+the row on display is old:
+
+- a phone flushing an **offline backlog** reports old `ts` values with a fresh arrival, so the newest
+  arrival is not the newest `ts`;
+- a phone with a **fast clock** reports a `ts` in the future, which pins the current position while
+  every later fix keeps arriving.
+
+Measuring age off the displayed row's `received_at` would call both of those `stale`. Age is a fact
+about the **device**, not about the row on display - which is why it rides the wire under its own
+key. `last_contact_at` is **present on every located entry** and **omitted entirely** from an
+unlocated one.
+
+### The ordered test, and the precedence ruling
+
+The four values are **mutually exclusive** and **total**: every device in the caller's family carries
+exactly one, never two and never none. They are assigned by this ordered test, **first match wins**:
+
+1. **`no-position`** - tracker holds no fix for this device.
+2. **`live`** - `age <= W_live`.
+3. **`recent`** - `W_live < age <= W_stale`.
+4. **`stale`** - `age > W_stale`.
+
+**A device that has never reported is never `stale`, however long ago it was enrolled.** Step 1
+terminates the test, so no age comparison is ever performed for a device with no fix; symmetrically,
+a device holding a fix is never `no-position`.
+
+Step 1 reads the fix set **as it stands at the evaluation instant**, so a device whose last fix is
+deleted - **retention purging**, which keeps running - becomes `no-position` from that instant
+onward. It does not age into `stale`, and its coordinates stop being served on both surfaces at
+once.
+
+**Resolution and boundaries.** Age is a whole number of seconds: the *difference* between the two
+instants, truncated toward zero and floored at 0. A device last heard from 120.4 seconds ago has age
+120. A **negative** age (the server clock behind the device's last contact - clock skew) is **zero**,
+so such a device is `live` and no negative age ever reaches the wire. Boundaries are **half-open
+toward freshness**: age exactly `W_live` is `live`, age exactly `W_stale` is `recent`.
+
+Under the defaults, a device whose last contact precedes the evaluation instant by 0, 120, 121, 900
+and 901 seconds is `live`, `live`, `recent`, `recent` and `stale` respectively.
+
+### The unlocated entry
+
+An unlocated entry is **exactly three keys and nothing else**:
+
+```json
+{"device_id":"…","device_name":"Bobs new phone","presentation":"no-position"}
+```
+
+No `lat`, no `lon`, no `ts`, no `received_at`, no `last_contact_at` - and **above all no zeros**.
+`0,0` is Null Island, a real place off the coast of Ghana; a `no-position` device must be
+*unplottable*, not merely un-plotted. `GET /v1/positions` and the stream emit the **identical**
+object for the same device in the same evaluation window.
+
+A **located** entry keeps every key it carried before S0010 - `device_id`, `device_name`, `lat`,
+`lon`, `ts`, `received_at` - with unchanged name, type, unit and meaning, and **adds** `presentation`
+and `last_contact_at`. The change is purely additive: a decoder that requires those six keys and
+tolerates unknown ones still decodes it. A decoder that *rejects* unknown fields will fail, and the
+repair is the decoder - tracker does not withhold a key to accommodate one.
+
+### Configuring the windows
+
+Two environment variables, following the same env-only, `TRACKER_`-prefixed,
+refuse-to-start-on-invalid convention as the rest of the server's configuration:
+
+| variable | default | meaning |
+|---|---|---|
+| `TRACKER_LIVE_WINDOW_SECONDS` | `120` | `W_live`: at or under this age, a device is `live`. |
+| `TRACKER_STALE_WINDOW_SECONDS` | `900` | `W_stale`: past this age, a device is `stale`. |
+
+**The value grammar is a base-10 whole number of SECONDS** - no unit suffix, no fractional part -
+after surrounding whitespace is trimmed, within the representable range **1 to 2^63-1 seconds
+inclusive**. Every number here, in the start-up log and in every error is seconds.
+
+- **Emptiness is measured after that trim.** A variable that is unset, set to the empty string, or
+  set to whitespace only is **not configured**, and not configured means **the default** - never an
+  invalid value and never a refused start. A rendered compose file with an unset shell default hands
+  the process an empty string, and refusing to boot over a value nobody typed would be the wrong
+  answer to it.
+- **A present but non-conforming value refuses the start**, naming the offending variable and the
+  constraint. `2m`, `120s` (a unit suffix is not this grammar - there is no duration-string form),
+  `1.5` (not whole), `abc` (not a number), `0` and `-5` (not positive) and `99999999999999999999`
+  (outside the representable range, so unparseable rather than silently truncated) all refuse.
+  `120`, `  120  `, the empty string and a whitespace-only value all start.
+- **Each variable defaults independently**, and the ordering rule is checked on the resulting
+  **effective** pair. Setting only `TRACKER_STALE_WINDOW_SECONDS=60` yields the effective pair
+  (120, 60), and that **refuses to start**: with `W_live >= W_stale` no device could ever be
+  `recent`, so a whole documented state would be silently unreachable. The refusal reports **both**
+  effective values in seconds.
+- **A successful start logs both effective values**, in seconds and under their variable names, so
+  an operator can tell from a running container's log which windows it applies - including when it
+  applies the defaults.
+
+---
+
+## The live stream (S4, extended by S0010) — `GET /v1/stream`
+
+A **Server-Sent Events** feed of the caller's family's **position updates and presentation state**: a
+long-lived connection that pushes each device's current position as it changes, and each device's
+presentation value as it changes, so a map need not poll and need not derive liveness from its own
+clock. It retires the poll-only map (S3 remains for one-shot reads).
+
+If the server can no longer read the data behind an open stream it either **closes the connection**
+or emits an explicit **`error` event** - it never keeps emitting state derived from data it cannot
+read, and never holds the last known states open while presenting them as current.
 
 ### Transport & authentication
 
@@ -216,33 +371,133 @@ token is a `401` here too. It may be presented **either** way:
 
 Every route stays **family-scoped**: a watcher only ever receives its own family's positions.
 
-### Event format
+### Event format — there are exactly three event types
 
-Each position update is one SSE event:
+| `event:` | when it is sent | carries `id:` | `data:` |
+|---|---|:---:|---|
+| `position` | a device's **current position changes**, including that device's first ever fix | **yes** | a **located entry** |
+| `presentation` | a device's **presentation value changes with no change to its current position**; every `no-position` device in a fresh snapshot; and every device the resume sweep names | **no** | a presentation update, or an **unlocated entry** |
+| `error` | the server **can no longer read** the data behind this stream | no | `{"error":"…","message":"…"}` |
+
+There is no fourth type, and none of the three marks a snapshot complete.
 
 ```
 id: 1752566402000000
 event: position
-data: {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"received_at":1752566402}
+data: {"device_id":"…","device_name":"Alice's phone","lat":41.9028,"lon":12.4964,"ts":1752566400,"received_at":1752566402,"presentation":"live","last_contact_at":1752566402}
+
+event: presentation
+data: {"device_id":"…","device_name":"Alice's phone","presentation":"recent","last_contact_at":1752566402}
+
+event: presentation
+data: {"device_id":"…","device_name":"Bobs new phone","presentation":"no-position"}
+
+event: error
+data: {"error":"unavailable","message":"tracker cannot currently read this family's data; the states shown are no longer confirmed"}
 
 ```
 
-- **`id`** is the fix's **`received_at` in microseconds** — a monotonic, resumable cursor (see below).
-- **`event`** is always `position` for a position update.
-- **`data`** is the same JSON shape as one `GET /v1/positions` entry.
+- **`id`** is the fix's **`received_at` in microseconds** - a monotonic, resumable cursor (see below).
+  **Only a `position` event carries one.**
+- A `position` event's `data` is the same JSON shape as one located `GET /v1/positions` entry, and its
+  `presentation` is evaluated at **delivery** time.
+- A `presentation` event's `data` is one of two shapes. For a device that **still holds a position**
+  it is a four-key **partial update** - `device_id`, `device_name`, `presentation`,
+  `last_contact_at` - deliberately carrying **no coordinates**, because the device has not moved and
+  this must never be mistaken for a new fix. For a device tracker now holds **no fix** for it is the
+  three-key **unlocated entry**, identical to the one `GET /v1/positions` serves.
+
+#### A `presentation` event deliberately does not advance `Last-Event-ID`
+
+It carries **no `id:` line at all**, so it cannot move the cursor a client echoes back and cannot
+corrupt a resume. That is a deliberate compatibility decision with a consequence worth stating
+plainly:
+
+> **A consumer that handles only `position` events sees EXACTLY the event set it saw before S0010**,
+> with unchanged ids and unchanged resume behaviour. It therefore learns of a **time-driven**
+> transition (a device ageing from `live` to `recent` with no new fix) only at that device's next
+> `position` event or on a fresh connection. That is a documented degradation, not a defect: the
+> alternative was moving the cursor on an event that corresponds to no stored row, which would
+> break resume for every existing consumer.
+
+#### What causes a `presentation` event
+
+A device's presentation value changes without its position changing, for any of these reasons, and
+each is announced to **every open stream for that family**, carrying the value evaluated at
+**delivery** time and not at the crossing:
+
+- **time passed** and it crossed an age boundary (`live` to `recent`, `recent` to `stale`);
+- **a fix arrived that refreshed last contact without becoming the current position** - an offline
+  backlog gap-fill - including the freshening direction, `stale` back to `live`;
+- **retention purging deleted fixes**, including the transition to `no-position` when the last
+  remaining fix is purged. That event carries the three-key unlocated entry, so a map takes the
+  marker down rather than leaving it at coordinates the server no longer holds.
+
+The announcement is bounded: it arrives no later than **B** seconds after the change, where
+`B = max(1, floor(min(W_live, W_stale - W_live) / 2))` over the effective windows - 60 seconds under
+the defaults, 2 under the legal pair (5, 10). The `min` is what keeps the bound honest under a narrow
+`recent` band, which a coarser sweep could otherwise step straight over.
 
 ### Snapshot, then live
 
-A **fresh** connection (no `Last-Event-ID`) first receives the **current position of every device**
-in the family — the snapshot that paints the map — then live updates as they arrive.
+A **fresh** connection (no `Last-Event-ID`) first receives a snapshot describing **every device in
+the family**, each carrying the value computed at delivery time:
 
-### Resume — `Last-Event-ID`, no gaps
+- one **`position`** event per device holding a fix, and
+- one **`presentation`** event carrying the three-key unlocated entry per device holding none.
 
-Because `id` is `received_at`-in-microseconds, it is a **monotonic cursor**. On a dropped connection
-the browser reconnects automatically and re-sends the last id it saw as **`Last-Event-ID`**; the
-server then delivers **every position that arrived strictly after it** — nothing that happened while
-disconnected is skipped, and the boundary row is not re-delivered. A garbled or absent `Last-Event-ID`
-fails **safe**, toward the full snapshot, never toward a silent skip.
+Then live updates as they arrive. Nothing marks the snapshot complete; a client that needs to know
+the device set is complete reads `GET /v1/positions`, whose empty array is how "no devices in this
+family" is distinguishable from "still connecting".
+
+### Resume — `Last-Event-ID`, no gaps, and the sweep
+
+Because `id` is `received_at`-in-microseconds, it is a **monotonic cursor** and an **instant**, not
+an opaque handle. On a dropped connection the browser reconnects automatically and re-sends the last
+id it saw as **`Last-Event-ID`**; the server then delivers **every position that arrived strictly
+after it** - nothing that happened while disconnected is skipped, and the boundary row is not
+re-delivered. That guarantee is unchanged.
+
+A resume then does one further thing, because a client disconnected for an hour must be told what is
+true **now** rather than only what moved:
+
+**The sweep.** The server enumerates the family's **device set** - not the replay buffer - and for
+each device compares its **delivery-time value** against its **cursor-instant value**, emitting a
+`presentation` event where they differ.
+
+- The **cursor-instant value** of a device is what the same ordered test yields with the evaluation
+  instant set to **the instant the cursor encodes**, over only that device's fixes whose receive time
+  is **at or before** that instant.
+- A device holding **no fix at or before that instant** - enrolled during the outage, or reporting
+  for the first time during it - **has no cursor-instant value**. That absence is not `no-position`
+  and never compares equal to anything, so such a device is **always** told about and never silently
+  omitted. Its event carries whatever it is now, which for a device that still has not reported is
+  the three-key unlocated entry.
+- A device whose **position was just replayed** gets no `presentation` event: the replayed `position`
+  event already carries its delivery-time value, so a second event would say the same thing twice.
+- Both sides are recomputed from the **stored fixes** on every resume. Nothing about any client is
+  remembered, so **two resumes on the same cursor emit the same set** and re-delivery is idempotent.
+
+**Silence on a resumed stream is meaningful.** If nothing was replayed and no device qualifies, the
+server sends **no event** and holds the connection open: that means "every device was evaluated and
+nothing changed", and the client's already-rendered states remain current. It does not mean "nothing
+was checked".
+
+The sweep uses `presentation` events, which carry no `id:`, so it is invisible to a `position`-only
+consumer and cannot disturb the cursor.
+
+A **garbled or absent** `Last-Event-ID` - one that is not a number, so it cannot be anchored to an
+instant - is **not a resume**. It falls back to the full fresh snapshot, failing **safe** toward
+showing more, never toward a silent skip. Note that the cursor is anchored by its **value**: the
+sweep never looks the row up, so an hour-old cursor still works after retention purging has deleted
+exactly the aged row it names.
+
+**A device enrolled after a connection opened**, and not yet reporting, is **not** announced on that
+already-open connection - the set of devices announced as unlocated is fixed at snapshot time. It
+appears as `no-position` on the next fresh connection's snapshot, on the next resume sweep (which
+holds no cursor-instant value for it), and on `GET /v1/positions` immediately. This is bounded by the
+position guarantee above: **a fix from any family device, enrolled before or after the snapshot, is
+always delivered as a `position` event** on that open connection.
 
 ### Position-stream semantics (not a breadcrumb replay)
 

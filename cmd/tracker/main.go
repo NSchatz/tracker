@@ -170,7 +170,7 @@ func runServe() error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
+		Addr: cfg.Addr,
 		Handler: server.New(pool, notifier, presentation.Windows{
 			LiveSeconds:  cfg.LiveWindowSeconds,
 			StaleSeconds: cfg.StaleWindowSeconds,

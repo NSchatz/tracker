@@ -129,6 +129,7 @@ func TestStreamPresentation(t *testing.T) {
 	t.Run("an unanchorable cursor is a fresh snapshot, not a resume", func(t *testing.T) { unanchorableCursor(t, h) })
 	t.Run("a position-only consumer sees exactly what it always did", func(t *testing.T) { positionOnlyConsumer(t, h) })
 	t.Run("an unreadable datastore is reported, not hidden", func(t *testing.T) { datastoreLossOnAnOpenStream(t, h) })
+	t.Run("the server can emit no event type and no token outside the contract", func(t *testing.T) { serverVocabularyIsClosed(t, h) })
 }
 
 // snapshotDescribesEveryone is AC15: a fresh connection receives one `position` event per device

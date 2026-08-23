@@ -86,6 +86,14 @@ services:
       # timer. Unset (or 0) keeps history forever — the purge does not run. Uncomment to enable, e.g.
       # keep 90 days:
       # TRACKER_RETENTION_DAYS: "90"
+      # The presentation windows, in SECONDS (see SPEC.md, "Presentation state"). `${VAR-}` renders
+      # the EMPTY STRING when the variable is not exported, and empty means the DEFAULT (120 / 900) —
+      # which is exactly why the server measures emptiness after trimming rather than refusing to
+      # start on it. An untouched deployment therefore boots on the defaults; setting either variable
+      # in the shell (or in a `.env` beside this file) applies it, and a value that is not a whole
+      # number of seconds refuses the start and says which variable it was.
+      TRACKER_LIVE_WINDOW_SECONDS: "${TRACKER_LIVE_WINDOW_SECONDS-}"
+      TRACKER_STALE_WINDOW_SECONDS: "${TRACKER_STALE_WINDOW_SECONDS-}"
     ports:
       - "8080:8080"
 
