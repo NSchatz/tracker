@@ -336,37 +336,53 @@ rm -f ~/tracker-mapverify.env      # only if you used the env-file route in sect
 
 ## 5. The record
 
-Commit verified against: `NOT YET OBSERVED`
-Actor: `NOT YET OBSERVED`
-Date: `NOT YET OBSERVED`
-Stack: `docker compose -p tracker-mapverify`, `TRACKER_LIVE_WINDOW_SECONDS=3600`,
-`TRACKER_STALE_WINDOW_SECONDS=21600`
+**Commit verified against: `eb58f53c70f1f43aeea15f96d039894cd4ff8ebf`** ("fix(tracker):
+S0010-tracker-server-1 - connection health can get better, and the sweep bound holds"), on branch
+`sdd/S0010-tracker-server-1`. That is the commit the stack below was BUILT FROM and the commit that
+was under the browser. This record is committed on top of it, because a record that names the commit
+it was run against cannot also be inside that commit; the only thing between them is this table.
+
+**Actor: the implementer agent for `S0010-tracker-server-1`, fix loop after implementation verdict 1**
+(a Claude Code session, non-interactive). **Method: a real browser, driven headlessly.** Chromium
+`151.0.7922.109` (`chromedp/headless-shell`, user agent read off `navigator.userAgent` on the page
+itself) ran as a container on the stack's own compose network, so the page loaded from the running
+server at `http://tracker:8080/map`. It was driven over the DevTools Protocol by a throwaway `chromedp`
+client living OUTSIDE this repository, attached to one persistent page target so the map stayed open
+across steps that stop and start containers. Every outcome below was read back from the page AFTER its
+JavaScript ran - `innerText` / `outerHTML` of the named element, the `.leaflet-tooltip` nodes Leaflet
+had drawn, `window.trackerMap.snapshot()`, and a full-page screenshot for each - never predicted from
+source. **No dependency was added to this repository**; the driver is scratch tooling that was thrown
+away with the container.
+
+**Date: 2026-08-24**, 13:42 to 13:50 UTC.
+**Stack:** `docker compose -p tracker-mapverify up -d --build` from this commit, with
+`TRACKER_LIVE_WINDOW_SECONDS=3600` and `TRACKER_STALE_WINDOW_SECONDS=21600`. Start-up log read back
+first, per section 1: `{"msg":"presentation windows","TRACKER_LIVE_WINDOW_SECONDS":3600,
+"TRACKER_STALE_WINDOW_SECONDS":21600,"unit":"seconds"}`.
+**Server reference** (`GET /v1/positions`, section 2) before the browser was opened, and it matched
+the expected fixture exactly: `a-never-reported` `no-position` with exactly three keys, `b-live`
+`live`, `c-recent` `recent`, `d-stale` `stale`, in that order; the empty family returned `[]`.
 
 | criterion | steps run | how the outcome was observed | outcome |
 |---|---|---|---|
-| AC24 | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC25 | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC26 | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC27 (a) error event | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC27 (b) drop | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC27 (c) fails to open | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC28 (a) position | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC28 (b) located presentation | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC28 (c) unlocated presentation | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC28 (d) error | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC28 (e) three rejections | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC29 (a) empty family | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC29 (b) stream wins | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
-| AC30 | NOT YET OBSERVED | NOT YET OBSERVED | NOT YET OBSERVED |
+| AC24 | §3 AC24 steps 1-2: loaded `/map?token=$VIEWER`, waited for the snapshot, read every rendered label | `innerText` of `#panel`; `outerHTML` of `#located` and `#unlocated`; the text of every `.leaflet-tooltip` Leaflet had drawn; screenshot | PASS. Panel read `b-live live` / `c-recent recent` / `d-stale stale` under DEVICES and `a-never-reported no-position` under PRESENT, NOT LOCATED. Marker tooltips read `b-live - live`, `c-recent - recent`, `d-stale - stale`. Each `<li>` also carried `data-state` equal to the word the server sent. All four words are text, so they survive colour being removed |
+| AC25 | §3 AC25 steps 1-3: read the unlocated section, counted markers, then centred the map on lat 0 lon 0 at zoom 10 and looked | `innerText` of `#unlocated`; `snapshot().markerIds`; `window.markers[<a-never-reported>]`; a viewport-intersection count over `#map .leaflet-overlay-pane path`; screenshot of null island | PASS. `a-never-reported no-position` listed as present and unlocated. `markerIds` held exactly the three located devices; the never-reported id was absent and `window.markers[...]` for it was undefined. The three markers sat at 41.9028,12.4964 / 45.4642,9.19 / 48.8566,2.3522. With the map showing 0,0, **0** marker shapes fell inside the map viewport - the screenshot is empty ocean |
+| AC26 | §3 AC26 steps 1-5, with the WHOLE JS clock replaced (a `Date` proxy, so both `new Date()` and `Date.now()` move), +6h then -6h, pressing **Watch** each time for a full repaint from the server | the page's own clock read back (`new Date().toISOString()`) beside real UTC; then `innerText` of `#panel` and the `.leaflet-tooltip` text; screenshots at both skews | PASS. Page clock read `2026-08-24T19:44:34Z` and then `2026-08-24T07:44:39Z` while real UTC was `13:44`. At both skews the labels were byte-identical to AC24's - `d-stale` still read `stale`, `b-live` still `live`. Restoring the clock and repainting again changed nothing |
+| AC27 (a) error event | §3 AC27(a) steps 1-3 on a HEALTHY open connection: `docker compose -p tracker-mapverify stop postgis`, then read the page | `innerText` of `#status`; `outerHTML` of `#located` and `#unlocated`; tooltip text; `source.readyState`; screenshot | PASS. Status read `connection interrupted: tracker cannot currently read this family's data; the states shown are no longer confirmed. Device states below are no longer confirmed.` Every row carried `(unconfirmed)` in its own `<span class="unconfirmed">` BESIDE the state span - `b-live live (unconfirmed)`, tooltip `b-live - live (unconfirmed)` - so each device kept the exact token the server last sent (`data-state` still `live`/`stale`/`no-position`) and none was presented as CURRENTLY live. `readyState` was `1` (OPEN): the error branch, not a drop |
+| AC27 (a) recovery | §3 AC27(a) step 4: `start postgis` and change NOTHING about the family, then wait 20s | `innerText` of `#status` and `#panel`; tooltip text; `snapshot().interrupted`; screenshot | PASS. Status returned to `live` (class `live`), `interrupted` was `false`, and NO row carried `(unconfirmed)` - with no device having moved, aged or reported. This is the fix for the implementation verdict's F3: before it, this exact sequence left every row unconfirmed indefinitely against a healthy server (observed that way on `fbb074b` in this same browser, which is why the change was made) |
+| AC27 (b) drop | §3 AC27(b): with the map live, `docker compose -p tracker-mapverify stop tracker` | `innerText` of `#status` and `#panel`; tooltip text; screenshot | PASS. Status read `connection interrupted: the live connection dropped; reconnecting. Device states below are no longer confirmed.` Every row `(unconfirmed)`, tooltips `b-live - live (unconfirmed)` and `d-stale - stale (unconfirmed)`, nothing presented as currently live |
+| AC27 (c) fails to open | §3 AC27(c): server still stopped, pressed **Watch** on the already-loaded page (a fresh navigation is impossible - `/map` is served by the stopped server) | `innerText` of `#status` immediately, again 8s later; `snapshot().status`; screenshot | PASS. Status read `connection interrupted: the live connection could not be opened. Device states below are no longer confirmed.` It never contained `connecting...` and was identical eight seconds later, so nothing sat there implying progress |
+| AC28 (a) position | §3 AC28(a): the snapshot's `position` events at AC24, and later a REAL new fix inserted for `b-live` while the map was open | tooltip text and `window.markers[<b-live>].getLatLng()` before and after | PASS. Markers were placed with their state rendered at snapshot; the later real fix moved `b-live`'s marker from 41.9028,12.4964 to 41.91,12.5 and its label back to `live` |
+| AC28 (b) located presentation | §3 AC28(b): handed `window.trackerMap.onStreamEvent` a LOCATED `presentation` payload saying `recent` for `b-live` | `innerText` of `#located`; tooltip text; `getLatLng()` and the tooltip's on-screen `left` before and after; `snapshot().markerIds` compared to the saved before-set | PASS. Label went `b-live live` to `b-live recent` and the tooltip to `b-live - recent`, while `getLatLng()` stayed 41.9028,12.4964, the tooltip's screen position stayed `538`, and `markerIds` was unchanged. Updated IN PLACE: not moved, not removed, not treated as a new fix |
+| AC28 (c) unlocated presentation | §3 AC28(c): purged `c-recent`'s last fix through the real server (`DELETE FROM fixes ...`) with the map open, then widened the view over all three seeded coordinates | `innerText` of `#panel`; `outerHTML` of `#unlocated`; `snapshot().markerIds`; `window.markers[<c-recent>]`; a count of `#map .leaflet-overlay-pane path`; screenshot; and `GET /v1/positions` in the same window | PASS. Within one poll `c-recent`'s marker DISAPPEARED - `window.markers[...]` undefined, `markerIds` down to the two survivors, 2 marker shapes drawn over an area that had shown 3, Milan empty in the screenshot - and it moved into PRESENT, NOT LOCATED reading `no-position`. `GET /v1/positions` in the same window returned exactly `{"device_id":"09571b84-4bf6-46bb-929d-97770bd0fcb0","device_name":"c-recent","presentation":"no-position"}`: the identical three-key object, no `lat`, `lon`, `ts`, `received_at` or `last_contact_at`. (AC28 and AC32 jointly) |
+| AC28 (d) error | §3 AC28(d): the same `error` event as AC27(a) | as AC27(a) | PASS. The `error` event took AC27's interrupted path rather than being rejected or ignored |
+| AC28 (e) three rejections | §3 AC28(e): handed the page, in turn, `'{not json at all'`, an event typed `teleport`, and a `presentation` value of `offline` | `innerText` of `#bar` and `#panel` after each; `snapshot().rejectedCount` / `.lastRejection` / `.markerIds` after each; then a REAL fix inserted afterwards | PASS. Each was refused individually: `rejectedCount` went 1, 2, 3 with the bar reading `1 event(s) rejected: unparseable event data`, then `... unrecognised event type "teleport"`, then `... presentation value "offline" is outside the four tokens`. The map was never blanked - all three markers and all four state words were unchanged after every one. The stream kept consuming: a real `position` event that landed afterwards moved `b-live`'s marker and set it back to `live`, with the rejection notice still displayed |
+| AC29 (a) empty family | §3 AC29(a): reloaded `/map`, entered `$EMPTY_VIEWER`, pressed **Watch** | `innerText` of `#panel`; `outerHTML` of `#empty`; `snapshot().deviceSetKnown` and device count; screenshot | PASS. Before a token was given the panel showed only the DEVICES heading and claimed nothing. After watching the empty family it rendered `<p id="empty">no devices in this family</p>` with `deviceSetKnown: true`, 0 devices and 0 markers - explicitly empty, not indistinguishable from still connecting |
+| AC29 (b) stream wins | §3 AC29(b): with the stream having already described `b-live` as `live`, handed `window.trackerMap.applyPositions` a late positions response saying `stale` for it | `innerText` of `#located`; tooltip text; `snapshot().devices[<b-live>].state`; `window.describedByStream[<b-live>]` | PASS. `describedByStream` was `true` beforehand; after the late, disagreeing response the label still read `b-live live`, the tooltip still `b-live - live`, and the snapshot state was still `"live"`. The response did not revert a device the stream had already described |
+| AC30 | §3 AC30 steps 1-3: pressed **Watch** with the token field EMPTY, then again with `not-a-real-token` | `innerText` of `#status` immediately and 8s later for each; `snapshot().status`; `window.source` (the EventSource); screenshots | PASS. Empty field: `viewer token refused: the server would not accept this credential (no viewer token was given)`. Bad token: `viewer token refused: the server would not accept this credential (HTTP 401)`. Neither contained `connecting`, both were identical eight seconds later, and `window.source` was `null` in both cases - the EventSource was closed, not left retrying |
 
-**Every row above is deliberately unfilled, and that is a true statement about the world rather than
-an unfinished draft.** Two roles tried and neither could observe anything. The implementer session has
-no browser at all. The stage session that dispatched it HAS one - `/usr/bin/chromium` is installed and
-the `chrome-devtools` MCP server is connected - but every call into it was refused at the permission
-layer, as was `curl` against `localhost:8080`, and a non-interactive session has nobody to grant the
-grant. So nothing on this page has been seen by anybody, and writing a predicted outcome into this
-table is exactly what this document forbids.
-
-A row is filled only by the actor who ran the step, naming the element or label they read the outcome
-off. The block, the decision it needs and the two ways out are in
-`work/specs/S0010-tracker-server-1/blocked-report.md` in the umbrella.
+**What was NOT observed, stated plainly.** The production retention purge drops a whole monthly
+PARTITION; this run deleted the rows instead, which leaves the device in the same state the map reacts
+to (holding no fix) but is not the same SQL. The partition-drop path is covered by the Go test
+`TestStreamPurgeToNoPosition`, which asserts the same unlocated event and the same cross-surface
+identity. Everything else in the table above is a rendered outcome that was read off the page.
