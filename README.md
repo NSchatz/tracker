@@ -240,9 +240,10 @@ A **viewer** watches the family move in real time over one long-lived connection
   watching. (Map *tiles* still come from OpenStreetMap; markers render and move without them.) It
   labels every device with the state word the server sent, lists the ones that are present but not
   located, and reports connection health as a **separate axis** from device state: a dropped stream
-  or an `error` event marks every state *unconfirmed* rather than freezing a green map. The manual
-  procedure that confirms what a browser actually renders, and its results, are in
-  [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md).
+  or an `error` event marks every state *unconfirmed* rather than freezing a green map, and the
+  server **re-states the whole family** on the first successful read after an outage, so health can
+  get better again and not only worse. The procedure that confirms what a browser actually renders,
+  and the record of what was seen, are in [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md).
 
 Two properties are load-bearing, each pinned by a test:
 
@@ -507,7 +508,13 @@ Things that are true today and are not hidden:
   wants where everyone is now — but it means the stream is not a lossless replay of every fix; the
   full trail is `GET /v1/devices/{id}/history`. The stream polls the database on a short interval
   rather than being pushed from ingestion, which keeps it stateless across replicas at the cost of up
-  to that interval of latency.
+  to that interval of latency. The interval is one second, and half a second under the two tightest
+  legal window pairs, so a time-driven transition always lands inside its announcement bound.
+- **An empty family is not told when an outage ends.** After an `error` event the server re-states
+  the family on its first successful read, which is what clears a map's *unconfirmed* marks. A family
+  with **no devices at all** has nothing to re-state and the wire contract has no fourth event type
+  to carry an "all clear", so that one page keeps its interruption notice until the viewer
+  reconnects. Named rather than hidden; a fourth event type is the fix, and it is not this change.
 - **A stream position update can be delayed by one fix under a rare write race.** The stream's cursor
   is `received_at`; if two fixes for a family commit out of `received_at` order within one poll
   interval, the later-committing one can be skipped until that device's *next* fix re-establishes it.

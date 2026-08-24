@@ -47,14 +47,29 @@ var staticFS embed.FS
 // re-evaluates every device's presentation value. It is a var, not a const, only so the tests can
 // shrink it — production polls at this cadence.
 //
-// One second is also what makes AC17's timing guarantee free: the sweep bound B is
-// max(1, floor(min(W_live, W_stale-W_live)/2)) seconds, which is never less than one second for any
-// legal window pair (presentation.TestSweepBoundIsAlwaysAtLeastOneSecond), so a one-second sweep
-// satisfies the bound whatever an operator configures. A push architecture (LISTEN/NOTIFY or an
-// in-process broker) would cut the latency further, but it would also break the stateless-replica
-// story the roadmap keeps (§1) — a fix ingested on one replica must still reach a watcher on another,
-// and a database poll is what makes that true for free.
+// A push architecture (LISTEN/NOTIFY or an in-process broker) would cut the latency further, but it
+// would also break the stateless-replica story the roadmap keeps (§1) — a fix ingested on one replica
+// must still reach a watcher on another, and a database poll is what makes that true for free.
 var streamPollInterval = 1 * time.Second
+
+// streamPollTick is the cadence ONE open stream actually polls at: the interval above, but never
+// slower than HALF the sweep bound B for the windows this server is running.
+//
+// Why half and not B itself. The contract says a time-driven transition is announced "no later than B
+// seconds after the change", and a change lands at an arbitrary point INSIDE a poll period: a crossing
+// one instant after a poll waits a whole period, plus the query, before it is seen. So a period equal
+// to B misses the bound by whatever the query cost is. B is floored at 1 second and the ordinary
+// interval IS one second, so under every wide pair — the 120/900 defaults give B=60 — this returns the
+// unchanged one-second cadence. It only bites the tightest legal pairs, (1,2) and (2,3), where B is 1:
+// there it polls twice a second, so the worst case is half a bound plus a query rather than a whole
+// one. Sub-second windows are a deliberate operator choice and pay for themselves in query load.
+func streamPollTick(w presentation.Windows) time.Duration {
+	tick := streamPollInterval
+	if half := time.Duration(presentation.SweepBound(w)) * time.Second / 2; half > 0 && half < tick {
+		tick = half
+	}
+	return tick
+}
 
 // streamHeartbeatInterval bounds how long a quiet stream goes without writing anything. A periodic
 // SSE comment keeps intermediaries from timing out an idle connection and is how the server learns a
@@ -130,7 +145,7 @@ func getStream(database DB, windows presentation.Windows, logger *slog.Logger) h
 		}
 
 		ctx := r.Context()
-		ticker := time.NewTicker(streamPollInterval)
+		ticker := time.NewTicker(streamPollTick(windows))
 		defer ticker.Stop()
 
 		// Deliver the first pass immediately rather than waiting a full interval, so the map paints
@@ -226,6 +241,7 @@ func (c *streamConn) poll(ctx context.Context) error {
 	}
 	// The datastore is readable again (or was never not). Anything sent from here on IS derived from
 	// data the server can read, which is precisely what the degraded state was protecting.
+	recovered := c.degraded
 	c.degraded = false
 
 	at := time.Now()
@@ -262,6 +278,8 @@ func (c *streamConn) poll(ctx context.Context) error {
 		}
 	case !c.swept:
 		owed = c.snapshotUnlocated(states, at, positioned)
+	case recovered:
+		owed = c.reannounce(states, positioned)
 	default:
 		owed = c.diff(states, at, positioned)
 	}
@@ -346,6 +364,36 @@ func (c *streamConn) resumeSweep(ctx context.Context, states []store.DeviceState
 		}
 	}
 	return owed, nil
+}
+
+// reannounce is the first successful poll AFTER an `error` event: every device the watcher holds is
+// re-stated at delivery time, whether or not its value moved.
+//
+// This exists because connection health has to be able to get BETTER, not only worse. The `error`
+// branch deliberately holds the connection OPEN (AC23), so nothing is ever dropped and nothing is ever
+// re-established on that path — and a map annotates every device "no longer confirmed" until data
+// arrives. If recovery were left to the ordinary diff, a family that did not happen to change during
+// the outage would produce no events at all, and a healthy server would leave every row marked
+// unconfirmed indefinitely. A heartbeat cannot rescue it either: an SSE comment reaches no handler,
+// and the wire contract fixes exactly three event types, so there is no "all clear" to invent.
+//
+// So the recovery signal is the data itself, in the vocabulary that already exists. Nothing new goes
+// on the wire: these are ordinary `presentation` events carrying delivery-time values and no id, so a
+// position-only consumer sees nothing and no cursor moves. A device whose position was just replayed
+// is skipped — that `position` event already carries its delivery-time value.
+//
+// The residual, stated honestly rather than papered over: a family with NO devices at all has nothing
+// to re-announce, so its page-level notice stays up until the viewer reconnects. There is no event
+// that could carry it.
+func (c *streamConn) reannounce(states []store.DeviceState, positioned map[string]bool) []store.DeviceState {
+	var owed []store.DeviceState
+	for _, s := range states {
+		if positioned[s.DeviceID] {
+			continue
+		}
+		owed = append(owed, s)
+	}
+	return owed
 }
 
 // diff is the steady-state sweep: every device whose presentation value differs from what the same

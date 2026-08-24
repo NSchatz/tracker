@@ -129,6 +129,7 @@ func TestStreamPresentation(t *testing.T) {
 	t.Run("an unanchorable cursor is a fresh snapshot, not a resume", func(t *testing.T) { unanchorableCursor(t, h) })
 	t.Run("a position-only consumer sees exactly what it always did", func(t *testing.T) { positionOnlyConsumer(t, h) })
 	t.Run("an unreadable datastore is reported, not hidden", func(t *testing.T) { datastoreLossOnAnOpenStream(t, h) })
+	t.Run("a datastore that comes back re-states the family", func(t *testing.T) { datastoreRecoveryReannounces(t, h) })
 	t.Run("the server can emit no event type and no token outside the contract", func(t *testing.T) { serverVocabularyIsClosed(t, h) })
 }
 
@@ -601,6 +602,85 @@ func datastoreLossOnAnOpenStream(t *testing.T, h *harness) {
 		case <-deadline:
 			done = true
 		}
+	}
+}
+
+// datastoreRecoveryReannounces is the other half of AC27's health axis: a connection that was told
+// `error` must be able to be told the outage is OVER.
+//
+// AC23 lets the server hold the connection open on an `error`, so nothing on that path is ever dropped
+// and nothing is ever "re-established". A map therefore marks every device unconfirmed and has no
+// signal that would ever clear it: a family that did not happen to change during the outage produces
+// no events at all, and the page sits under a "connection interrupted" notice against a healthy
+// server, forever. This is the QUIET family - roomy windows, no fix arriving, nothing crossing a
+// boundary - so an ordinary diff would find nothing to send. What must arrive is the family re-stated.
+//
+// Nothing new goes on the wire for it: an ordinary `presentation` event, delivery-time value, no id.
+func datastoreRecoveryReannounces(t *testing.T, h *harness) {
+	familyID, viewer := newFamilyWithViewer(t, h, "recovery")
+	device := h.addDevice(t, familyID, "recovery-phone", "recovery-device")
+	arrived := time.Now()
+	h.seedFixAt(t, device, arrived, arrived, 12.4964, 41.9028)
+
+	failing := &atomic.Bool{}
+	srv := httptest.NewServer(server.New(flakyDB{DB: h.pool, failing: failing}, nil, roomyWindows, discardLogger()))
+	t.Cleanup(srv.Close)
+
+	ch, cancel, resp := openStream(t, srv.URL+"/v1/stream", "", viewer)
+	defer cancel()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream open = %d, want 200", resp.StatusCode)
+	}
+	waitFor(t, ch, 3*time.Second, "the snapshot position", func(e sseEvent) bool {
+		return e.event == "position" && decodePayload(t, e).DeviceID == device
+	})
+
+	failing.Store(true)
+	waitFor(t, ch, 3*time.Second, "the error event", func(e sseEvent) bool { return e.event == "error" })
+
+	// The outage ends. Nothing about the family changed while it lasted.
+	failing.Store(false)
+
+	back := waitFor(t, ch, 3*time.Second, "the family re-stated after recovery", func(e sseEvent) bool {
+		return e.event == "presentation" && decodePayload(t, e).DeviceID == device
+	})
+	if back.id != "" {
+		t.Errorf("the recovery event carried id %q; a presentation event must never advance Last-Event-ID", back.id)
+	}
+	if p := decodePayload(t, back); p.Presentation != "live" {
+		t.Errorf("the recovery event says %q, want the delivery-time value live", p.Presentation)
+	}
+}
+
+// TestStreamPollTickLeavesRoomInsideTheSweepBound is AC17's bound taken literally: a transition is
+// announced "no later than B seconds after the change", and a change lands at an arbitrary point
+// INSIDE a poll period, so a period equal to B is already over the bound once the query is paid for.
+// The cadence must leave room, and it must not disturb the ordinary one-second poll for any pair wide
+// enough that B is comfortable.
+func TestStreamPollTickLeavesRoomInsideTheSweepBound(t *testing.T) {
+	// Pin the production cadence rather than inheriting whatever a neighbouring case left behind.
+	t.Cleanup(server.SetStreamPollInterval(time.Second))
+
+	for _, w := range []presentation.Windows{
+		{LiveSeconds: 1, StaleSeconds: 2},
+		{LiveSeconds: 2, StaleSeconds: 3},
+		{LiveSeconds: 5, StaleSeconds: 10},
+		{LiveSeconds: 120, StaleSeconds: 900},
+		{LiveSeconds: 1, StaleSeconds: 1 << 62},
+	} {
+		bound := time.Duration(presentation.SweepBound(w)) * time.Second
+		tick := server.StreamPollTick(w)
+		if tick > bound/2 {
+			t.Errorf("windows (%d, %d): poll tick %s exceeds half the sweep bound %s, so a crossing just after a poll misses the bound",
+				w.LiveSeconds, w.StaleSeconds, tick, bound)
+		}
+		if tick <= 0 {
+			t.Errorf("windows (%d, %d): poll tick %s is not a usable period", w.LiveSeconds, w.StaleSeconds, tick)
+		}
+	}
+
+	if got := server.StreamPollTick(presentation.Windows{LiveSeconds: 120, StaleSeconds: 900}); got != time.Second {
+		t.Errorf("the default windows poll every %s; the production cadence is unchanged at 1s", got)
 	}
 }
 

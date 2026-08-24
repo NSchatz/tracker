@@ -22,6 +22,18 @@ in the record below is either an outcome somebody read, naming what they read it
 `NOT YET OBSERVED`. If the executing role cannot run a browser, it files a blocked report proposing a
 harness as an operator ask; it does not fill this table in.
 
+> **An agent with no display can still run this.** A headless Chromium driven over the DevTools
+> Protocol loads the page, runs its JavaScript and hands back the RENDERED DOM and a screenshot,
+> which is reading the result off the screen by a slower road. One way that needs nothing from this
+> repository: run `chromedp/headless-shell` as a container on the same compose network as the stack
+> (so the page is reachable at `http://tracker:8080/map`), publish its DevTools port, and drive it
+> from a throwaway CDP client OUTSIDE this checkout - `chromedp.Navigate`, then read `innerText` of
+> `#status` and `#panel`, `outerHTML` of `#located` and `#unlocated`, the `.leaflet-tooltip` nodes,
+> and `window.trackerMap.snapshot()`. Attach to a persistent page target rather than a fresh tab per
+> command, so the page survives between steps: several steps below stop a container while the map
+> stays open. **The harness lives outside this repository and this repository gains no dependency on
+> it** - that is the constraint, not "no browser".
+
 ---
 
 ## 1. Bring the stack up
@@ -168,6 +180,11 @@ the page's render state for reading back.
 In the steps below, `ID('b-live')` means that device's `device_id` as printed by `tracker enroll` or
 by the `curl` above.
 
+**Run the steps IN ORDER.** They are sequenced, not independent: AC24 to AC26 need the four-state
+fixture intact, AC28(c) then purges `c-recent` and leaves it `no-position` for good, and AC27 stops
+containers. Press **Watch** between groups to repaint from the server if a step left the page in a
+state the next one does not want.
+
 ### AC24 - each of the four states names itself in words
 
 1. With the map watching, read the **rendered label of every device**: the permanent tooltip beside
@@ -206,17 +223,27 @@ Three antecedents, and all three must be seen; each was a separate hole.
 3. Correct outcome: the status line reads **connection interrupted: ...** and says the states below
    are no longer confirmed; **every** device row carries `(unconfirmed)`; no device is presented as
    currently `live` - `b-live` reads `live (unconfirmed)`, which is the annotation, not the token
-   being replaced. Each device still shows the exact word the server last sent.
-4. `docker compose -p tracker-mapverify start postgis`. When data flows again the annotation
-   disappears and the status returns to `live`.
+   being replaced. Each device still shows the exact word the server last sent. The connection is
+   still **open** - `window.trackerMap` aside, `source.readyState` is `1` - because this is the
+   error branch, not a drop.
+4. `docker compose -p tracker-mapverify start postgis`, and **change nothing about the family**.
+   Correct outcome: within a poll or two of the database accepting connections again, every
+   `(unconfirmed)` mark disappears and the status returns to `live` - **without** any device having
+   moved or aged. That is the server re-stating the family on the first successful poll after an
+   `error` (SPEC.md, "When the server cannot read"); an implementation that only sent what CHANGED
+   would leave this page unconfirmed forever against a healthy server, which is the bug this step
+   exists to catch.
 
 **(b) The connection drops.** With the map live: `docker compose -p tracker-mapverify stop tracker`.
 Correct outcome: the status reads `connection interrupted: the live connection dropped; reconnecting`
 and every row is `(unconfirmed)`. `docker compose -p tracker-mapverify start tracker` clears it.
 
-**(c) The connection fails to open.** With the server stopped, reload `/map` and press **Watch**.
-Correct outcome: the status says the connection could not be opened (or that the server could not be
-reached); it never sits on `connecting...` implying progress.
+**(c) The connection fails to open.** Leave the server stopped from (b) and press **Watch** on the
+page that is already loaded. (Do NOT reload first: `/map` is served BY tracker, so with the server
+down there is no page to load - a fresh navigation gets a browser error page and observes nothing
+about this criterion.) Correct outcome: the status says the connection could not be opened (or that
+the server could not be reached); it never sits on `connecting...` implying progress, and it still
+says so several seconds later. Then `docker compose -p tracker-mapverify start tracker`.
 
 ### AC28 - one bad event is one bad event, and each good one has its own branch
 

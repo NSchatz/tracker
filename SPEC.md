@@ -438,6 +438,31 @@ The announcement is bounded: it arrives no later than **B** seconds after the ch
 the defaults, 2 under the legal pair (5, 10). The `min` is what keeps the bound honest under a narrow
 `recent` band, which a coarser sweep could otherwise step straight over.
 
+> **How the bound is met.** An open stream re-evaluates on a timer, so a change lands at an arbitrary
+> point *inside* a period and waits out the remainder of it. The period is therefore never more than
+> **half of B**: one second under every wide pair (the defaults give `B = 60`), and twice a second
+> under the two tightest legal pairs, `(1, 2)` and `(2, 3)`, where `B` is 1. A period equal to `B`
+> would already be over the bound by whatever the query cost is.
+
+#### When the server cannot read: `error`, and getting better again
+
+If the datastore becomes unreadable while a stream is open, the watcher is told **once**, explicitly,
+with an `error` event - not one per poll - and the connection is deliberately held **open** with the
+cursor where it is, so a transient blip resumes exactly where it stopped rather than tearing down
+every map in the household. **Nothing derived from data the server can no longer read follows it**:
+no `presentation` and no `position` event goes out while the outage lasts. Silently holding the last
+known states open while presenting them as current is the failure this prevents.
+
+**When a poll succeeds again, the whole family is re-stated**: one `presentation` event per device,
+carrying its delivery-time value, whether or not that value moved during the outage. This is the
+"all clear" a client needs, and it needs one: because the `error` branch never drops the connection,
+nothing is ever *re-established*, so a family that happened not to change during the outage would
+otherwise produce no events at all and leave a map marked "no longer confirmed" against a healthy
+server. Nothing new goes on the wire for it - these are ordinary `presentation` events with **no
+`id:`**, so a `position`-only consumer sees nothing and no cursor moves. **The one residual, stated
+rather than hidden:** a family with **no devices at all** has nothing to re-state, so a client
+watching an empty family learns of the recovery only when it reconnects.
+
 ### Snapshot, then live
 
 A **fresh** connection (no `Last-Event-ID`) first receives a snapshot describing **every device in
