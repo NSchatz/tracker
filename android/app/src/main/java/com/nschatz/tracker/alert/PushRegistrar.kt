@@ -64,24 +64,32 @@ object PushRegistrar {
     internal fun refreshBlocking(context: Context, routingAddress: String? = null) {
         val prefs = ClientPreferences(context)
 
-        // Step 0. No viewer credential: nothing is attempted, and the status says so.
-        val viewer = prefs.readViewerConfig()
-        if (viewer !is ViewerConfigStatus.Configured) {
+        // Step 0. No viewer credential AT ALL: nothing is attempted, and the status says so.
+        //
+        // The credential and the server URL are read APART here, and that separation is the whole
+        // point. `readViewerConfig()` answers "can this app make a viewer request", which is false
+        // for a missing token AND for an unusable base URL; collapsing the two put "No viewer token
+        // yet" on the screen of someone who had pasted their token beside a bad URL, which sends
+        // them to the one field that was already right. Only the token decides step 0.
+        if (!prefs.hasViewerCredential()) {
             AlertSurface.recordStatus(AlertDeliveryStatus.NotConfigured)
             return
         }
+        val viewer = prefs.readViewerConfig() as? ViewerConfigStatus.Configured
 
         // Step 1. Notifications blocked: an alert that cannot be shown is not an alert. The status is
         // decided by the policy, not here, so the ORDER stays in one place.
         val notificationsPermitted = AlertNotifications.canPost(context)
 
-        // Step 2. This phone's routing address, or null when there is none to be had.
+        // Step 2. This phone's routing address, or null when there is none to be had. Asked for even
+        // when the URL is unusable, because A23's order puts "this phone cannot be pushed to at all"
+        // ahead of "the server could not be reached", and the order is the contract.
         val address = routingAddress?.takeIf { it.isNotBlank() } ?: currentRoutingAddress()
 
         // Steps 3 to 6 need the server's answer, and there is only an answer if there is something to
-        // register. The policy short-circuits before the outcome when an earlier step holds, so a
-        // null here is correct rather than merely convenient.
-        val outcome = if (notificationsPermitted && !address.isNullOrBlank()) {
+        // register AND somewhere to send it. The policy short-circuits before the outcome when an
+        // earlier step holds, so a null here is correct rather than merely convenient.
+        val outcome = if (viewer != null && notificationsPermitted && !address.isNullOrBlank()) {
             val previous = prefs.registeredRoutingAddress
             val result = AlertClient(viewer.config.baseUrl, viewer.config.viewerToken).register(
                 provider = PROVIDER,
@@ -102,6 +110,7 @@ object PushRegistrar {
             AlertStatusPolicy.evaluate(
                 AlertStatusInputs(
                     viewerCredentialPresent = true,
+                    serverUrlUsable = viewer != null,
                     notificationsPermitted = notificationsPermitted,
                     routingAddress = address,
                     registration = outcome,

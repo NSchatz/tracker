@@ -52,6 +52,7 @@ type outcomeRecord struct {
 	Msg         string `json:"msg"`
 	Outcome     string `json:"outcome"`
 	Provider    string `json:"provider"`
+	Endpoint    string `json:"endpoint"`
 	CollapseKey string `json:"collapse_key"`
 	DeviceID    string `json:"device_id"`
 	PlaceID     string `json:"place_id"`
@@ -237,11 +238,201 @@ func TestBackendAcceptanceIsNeverDelivery(t *testing.T) {
 	if recs[0].CollapseKey != "gf:dev-1:place-1" {
 		t.Errorf("outcome record collapse_key = %q, want the per-(device,Place) key", recs[0].CollapseKey)
 	}
-	// The record is per ENDPOINT: an operator asking what became of this crossing for this phone
-	// gets the provider back, not a family-wide summary.
+	// The record is per ENDPOINT, and an endpoint is (provider, routing address): an operator asking
+	// what became of this crossing for THIS phone gets both halves back, not a family-wide summary.
 	if recs[0].Provider != PushProviderKeyFCM {
 		t.Errorf("outcome record provider = %q, want %q", recs[0].Provider, PushProviderKeyFCM)
 	}
+	if want := EndpointDigest(PushProviderKeyFCM, "phone-1"); recs[0].Endpoint != want {
+		t.Errorf("outcome record endpoint = %q, want %q - the digest of this phone's endpoint", recs[0].Endpoint, want)
+	}
+}
+
+// TestOutcomeRecordsAreAttributableToOneEndpoint is the per-endpoint half of A7, in the shape a
+// family actually has: TWO phones under one provider, one of them offline past the collapse-key
+// bound. The operator has to be able to read WHICH of them lost the alert, and the answer cannot be
+// the routing address itself - that is the address a third party's delivery network routes on, and
+// it does not belong in a log stream.
+func TestOutcomeRecordsAreAttributableToOneEndpoint(t *testing.T) {
+	t.Parallel()
+
+	const offlinePhone = "address-offline-phone"
+	const freshPhone = "address-fresh-phone"
+
+	h := newAccountingHarness(t, []store.PushSubscription{
+		{Provider: PushProviderKeyFCM, Token: offlinePhone},
+		{Provider: PushProviderKeyFCM, Token: freshPhone},
+	}, nil)
+
+	// Put exactly one of the two phones past the bound, so the two endpoints get DIFFERENT outcomes
+	// for the same crossing and the question "which phone?" is a real one.
+	for _, place := range []string{"place-1", "place-2", "place-3", "place-4"} {
+		h.disp.Ledger().Classify(endpointKey{provider: PushProviderKeyFCM, token: offlinePhone}, "gf:dev-1:"+place)
+	}
+
+	h.notifier.NotifyGeofenceEvents(context.Background(), accountingDevice,
+		[]store.GeofenceEvent{crossing(accountingDevice.ID, "place-9", "School", "enter", time.Unix(1770000000, 0).UTC())})
+	h.disp.Close()
+
+	recs := outcomes(t, h.sink)
+	if len(recs) != 2 {
+		t.Fatalf("recorded %d outcomes for one crossing at two endpoints, want 2: %+v", len(recs), recs)
+	}
+
+	byEndpoint := map[string]outcomeRecord{}
+	for _, r := range recs {
+		if r.Endpoint == "" {
+			t.Fatalf("an outcome record carries no endpoint at all: %+v", r)
+		}
+		byEndpoint[r.Endpoint] = r
+	}
+	if len(byEndpoint) != 2 {
+		t.Fatalf("the two endpoints share one endpoint identifier %q - the outcome is not attributable to a phone: %+v",
+			recs[0].Endpoint, recs)
+	}
+
+	offline, ok := byEndpoint[EndpointDigest(PushProviderKeyFCM, offlinePhone)]
+	if !ok {
+		t.Fatalf("no record for the offline phone's endpoint; records were %+v", recs)
+	}
+	fresh, ok := byEndpoint[EndpointDigest(PushProviderKeyFCM, freshPhone)]
+	if !ok {
+		t.Fatalf("no record for the fresh phone's endpoint; records were %+v", recs)
+	}
+	if DeliveryOutcome(offline.Outcome) != OutcomeBeyondCollapseBound {
+		t.Errorf("the phone that was already at the bound recorded %q, want %q", offline.Outcome, OutcomeBeyondCollapseBound)
+	}
+	if DeliveryOutcome(fresh.Outcome) != OutcomeHandedOver {
+		t.Errorf("the phone with nothing pending recorded %q, want %q", fresh.Outcome, OutcomeHandedOver)
+	}
+
+	// The identifier must not BE the routing address, nor contain it. A17/A18 and THREAT-MODEL.md's
+	// never-logged stance: the log stream is the most-copied artefact a deployment has.
+	logged := h.sink.String()
+	for _, address := range []string{offlinePhone, freshPhone} {
+		if strings.Contains(logged, address) {
+			t.Errorf("the routing address %q reached the log stream; the record must identify an endpoint without disclosing where it routes", address)
+		}
+	}
+}
+
+// TestEndpointDigestIsStableDistinctAndOpaque pins the three properties the attribution rests on,
+// directly rather than through the dispatcher.
+func TestEndpointDigestIsStableDistinctAndOpaque(t *testing.T) {
+	t.Parallel()
+
+	const address = "fcm-registration-token-for-alices-phone"
+
+	if a, b := EndpointDigest(PushProviderKeyFCM, address), EndpointDigest(PushProviderKeyFCM, address); a != b {
+		t.Errorf("the same endpoint digested to %q and then %q; an operator could not group one phone's outcomes", a, b)
+	}
+	if a, b := EndpointDigest(PushProviderKeyFCM, address), EndpointDigest(PushProviderKeyFCM, address+"-rotated"); a == b {
+		t.Errorf("two different routing addresses share the digest %q", a)
+	}
+	// The provider is half the endpoint key, so it has to be half the digest's input too.
+	if a, b := EndpointDigest(PushProviderKeyFCM, address), EndpointDigest(PushProviderKeyUnifiedPush, address); a == b {
+		t.Errorf("the same address under two providers shares the digest %q", a)
+	}
+	digest := EndpointDigest(PushProviderKeyFCM, address)
+	if strings.Contains(digest, address) || strings.Contains(address, digest) {
+		t.Errorf("the digest %q discloses the routing address it stands for", digest)
+	}
+	if len(digest) != endpointDigestBytes*2 {
+		t.Errorf("digest %q is %d characters, want %d hex characters", digest, len(digest), endpointDigestBytes*2)
+	}
+	// An address that is not an address is not an endpoint, and gets no manufactured identifier.
+	if got := EndpointDigest(PushProviderKeyFCM, ""); got != "" {
+		t.Errorf("an empty routing address digested to %q, want the empty string", got)
+	}
+}
+
+// TestACrossingThatWasNeverHandedOverIsNotPending is the Definitions rule that "pending" means
+// HANDED to the push backend. All three drop paths hand nothing over, so none of them may leave a
+// collapse key counting toward the next crossing's bound.
+func TestACrossingThatWasNeverHandedOverIsNotPending(t *testing.T) {
+	t.Parallel()
+
+	t.Run("retries exhausted", func(t *testing.T) {
+		t.Parallel()
+		sink := &syncBuffer{}
+		logger := slog.New(slog.NewJSONHandler(sink, nil))
+		disp := NewDispatcher(map[string]Sender{
+			PushProviderKeyFCM: senderFunc(func(context.Context, Delivery) error { return errors.New("backend refused") }),
+		}, logger, WithMaxAttempts(1), WithRetryBackoff(0))
+
+		e := endpointKey{provider: PushProviderKeyFCM, token: "phone-1"}
+		bound := disp.Ledger().Classify(e, "gf:dev-1:place-1")
+		disp.Enqueue(Delivery{Sub: Subscription{Provider: e.provider, Token: e.token},
+			Note: Notification{CollapseKey: "gf:dev-1:place-1"}, Bound: bound})
+		disp.Close()
+
+		if got := disp.Ledger().PendingKeys(e.provider, e.token); got != 0 {
+			t.Errorf("pending keys = %d after the only delivery was dropped, want 0 - nothing was handed over", got)
+		}
+	})
+
+	t.Run("no sender configured for the provider", func(t *testing.T) {
+		t.Parallel()
+		sink := &syncBuffer{}
+		logger := slog.New(slog.NewJSONHandler(sink, nil))
+		disp := NewDispatcher(map[string]Sender{
+			PushProviderKeyFCM: senderFunc(func(context.Context, Delivery) error { return nil }),
+		}, logger, WithRetryBackoff(0))
+
+		e := endpointKey{provider: PushProviderKeyUnifiedPush, token: "up-endpoint"}
+		bound := disp.Ledger().Classify(e, "gf:dev-1:place-1")
+		disp.Enqueue(Delivery{Sub: Subscription{Provider: e.provider, Token: e.token},
+			Note: Notification{CollapseKey: "gf:dev-1:place-1"}, Bound: bound})
+		disp.Close()
+
+		if got := disp.Ledger().PendingKeys(e.provider, e.token); got != 0 {
+			t.Errorf("pending keys = %d for a provider with no sender, want 0 - nothing was handed over", got)
+		}
+	})
+
+	t.Run("a second crossing for the same key keeps the key pending", func(t *testing.T) {
+		t.Parallel()
+		l := NewDeliveryLedger(slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)))
+		e := endpointKey{provider: PushProviderKeyFCM, token: "phone-1"}
+
+		// Two crossings at one (device, Place) pair are handed over; one of them is then dropped.
+		// The key is still pending, because the OTHER one was genuinely handed over - taking the
+		// key away entirely here would under-report the bound on the strength of a failure that
+		// was not its.
+		l.Classify(e, "gf:dev-1:place-1")
+		l.Classify(e, "gf:dev-1:place-1")
+		l.NotHandedOver(e, "gf:dev-1:place-1")
+		if got := l.PendingKeys(e.provider, e.token); got != 1 {
+			t.Errorf("pending keys = %d with one of two hand-overs dropped, want 1", got)
+		}
+		l.NotHandedOver(e, "gf:dev-1:place-1")
+		if got := l.PendingKeys(e.provider, e.token); got != 0 {
+			t.Errorf("pending keys = %d with both hand-overs dropped, want 0", got)
+		}
+		// Taking back more than was ever added cannot drive the count negative or resurrect a key.
+		l.NotHandedOver(e, "gf:dev-1:place-1")
+		if got := l.PendingKeys(e.provider, e.token); got != 0 {
+			t.Errorf("pending keys = %d after an unmatched take-back, want 0", got)
+		}
+	})
+
+	t.Run("a surplus crossing takes nothing back when it is dropped", func(t *testing.T) {
+		t.Parallel()
+		l := NewDeliveryLedger(slog.New(slog.NewJSONHandler(&syncBuffer{}, nil)))
+		e := endpointKey{provider: PushProviderKeyFCM, token: "phone-1"}
+
+		for _, place := range []string{"place-1", "place-2", "place-3", "place-4"} {
+			l.Classify(e, "gf:dev-1:"+place)
+		}
+		// Past the bound: Classify adds no key, so a take-back must not remove one of the four.
+		if got := l.Classify(e, "gf:dev-1:place-5"); got != OutcomeBeyondCollapseBound {
+			t.Fatalf("classification past the bound = %q, want %q", got, OutcomeBeyondCollapseBound)
+		}
+		l.NotHandedOver(e, "gf:dev-1:place-5")
+		if got := l.PendingKeys(e.provider, e.token); got != CollapseKeyBound {
+			t.Errorf("pending keys = %d after a surplus crossing was dropped, want the %d that were genuinely handed over", got, CollapseKeyBound)
+		}
+	})
 }
 
 // TestRegistrationResetsThePendingKeys is A20: an endpoint re-presenting itself through registration

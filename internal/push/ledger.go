@@ -35,15 +35,44 @@ package push
 // # What "operator-readable" means here (A7)
 //
 // Every outcome is written as one structured log record, `push.delivery.outcome`, carrying the
-// endpoint's provider, the collapse key, the crossing's (device, place, transition, ts) and the
-// outcome itself. That is a deployment's ordinary log stream: `docker compose logs tracker |
-// grep push.delivery.outcome` answers "what became of that crossing" with no debugger, and - because
-// the log sink outlives the process - an outcome recorded before a restart is still readable after
-// one. A query ROUTE was rejected deliberately: /v1 takes exactly the three additive changes this
-// phase documents in SPEC.md, and a fourth would be a wire surface nobody reviewed.
+// ENDPOINT it belongs to (see below), the collapse key, the crossing's (device, place, transition,
+// ts) and the outcome itself. That is a deployment's ordinary log stream: `docker compose logs
+// tracker | grep push.delivery.outcome` answers "what became of that crossing" with no debugger,
+// and - because the log sink outlives the process - an outcome recorded before a restart is still
+// readable after one. A query ROUTE was rejected deliberately: /v1 takes exactly the three additive
+// changes this phase documents in SPEC.md, and a fourth would be a wire surface nobody reviewed.
+//
+// # Per-endpoint, and what identifies an endpoint in the log
+//
+// A7 asks for the PER-ENDPOINT outcome, and an endpoint is (provider, routing address) - one phone.
+// A family normally has more than one phone under one provider, so a record carrying only the
+// provider answers "one of your phones lost this alert" and never "which one", which is the exact
+// question this phase exists to answer.
+//
+// The routing address itself does not reach the log stream. It is the address a third party's
+// delivery network routes on - "losing it leaks 'this endpoint can be pushed to'" is how migration
+// 00004 puts it, which is why it is stored in the clear and not hashed - and a log line is the
+// most-copied artefact a deployment has: it goes into a bug report, a screenshot and a shipped log
+// aggregator without anyone deciding that it should. The repo already takes that stance for the
+// credentials it holds (THREAT-MODEL.md: tokens are never stored, only their SHA-256 hashes), and
+// nothing about the accounting needs the address. So the record carries EndpointDigest - a short,
+// stable SHA-256 digest of "provider:routing address" - which is different for every endpoint,
+// identical across every record for one endpoint, and reveals nothing about the address it stands
+// for.
+//
+// An operator maps a digest back to a phone with one query against the registry they already own:
+//
+//	SELECT id, viewer_id, provider,
+//	       encode(substring(sha256(convert_to(provider::text || ':' || token, 'UTF8')) from 1 for 8), 'hex')
+//	         AS endpoint
+//	  FROM push_subscriptions;
+//
+// which is the same construction as EndpointDigest, so the join is exact rather than approximate.
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"sync"
 )
@@ -86,6 +115,36 @@ type endpointKey struct {
 	token    string
 }
 
+// endpointDigestBytes is how much of the SHA-256 digest the log record carries. Eight bytes is
+// sixteen hex characters: short enough to read and compare by eye in a log stream, and 64 bits of
+// it, so two of a family's endpoints colliding is not a thing that happens. It is a PREFIX of the
+// full digest rather than a different hash, so the SQL in the package note (which takes the same
+// prefix) produces the same string.
+const endpointDigestBytes = 8
+
+// EndpointDigest names one endpoint - (provider, routing address) - in the operator-readable output
+// without putting the routing address itself in the log stream.
+//
+// Stable: the same endpoint digests to the same string in every record and across restarts, which is
+// what lets an operator group a phone's outcomes. Distinct: two endpoints digest differently, which
+// is what makes the per-endpoint outcome A7 asks for actually attributable. Opaque: the input is a
+// high-entropy routing address, so the digest identifies without disclosing.
+//
+// The separator is ":" and not a NUL byte on purpose. A provider is a closed enum ('fcm',
+// 'unifiedpush') and contains no colon, so "provider:address" is still unambiguous - and Postgres
+// text cannot hold a NUL, so a NUL separator would make the registry-side query in the package note
+// impossible to write.
+//
+// An empty routing address is not an endpoint, and digesting one would manufacture an identifier for
+// something that cannot be delivered to; it returns "" so the record shows the absence instead.
+func EndpointDigest(provider, token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(provider + ":" + token))
+	return hex.EncodeToString(sum[:endpointDigestBytes])
+}
+
 // DeliveryLedger is the per-endpoint collapse-key accounting plus the operator-readable record of
 // every outcome. It is safe for concurrent use: the dispatcher's worker records outcomes while the
 // HTTP registration handler resets endpoints.
@@ -96,7 +155,13 @@ type DeliveryLedger struct {
 	// pending maps an endpoint to the distinct collapse keys handed over for it since the last
 	// evidence that its app has run. A registration is such evidence; a backend accepting a message
 	// is NOT.
-	pending map[endpointKey]map[string]struct{}
+	//
+	// The value is a COUNT of in-flight hand-overs per key, not a set member, so NotHandedOver can
+	// take one back without racing a concurrent crossing that re-added the same key: two crossings
+	// for one key and one of them dropped leaves the key pending, exactly once; one crossing dropped
+	// leaves the key not pending at all. The distinct-key count A19 reads is still len(keys) - the
+	// counts are bookkeeping under it and are never themselves a bound.
+	pending map[endpointKey]map[string]int
 	// order is insertion order over `pending`, so eviction drops the least recently ADDED endpoint
 	// rather than a random map key (map iteration order would make eviction untestable).
 	order []endpointKey
@@ -111,7 +176,7 @@ func NewDeliveryLedger(logger *slog.Logger) *DeliveryLedger {
 	}
 	return &DeliveryLedger{
 		logger:  logger,
-		pending: make(map[endpointKey]map[string]struct{}),
+		pending: make(map[endpointKey]map[string]int),
 	}
 }
 
@@ -124,20 +189,16 @@ func NewDeliveryLedger(logger *slog.Logger) *DeliveryLedger {
 // something at this point and does not say what, so growing the set here would be asserting which
 // message survived. Leaving it fixed keeps the ledger's claim to exactly "there were already four".
 //
-// One imprecision, recorded rather than hidden: a delivery classified here and then `dropped` by the
-// dispatcher (queue full, retries exhausted, no sender) leaves its key in the pending set, even
-// though nothing was handed over. The key is NOT removed, deliberately. Removing it would need to
-// distinguish "this key is pending only because of the delivery that just failed" from "a later
-// crossing re-added it", which is a race with the worker; and both errors are inside the envelope
-// A21 already permits, because neither can assert delivery. Leaving it errs toward reporting the
-// bound, which is the more conservative claim of the two.
+// A delivery that Classify counted as pending and that the dispatcher then never manages to hand
+// over is taken back by NotHandedOver - "pending" is defined as HANDED to the backend, and a queue
+// that was full or a provider with no sender handed nothing over at all.
 func (l *DeliveryLedger) Classify(e endpointKey, collapseKey string) DeliveryOutcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	keys, ok := l.pending[e]
 	if !ok {
-		keys = make(map[string]struct{})
+		keys = make(map[string]int)
 		l.pending[e] = keys
 		l.order = append(l.order, e)
 		l.evictLocked()
@@ -145,8 +206,45 @@ func (l *DeliveryLedger) Classify(e endpointKey, collapseKey string) DeliveryOut
 	if len(keys) >= CollapseKeyBound {
 		return OutcomeBeyondCollapseBound
 	}
-	keys[collapseKey] = struct{}{}
+	keys[collapseKey]++
 	return OutcomeHandedOver
+}
+
+// NotHandedOver takes back the pending record Classify made, for a delivery that in the end reached
+// no backend at all: the queue was full, the retries were exhausted, or no sender is configured for
+// the provider. All three are the `dropped` outcome, and Definitions is explicit that pending means
+// "a crossing the system has HANDED to the push backend" - so a crossing that was never handed over
+// is not pending and must not count toward the bound for the next one.
+//
+// It is a decrement rather than a delete because a second crossing for the same (endpoint, key) may
+// have been classified in between on another goroutine; deleting would take that one's pending
+// record with it. At zero the key leaves the set, which is what shrinks the distinct-key count.
+//
+// Calling it for a key that was never counted is a no-op, which is what makes it safe on the
+// beyond-collapse-bound path (Classify deliberately adds no key there) and for a Delivery that some
+// other caller built without classifying it at all.
+//
+// Direction check (A21): this can only ever LOWER the pending count, so the outcome it can change is
+// a later crossing's, from `beyond-collapse-bound` to `handed-over`. That is the "we know less"
+// direction A21 permits, and `handed-over` is not a delivery claim. Nothing here can move an outcome
+// toward one.
+func (l *DeliveryLedger) NotHandedOver(e endpointKey, collapseKey string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	keys, ok := l.pending[e]
+	if !ok {
+		return
+	}
+	n, ok := keys[collapseKey]
+	if !ok {
+		return
+	}
+	if n <= 1 {
+		delete(keys, collapseKey)
+		return
+	}
+	keys[collapseKey] = n - 1
 }
 
 // EndpointRegistered is A20: an endpoint that re-presents itself through registration has proved its
@@ -195,7 +293,7 @@ func (l *DeliveryLedger) PendingKeys(provider, token string) int {
 func (l *DeliveryLedger) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.pending = make(map[endpointKey]map[string]struct{})
+	l.pending = make(map[endpointKey]map[string]int)
 	l.order = nil
 }
 
@@ -213,11 +311,16 @@ func (l *DeliveryLedger) evictLocked() {
 // `reason` is free text for the `dropped` outcome (which of the three drop paths it was) and empty
 // otherwise. The record carries the crossing's ids and labels-free fields only: no coordinate, no
 // accuracy, no raw fix datum ever reaches a log line here, the same boundary buildNotification holds
-// for the wire.
+// for the wire - and no routing address either, which is why `endpoint` is a digest (A7; see the
+// package note).
 func (l *DeliveryLedger) Record(ctx context.Context, d Delivery, outcome DeliveryOutcome, reason string) {
 	attrs := []any{
 		"outcome", string(outcome),
 		"provider", d.Sub.Provider,
+		// The other half of the endpoint key. Without it two phones in one family under one
+		// provider produce records identical apart from the outcome, and the operator can read
+		// that ONE phone lost the alert but never which - which is not a per-endpoint outcome.
+		"endpoint", EndpointDigest(d.Sub.Provider, d.Sub.Token),
 		"collapse_key", d.Note.CollapseKey,
 		"device_id", d.Note.Data["device_id"],
 		"place_id", d.Note.Data["place_id"],

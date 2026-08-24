@@ -40,8 +40,11 @@ class AlertClientTest {
             val ok = result as? AlertClient.CrossingsResult.Ok
                 ?: error("expected the crossings, got $result")
             assertEquals(2, ok.crossings.size)
-            assertEquals("Bob's phone left Home", AlertText.listRow(ok.crossings[0]))
-            assertEquals("Alice's phone arrived at School", AlertText.listRow(ok.crossings[1]))
+            // Rendered in a pinned zone so the row is the same wherever this test runs; the app
+            // itself renders in the phone's zone, which is the clock its reader lives in.
+            val utc = java.time.ZoneId.of("UTC")
+            assertEquals("Bob's phone left Home (2026-07-16 10:30)", AlertText.listRow(ok.crossings[0], utc))
+            assertEquals("Alice's phone arrived at School (2026-07-16 09:30)", AlertText.listRow(ok.crossings[1], utc))
 
             // The request itself: the right route, the viewer credential in a HEADER (never the URL),
             // and a bounded page.
@@ -216,8 +219,15 @@ class AlertClientTest {
             notificationsPermitted: Boolean = true,
             routingAddress: String? = "phone-address",
             viewerCredentialPresent: Boolean = true,
+            serverUrlUsable: Boolean = true,
         ) = AlertStatusPolicy.evaluate(
-            AlertStatusInputs(viewerCredentialPresent, notificationsPermitted, routingAddress, registration),
+            AlertStatusInputs(
+                viewerCredentialPresent,
+                serverUrlUsable,
+                notificationsPermitted,
+                routingAddress,
+                registration,
+            ),
         )
 
         val accepted: (String) -> RegistrationOutcome = { body ->
@@ -283,7 +293,7 @@ class AlertClientTest {
             produced += registration.toString()
             produced += CrossingListView.of(read, emptyList()).toString()
             produced += AlertStatusPolicy.evaluate(
-                AlertStatusInputs(true, true, "phone-address", registration),
+                AlertStatusInputs(true, true, true, "phone-address", registration),
             ).toString()
             for (request in server.requests) {
                 produced += request.body

@@ -17,10 +17,17 @@ class AlertStatusPolicyTest {
 
     private fun inputs(
         viewerCredentialPresent: Boolean = true,
+        serverUrlUsable: Boolean = true,
         notificationsPermitted: Boolean = true,
         routingAddress: String? = "phone-address",
         registration: RegistrationOutcome? = RegistrationOutcome.Accepted(ConfiguredProvider.Named("fcm")),
-    ) = AlertStatusInputs(viewerCredentialPresent, notificationsPermitted, routingAddress, registration)
+    ) = AlertStatusInputs(
+        viewerCredentialPresent,
+        serverUrlUsable,
+        notificationsPermitted,
+        routingAddress,
+        registration,
+    )
 
     @Test
     fun noViewerCredentialIsNotConfiguredAndNothingIsAttempted() {
@@ -102,6 +109,57 @@ class AlertStatusPolicyTest {
             "R1: this phone has no address to register",
             AlertDeliveryStatus.NotReceivable(NotReceivableReason.NO_ROUTING_ADDRESS),
             AlertStatusPolicy.evaluate(inputs(routingAddress = null)),
+        )
+    }
+
+    /**
+     * The credential is entered; the SERVER URL is the thing that is wrong. That must not report
+     * "no viewer token yet" - it points the person at the one field they already filled in - and it
+     * must not be a seventh state either. It is "this phone did not reach the server", which is one
+     * of A23's six and is where the URL is fixed.
+     */
+    @Test
+    fun aTokenBesideAnUnusableServerUrlIsNotReportedAsNoTokenAtAll() {
+        val status = AlertStatusPolicy.evaluate(
+            inputs(viewerCredentialPresent = true, serverUrlUsable = false, registration = null),
+        )
+        assertNotEquals(
+            "the token IS entered; saying it is not sends the person to the wrong field",
+            AlertDeliveryStatus.NotConfigured,
+            status,
+        )
+        assertEquals(AlertDeliveryStatus.NotRegisteredUnreachable, status)
+    }
+
+    /**
+     * ...and it still cannot outrank the two steps above it, nor reach `armed`. An unusable URL is
+     * step 3, so a blocked permission and a missing routing address are both still reported first.
+     */
+    @Test
+    fun anUnusableServerUrlKeepsItsPlaceInTheOrderAndNeverReachesArmed() {
+        assertEquals(
+            AlertDeliveryStatus.CannotShow,
+            AlertStatusPolicy.evaluate(inputs(serverUrlUsable = false, notificationsPermitted = false)),
+        )
+        assertEquals(
+            AlertDeliveryStatus.NotReceivable(NotReceivableReason.NO_ROUTING_ADDRESS),
+            AlertStatusPolicy.evaluate(inputs(serverUrlUsable = false, routingAddress = null)),
+        )
+        // Even handed a registration outcome that would otherwise arm it - which cannot happen for
+        // real, since no request can be made - the unusable URL is answered first.
+        assertNotEquals(
+            AlertDeliveryStatus.Armed,
+            AlertStatusPolicy.evaluate(
+                inputs(
+                    serverUrlUsable = false,
+                    registration = RegistrationOutcome.Accepted(ConfiguredProvider.Named("fcm")),
+                ),
+            ),
+        )
+        // And with no credential at all, step 0 still wins: a bad URL does not mask a missing token.
+        assertEquals(
+            AlertDeliveryStatus.NotConfigured,
+            AlertStatusPolicy.evaluate(inputs(viewerCredentialPresent = false, serverUrlUsable = false)),
         )
     }
 

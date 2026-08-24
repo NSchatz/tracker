@@ -374,7 +374,9 @@ backend and nothing in this repo could receive one. Three things closed that.
 - **Honest delivery accounting**, described in [`SPEC.md`](SPEC.md): three outcomes per crossing per
   endpoint (`handed-over`, `beyond-collapse-bound`, `dropped`) and **no fourth that asserts delivery**,
   because a backend accepting a message is a fact about its queue and not about a person. Read them
-  with `docker compose logs tracker | grep push.delivery.outcome`.
+  with `docker compose logs tracker | grep push.delivery.outcome`. Each record names **which phone**
+  it is about, as a digest of the endpoint rather than the routing address itself; `SPEC.md` has the
+  one-line query that maps a digest back to a subscription.
 
 Two `/v1` additions serve this and are **additive only**: `configured_provider` on an accepted
 registration (so an app can tell "registered" from "registered into a deployment that will never

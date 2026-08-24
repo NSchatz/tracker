@@ -270,6 +270,11 @@ they are the states most deployments will actually be in.
    `docker compose logs tracker | grep push.delivery.outcome` to show `beyond-collapse-bound` for the
    surplus. Nothing anywhere should say "delivered". Every one of those crossings must still be in
    the in-app list - that is the whole point of the list.
+
+   With **two** phones registered, which is the ordinary case, each record names the endpoint it is
+   about in its `endpoint` field - a digest, not the routing address. Map it back to a phone with the
+   query in [`SPEC.md`](../SPEC.md); the offline phone's records are the ones carrying
+   `beyond-collapse-bound`, and the other phone's are not.
 8. Clear the app's data and re-enter both tokens. The old routing address is now unnameable, so the
    server keeps a stale row for it. This is the recorded residual below, not a bug to file.
 

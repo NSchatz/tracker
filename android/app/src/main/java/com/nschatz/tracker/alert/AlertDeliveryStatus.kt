@@ -22,7 +22,14 @@ sealed interface AlertDeliveryStatus {
     /** The server refused the registration - the credential is wrong or revoked. */
     data object NotRegisteredRefused : AlertDeliveryStatus
 
-    /** The registration never reached the server. Says nothing about the credential. */
+    /**
+     * The registration never reached the server. Says nothing about the credential.
+     *
+     * Two ways to get here and they are the same fact: the request was made and no answer came
+     * back, or the stored server URL is not one a request can be made to at all (unset, no host, or
+     * plaintext `http://` in a build that refuses it). Both are "this phone did not reach the
+     * server", and both are fixed at the same place on the screen.
+     */
     data object NotRegisteredUnreachable : AlertDeliveryStatus
 
     /**
@@ -93,6 +100,15 @@ sealed interface ConfiguredProvider {
  * Everything the ordered procedure needs, and nothing else.
  *
  * @param viewerCredentialPresent whether a viewer credential has been entered at all.
+ *
+ *   Strictly the CREDENTIAL, and not "the app has a usable server configuration". The two used to be
+ *   read off one validation, and the cost was a lie on the screen: a viewer token pasted beside a
+ *   blank or plaintext-`http://` server URL reported "no viewer token yet", pointing the person at
+ *   the one field they had already filled in. What a person is told to fix has to be what is
+ *   actually broken.
+ * @param serverUrlUsable whether the stored server URL is one a request can be made to at all. When
+ *   it is not, no registration can be attempted and none is: see [AlertStatusPolicy.evaluate] for
+ *   which of A23's six states that produces and why it is not a seventh.
  * @param notificationsPermitted whether this app may post a notification.
  * @param routingAddress the address this phone can be reached at, or **null** when none can be
  *   obtained here.
@@ -101,6 +117,7 @@ sealed interface ConfiguredProvider {
  */
 data class AlertStatusInputs(
     val viewerCredentialPresent: Boolean,
+    val serverUrlUsable: Boolean,
     val notificationsPermitted: Boolean,
     val routingAddress: String?,
     val registration: RegistrationOutcome?,
@@ -146,6 +163,15 @@ object AlertStatusPolicy {
         if (inputs.routingAddress.isNullOrBlank()) {
             return AlertDeliveryStatus.NotReceivable(NotReceivableReason.NO_ROUTING_ADDRESS)
         }
+
+        // Step 3, first case. A server URL that cannot be requested against - unset, no host, or
+        // plaintext http:// in a build that refuses it - is a registration that could not reach the
+        // server, which is exactly what A23's step 3 names. It is deliberately NOT `not-configured`:
+        // the credential IS entered, and a screen that says otherwise sends the person to the wrong
+        // field. It is deliberately not a seventh state either - A23 fixes the six, and this is a
+        // way of being the fourth of them, not a new one. The direction is safe by construction: it
+        // returns before anything that could read `armed`.
+        if (!inputs.serverUrlUsable) return AlertDeliveryStatus.NotRegisteredUnreachable
 
         // Steps 3 to 6 all depend on what the registration attempt found out.
         return when (val outcome = inputs.registration) {

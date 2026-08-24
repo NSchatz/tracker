@@ -184,8 +184,12 @@ func (d *Dispatcher) Enqueue(deliveries ...Delivery) {
 			n := d.dropped.Add(1)
 			d.logger.Warn("push queue full — dropping delivery (pending cap reached)",
 				"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey, "dropped_total", n)
-			// Never handed over at all, so the outcome is `dropped` and no collapse key becomes
-			// pending for this endpoint - Classify was never called for it.
+			// Never handed over at all. On the production path Classify HAS already run for this
+			// delivery - NotifyGeofenceEvents classifies every (crossing, endpoint) pair before it
+			// enqueues any of them - so the pending record it made has to be taken back here, or a
+			// key nothing was ever handed over for would keep counting toward the next crossing's
+			// bound. NotHandedOver is a no-op when there was nothing to take back.
+			d.notHandedOver(del)
 			d.ledger.Record(context.Background(), del, OutcomeDropped, "queue full (pending cap reached)")
 		}
 	}
@@ -195,6 +199,20 @@ func (d *Dispatcher) Enqueue(deliveries ...Delivery) {
 // re-presented itself (A20) and so the accounting tests can read the pending counts. It never
 // returns nil.
 func (d *Dispatcher) Ledger() *DeliveryLedger { return d.ledger }
+
+// notHandedOver takes back the pending record a delivery's classification made, on every path that
+// ends in `dropped`. Pending means handed to the backend (Definitions), and none of the drop paths
+// hands anything over, so a key left counting there would report a bound that nothing earned.
+//
+// Only a delivery classified OutcomeHandedOver ever added a key: OutcomeBeyondCollapseBound
+// deliberately adds none. Calling it otherwise is harmless (the ledger no-ops on a key it is not
+// holding), but the guard keeps the intent readable at the two call sites.
+func (d *Dispatcher) notHandedOver(del Delivery) {
+	if del.boundOrDefault() != OutcomeHandedOver {
+		return
+	}
+	d.ledger.NotHandedOver(endpointKey{provider: del.Sub.Provider, token: del.Sub.Token}, del.Note.CollapseKey)
+}
 
 // Dropped reports how many deliveries have been refused because the queue was full. It exists for
 // observability and for the cap test to assert the drop happened rather than the delivery blocking.
@@ -235,6 +253,7 @@ func (d *Dispatcher) deliver(ctx context.Context, del Delivery) {
 		// one stray unifiedpush endpoint on an fcm-only server does not take down the worker.
 		d.logger.Warn("no push sender for provider — dropping delivery",
 			"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey)
+		d.notHandedOver(del)
 		d.ledger.Record(ctx, del, OutcomeDropped, "no sender configured for provider")
 		return
 	}
@@ -253,6 +272,7 @@ func (d *Dispatcher) deliver(ctx context.Context, del Delivery) {
 			d.logger.Error("push delivery failed after retries — dropping",
 				"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey,
 				"attempts", attempt, "error", err)
+			d.notHandedOver(del)
 			d.ledger.Record(ctx, del, OutcomeDropped, "retries exhausted")
 			return
 		}

@@ -722,12 +722,29 @@ surplus is recorded as its own outcome and **never asserts which** of the pendin
 discarded, because the backend does not say.
 
 **Where to read it.** Each outcome is one structured log record with the message
-`push.delivery.outcome`, carrying the provider, the collapse key and the crossing's
-`device_id`/`place_id`/`transition`/`ts`. No coordinate, ever - the same boundary the push itself
-holds. Grep the deployment's log for it:
+`push.delivery.outcome`, carrying the **endpoint** it belongs to (`provider` plus `endpoint`), the
+collapse key and the crossing's `device_id`/`place_id`/`transition`/`ts`. No coordinate, ever - the
+same boundary the push itself holds. Grep the deployment's log for it:
 
 ```bash
 docker compose logs tracker | grep push.delivery.outcome
+```
+
+**Which phone.** The outcome is per **endpoint**, and an endpoint is `(provider, routing address)` -
+one phone. A family normally has more than one, so the record has to say which; `provider` alone
+would answer "one of your phones lost this alert" and never "which one". The routing address itself
+is **not** logged - it is the address a third party's delivery network routes on, and a log line is
+the most-copied artefact a deployment has. The `endpoint` field is a short, stable SHA-256 digest of
+`provider:routing address` instead: different for every endpoint, identical across every record for
+one endpoint, and reveals nothing about the address it stands for.
+
+Map a digest back to a subscription with the registry you already own:
+
+```sql
+SELECT id, viewer_id, provider,
+       encode(substring(sha256(convert_to(provider::text || ':' || token, 'UTF8')) from 1 for 8), 'hex')
+         AS endpoint
+  FROM push_subscriptions;
 ```
 
 **Two properties worth stating.** The pending-key accounting is **process state** - no schema, no
