@@ -171,10 +171,13 @@ func runServe() error {
 
 	srv := &http.Server{
 		Addr: cfg.Addr,
+		// The configured backend is threaded into the handler so an accepted registration can NAME it
+		// (ALERT-2 A22): the app cannot infer it from its own traffic, because a subscription is
+		// accepted and stored with a 201 whether or not this deployment will ever send through it.
 		Handler: server.New(pool, notifier, presentation.Windows{
 			LiveSeconds:  cfg.LiveWindowSeconds,
 			StaleSeconds: cfg.StaleWindowSeconds,
-		}, logger),
+		}, logger, server.WithConfiguredPushProvider(cfg.PushProvider)),
 		ReadHeaderTimeout: 10 * time.Second,
 		// TLS 1.2 floor (roadmap §7: TLS 1.3 preferred, 1.2 fallback). Harmless when the server runs
 		// plaintext — it only takes effect on the TLS path below.

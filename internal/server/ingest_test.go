@@ -45,6 +45,33 @@ type harness struct {
 	handler http.Handler
 	pushes  *capturingSender
 	windows presentation.Windows
+	// notifier and disp are kept so an ALERT-2 test can build a SECOND handler over the same pool
+	// and the same push pipeline - the A22 case needs one handler that has a backend configured and
+	// one that does not, and standing up a second PostGIS container for that would be waste.
+	notifier *push.EventNotifier
+	disp     *push.Dispatcher
+}
+
+// harnessConfig is newHarness's tunable surface: which handler options to build with, and whether
+// the fake backend has a sender at all.
+type harnessConfig struct {
+	serverOpts []server.Option
+	// noSenders builds the dispatcher with NO senders registered, so every delivery is refused
+	// before hand-over and recorded `dropped`. It is how the "recorded undelivered for every
+	// endpoint" precondition of A6 is reached without a network.
+	noSenders bool
+}
+
+type harnessOption func(*harnessConfig)
+
+// withServerOptions builds the harness's handler with extra server options.
+func withServerOptions(opts ...server.Option) harnessOption {
+	return func(c *harnessConfig) { c.serverOpts = append(c.serverOpts, opts...) }
+}
+
+// withNoPushSenders makes every delivery fail to be handed over at all.
+func withNoPushSenders() harnessOption {
+	return func(c *harnessConfig) { c.noSenders = true }
 }
 
 // capturingSender is a push.Sender that records every delivery to a buffered channel instead of
@@ -76,18 +103,23 @@ func (h *harness) nextPush(t *testing.T) push.Delivery {
 // presentation timing get these; the ones that do build a harness with their own.
 var defaultWindows = presentation.Windows{LiveSeconds: 120, StaleSeconds: 900}
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	t.Helper()
-	return newHarnessWithWindows(t, defaultWindows)
+	return newHarnessWithWindows(t, defaultWindows, opts...)
 }
 
 // newHarnessWithWindows is newHarness with the presentation windows chosen by the caller, so a test
 // can put a device across an age boundary by construction — a one-second live window makes "this
 // device has gone quiet" reachable in a test that finishes in under a second, without a sleep that
 // races a production-length window.
-func newHarnessWithWindows(t *testing.T, windows presentation.Windows) *harness {
+func newHarnessWithWindows(t *testing.T, windows presentation.Windows, opts ...harnessOption) *harness {
 	t.Helper()
 	ctx := context.Background()
+
+	var cfg harnessConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	dsn := testsupport.NewPostGIS(t)
 	if err := db.Up(ctx, dsn); err != nil {
@@ -100,20 +132,47 @@ func newHarnessWithWindows(t *testing.T, windows presentation.Windows) *harness 
 	t.Cleanup(pool.Close)
 
 	sender := &capturingSender{ch: make(chan push.Delivery, 64)}
-	disp := push.NewDispatcher(map[string]push.Sender{
+	senders := map[string]push.Sender{
 		store.PushProviderFCM:         sender,
 		store.PushProviderUnifiedPush: sender,
-	}, discardLogger())
+	}
+	if cfg.noSenders {
+		senders = map[string]push.Sender{}
+	}
+	disp := push.NewDispatcher(senders, discardLogger())
 	t.Cleanup(disp.Close)
 	notifier := push.NewEventNotifier(pool, disp, discardLogger())
 
 	return &harness{
-		t:       t,
-		pool:    pool,
-		handler: server.New(pool, notifier, windows, discardLogger()),
-		pushes:  sender,
-		windows: windows,
+		t:        t,
+		pool:     pool,
+		handler:  server.New(pool, notifier, windows, discardLogger(), cfg.serverOpts...),
+		pushes:   sender,
+		windows:  windows,
+		notifier: notifier,
+		disp:     disp,
 	}
+}
+
+// handlerWith builds another handler over the SAME pool and push pipeline, differing only in its
+// options. It is how one container serves both halves of A22 (a deployment with a backend
+// configured, and one without). It carries this harness's presentation windows, so the second
+// handler differs from the first ONLY in the options the caller named.
+func (h *harness) handlerWith(opts ...server.Option) http.Handler {
+	return server.New(h.pool, h.notifier, h.windows, discardLogger(), opts...)
+}
+
+// postVia is post against an explicitly-chosen handler.
+func (h *harness) postVia(t *testing.T, handler http.Handler, path string, token auth.Token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+string(token))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
 }
 
 // enroll creates a family and a device in it, returning the device id and its freshly issued token —

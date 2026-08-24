@@ -85,6 +85,16 @@ dependencies {
     implementation(libs.material)
     // C1: the fused location provider that drives the foreground service's continuous updates.
     implementation(libs.play.services.location)
+    // ALERT-2: the FCM client, the first-party receive path for a pushed geofence crossing.
+    //
+    // Note what is NOT here: `com.google.gms.google-services`, the plugin that reads a per-project
+    // `google-services.json`. Applying it would make a Firebase PROJECT a build-time requirement, and
+    // that file is deployment-specific and cannot be committed - so the gate would only be green on a
+    // machine that had one, or on a checkout carrying a placeholder that is worse than nothing. The
+    // library alone compiles, assembles, lints and unit-tests without any project configuration; the
+    // absence is handled at runtime, where the app reports it has no usable push configuration
+    // instead of failing to start.
+    implementation(libs.firebase.messaging)
 
     testImplementation(libs.junit)
 

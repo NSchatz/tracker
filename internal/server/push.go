@@ -26,6 +26,15 @@ import (
 type pushSubscriptionRequest struct {
 	Provider *string `json:"provider"`
 	Token    *string `json:"token"`
+	// ReplacesToken names a routing address this registration SUPERSEDES - the one the phone was
+	// registered under before its address rotated (ALERT-2 D8). Optional and additive: a client that
+	// omits it behaves exactly as before.
+	//
+	// It exists because registration is idempotent on (provider, token), which refreshes an
+	// UNCHANGED address but cannot help a rotated one: an FCM registration token that rotates is a
+	// new address, so the phone would hold two deliverable rows and receive every crossing twice.
+	// The phone is the only party that knows its own previous address, so it names it.
+	ReplacesToken *string `json:"replaces_token"`
 }
 
 // pushSubscriptionResponse echoes the stored subscription's id and provider so a client can confirm
@@ -34,12 +43,24 @@ type pushSubscriptionRequest struct {
 type pushSubscriptionResponse struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
+	// ConfiguredProvider is the push backend THIS DEPLOYMENT has configured, or "" when it has
+	// configured none (ALERT-2 D7/A22). It is not the same thing as Provider above: Provider echoes
+	// what the caller registered, ConfiguredProvider says whether anything will ever be sent through
+	// it. The registration is accepted and stored either way - a deployment can configure a backend
+	// after a phone has registered - so this is the one honest way for an app to say "registered,
+	// but alerts are not being received" instead of showing armed.
+	//
+	// The field is always PRESENT, empty when there is no backend, so a client can tell "this server
+	// configured nothing" from "this server is older than A22 and does not report" (an absent key).
+	ConfiguredProvider string `json:"configured_provider"`
 }
 
 // registerPushSubscription serves POST /v1/push-subscriptions: register (or refresh) the calling
 // viewer's push endpoint. Strict decode — unknown fields and trailing data are rejected — so a
 // malformed registration is a typed 400 that stores nothing, matching the ingestion path's stance.
-func registerPushSubscription(database DB, logger *slog.Logger) http.HandlerFunc {
+//
+// configuredProvider is the deployment's own backend, reported in the response (A22).
+func registerPushSubscription(database DB, notifier Notifier, configuredProvider string, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		v := viewerFrom(r.Context())
 
@@ -76,6 +97,42 @@ func registerPushSubscription(database DB, logger *slog.Logger) http.HandlerFunc
 			return
 		}
 
-		writeJSON(w, logger, http.StatusCreated, pushSubscriptionResponse{ID: id, Provider: *req.Provider})
+		// An endpoint that re-presents itself has proved its app is running, which is the only
+		// evidence tracker ever gets that what was pending for it has been seen. Reset its
+		// collapse-key accounting (A20).
+		notifier.EndpointRegistered(r.Context(), *req.Provider, token)
+
+		// The supersede (A24). Ordered AFTER the register on purpose: if the store failed between the
+		// two, the phone would hold two rows (one crossing twice, which is noisy) rather than none
+		// (the crossing silently lost, which is the failure this whole phase exists to close).
+		//
+		// A25 is the shape of what follows: the removal is scoped to the AUTHENTICATED viewer in the
+		// SQL, its result is deliberately not branched on, and nothing about it reaches the response.
+		// Naming an address that is registered to another viewer, or to nobody, therefore removes
+		// nothing and is byte-identical to the succeeding case - the route cannot be used to discover
+		// whether a routing address exists or to unregister somebody else's phone.
+		if req.ReplacesToken != nil {
+			replaced := strings.TrimSpace(*req.ReplacesToken)
+			// Replacing an address with itself is the idempotent re-registration, not a supersede;
+			// deleting here would remove the row that was just stored.
+			if replaced != "" && replaced != token {
+				removed, err := store.RemovePushSubscriptionForViewer(r.Context(), database, v.ID, *req.Provider, replaced)
+				if err != nil {
+					// Logged, never surfaced: a failed supersede leaves a stale row that wastes a send
+					// to a dead address, which is strictly better than failing a registration that
+					// already succeeded. The token is NOT logged - it is a routing address for a
+					// family's alerts.
+					logger.ErrorContext(r.Context(), "remove superseded push subscription", "error", err, "viewer_id", v.ID)
+				} else if removed {
+					notifier.EndpointRemoved(r.Context(), *req.Provider, replaced)
+				}
+			}
+		}
+
+		writeJSON(w, logger, http.StatusCreated, pushSubscriptionResponse{
+			ID:                 id,
+			Provider:           *req.Provider,
+			ConfiguredProvider: configuredProvider,
+		})
 	}
 }

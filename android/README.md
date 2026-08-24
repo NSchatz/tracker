@@ -9,6 +9,12 @@ constrained to `NetworkType.CONNECTED` drains that queue into the server's alrea
 `POST /v1/fixes`. Going offline now delays reporting instead of losing it. It does **not** yet store
 its token securely (C3), adapt its cadence to save battery (C4), or show a map (C5).
 
+As of **ALERT-2** it also **watches**: a crossing pushed by the server arrives as a notification
+naming the device, the Place and the direction, and opening the app shows the family's recent
+crossings read back from `GET /v1/geofence-events` - so a crossing the push backend dropped is still
+findable. Receiving is **FCM only** in this phase; a UnifiedPush deployment is told so rather than
+left silent.
+
 ## What exists
 
 | | |
@@ -18,8 +24,10 @@ its token securely (C3), adapt its cadence to save battery (C4), or show a map (
 | **Wire contract** | `protocol/` — the `POST /v1/fixes` payload, its validation, the response classifier, and the HTTP reporter. All pure JDK/Kotlin, no framework classes. |
 | **Durable queue** | `queue/FixQueue` — one atomically-written file per fix under `filesDir`, named by its `ts`, holding the exact wire body. Survives the process, a reboot, and a long outage. |
 | **Flush** | `queue/QueueFlusher` (pure: what to send, keep, discard) driven by `queue/FixUploadWorker` (WorkManager, `NetworkType.CONNECTED`, exponential backoff jittered by `queue/FlushBackoff`). |
-| **Configuration** | `collect/ClientPreferences` — server URL + device token, entered in-app. **Plaintext for now** (see *Known limitations*). |
-| **UI** | `ui/MainActivity` — one screen: the current permission step, the server settings, start/stop, and honest counters (`delivered` / `queued` / `dropped`). |
+| **Alert receive path** | `alert/TrackerMessagingService` - the FCM service. It decides nothing: `alert/AlertIntake` parses and either renders or discards-and-counts, and `alert/AlertNotifications` posts. |
+| **Alert surface** | `alert/AlertStatusPolicy` (the ordered six-state delivery status), `alert/CrossingListView` (the in-app list and its five outcomes), `alert/AlertClient` (the two viewer routes), `alert/MiniJson` (a strict reader, no dependency). All pure. |
+| **Configuration** | `collect/ClientPreferences` - server URL, device token and **viewer token**, entered in-app. **Plaintext for now** (see *Known limitations*). |
+| **UI** | `ui/MainActivity` - one screen: the current permission step, the server settings, start/stop, honest counters (`delivered` / `queued` / `dropped`), and the alert delivery status with the crossing list. |
 
 ### The shape of the code, and why
 
@@ -87,6 +95,45 @@ Android 10 phone was caught by `lintDebug` on the first run of this phase, not b
   bounded by its batch limit and says so.
 - **The backoff jitter** (`FlushBackoffTest`): that the initial WorkManager delay is spread across a
   window rather than identical on every device, and never falls under WorkManager's own 10 s floor.
+- **What a received push is allowed to become** (`PushPayloadTest`): that a complete push renders a
+  notification naming the device, the Place and the direction; and that **twelve** distinct ways of
+  being incomplete - no title, a blank title, the wrong `type`, no Place name, no direction, an
+  unknown direction, no ids, no `ts`, a `ts` in the wrong format - each render **nothing** rather than
+  a notification with an invented part. Also that the push's UTC calendar `ts` and the crossings
+  route's epoch seconds resolve to the **same instant**, across leap days and the year-2000 leap rule
+  - which is what makes one crossing one row.
+- **The discard count** (`AlertPrivacyAndDiscardTest`): that a discarded push increments an
+  observable counter and adds nothing to the list. Observable **off-device**, which was the point:
+  a client that silently drops malformed messages is indistinguishable from one receiving none.
+- **The alert delivery status, exhaustively** (`AlertStatusPolicyTest`, `AlertClientTest`): that the
+  ordered procedure produces exactly one of nine distinguishable answers; that each of the four
+  not-receivable reasons (no routing address on this phone, no backend configured, a backend this app
+  cannot receive from, a server that does not report) is its own state; that a refused registration
+  and an unreachable server are different; and - the one that would be easy to get wrong and
+  impossible to notice - that a registration still **in flight** does not read as `armed`.
+- **The crossings read, over real HTTP** (`AlertClientTest`): that a fake server returning two rows
+  puts both in the list, that the viewer credential travels in the `Authorization` **header** and
+  never in the URL, and that a rejected credential, an unreachable server, an unreadable answer and a
+  `500` are each their own state and **none of them is an empty family**.
+- **The merge across the two sources** (`CrossingListViewTest`): that one crossing arriving both as a
+  push and from the route is shown **once**, and that two crossings of one device at one Place at
+  different instants stay **two rows** - the merge key that cannot separate them is what would hide
+  an arrival out of the list that exists to catch what got lost.
+- **A crossings row with no device name** (`CrossingsResponseTest`): that a server older than the
+  additive `device_name` field still yields the Place, the direction and the time, with a visibly
+  not-a-name placeholder and **no fabricated name**; and that a body this client cannot read raises
+  rather than returning an empty list that would be shown as "your family has no crossings".
+- **The privacy boundary** (`AlertPrivacyAndDiscardTest`): that nothing the alert surface renders or
+  holds carries a coordinate, an accuracy or a raw fix datum - driven with a push and a crossings row
+  that both carry coordinate-shaped extras - and that this client reads only the two viewer routes
+  that return none.
+- **The viewer credential's validation** (`ViewerConfigValidationTest`): the same URL rules as the
+  device token, a plaintext refusal that names which credential is at risk, and the two credentials
+  failing independently. Plus (`AlertClientTest`) that the credential appears in **no** string the
+  surface renders, sends as content, or would put in a log line.
+- **That the app builds with no Firebase project configuration.** The gate itself is the test: this
+  module depends on the FCM client library and deliberately does not apply the Google Services Gradle
+  plugin, so `make check` is green on a checkout that has never seen a `google-services.json`.
 
 ### NOT proven by the gate — operator checks on a real device
 
@@ -115,6 +162,24 @@ be evidence about the mock, not about Android.
   `Context` — i.e. an instrumented run or Robolectric — and would then be asserting WorkManager's
   own scheduler back to itself, which is why `FixUploadWorker` was kept free of decisions instead.
 - **Battery cost**, and whether an OEM battery manager (Samsung, Xiaomi, …) kills the service anyway.
+- **That a real FCM message reaches a real handset, and wakes it under Doze.** FCM's high-priority
+  Doze exemption is a documented platform behaviour; whether it happens on a given phone, network and
+  OEM skin is not something a headless build can establish. The gate proves what this app does with a
+  message it is given; it cannot make one arrive.
+- **That the notification permission dialog can actually be granted**, and that a granted permission
+  produces a visible notification on the lock screen. Same shape as C1's permission limitation: the
+  gate proves which state the app *decides* it is in, and cannot tap a system dialog.
+- **The full alert path end to end** - walk into a real Place and see the notification. Every piece of
+  it is tested (the crossing is recorded by the server's own suite, the fan-out and the outcome
+  accounting by `internal/push`, the parse and the render here), and the seams between them on a real
+  device are not.
+- **That a real rotated FCM registration token supersedes its predecessor.** The SERVER half is
+  proved against a real PostGIS (`internal/server/alert_test.go`: a registration naming a replaced
+  address removes exactly that endpoint, and one crossing then produces one delivery and not two).
+  The rotation EVENT - `onNewToken` firing with a new address - is a platform behaviour on a device.
+- **That a Firebase project, once configured, yields a registration token.** The no-project case is
+  gate-proved (the build is green without one and the app reports it has no usable push
+  configuration); the with-project case needs a Firebase account and a real handset.
 
 #### Why the instrumented suite grades the SCREEN and nothing else
 
@@ -174,6 +239,40 @@ that job.
 9. Force-stop the app with fixes still queued, then reopen it. The **queued** counter should come
    back non-zero (it is read from disk, not from memory) and the queue should drain.
 
+#### The device check to run before believing ALERT-2 works
+
+The alert half. Steps 1 to 3 need no Firebase project at all and are worth running first, because
+they are the states most deployments will actually be in.
+
+1. `tracker add-viewer` on the server; copy the printed **viewer** token and paste it into the new
+   field. With no Firebase project configured in this build, expect the app to say **alerts are not
+   being received: this phone has no usable push configuration** - and to still list the family's
+   crossings underneath. An app that says "armed" here, or that fails to start, is the defect.
+2. `tracker add-place`, then walk a phone in and out of it. Within a debounce or two the crossing
+   should appear in the in-app list, named with the family's own name for the device. This path does
+   not involve push at all, and it is the fail-safe: it must work whether or not alerts do.
+3. Point the app at a server with `TRACKER_PUSH_PROVIDER` unset, and then at one set to
+   `unifiedpush`. Expect two *different* sentences - "this server has no push backend configured" and
+   "this server sends through a push backend this app cannot receive from" - and the crossing list in
+   both. Then paste a wrong viewer token and expect "the server refused this viewer token", not an
+   empty list.
+4. To exercise the push itself you need a Firebase project: add its `google-services.json`, apply the
+   `com.google.gms.google-services` plugin **in your own build**, and configure the server with
+   `TRACKER_PUSH_PROVIDER=fcm`, `TRACKER_FCM_PROJECT_ID` and `TRACKER_FCM_CREDENTIALS_FILE`. Neither
+   the file nor the plugin is committed here, deliberately - see *Known limitations*.
+5. With that in place, cross a Place and expect a notification naming the device, the Place and the
+   direction, and the same crossing appearing **once** in the in-app list (not twice, once from each
+   source).
+6. Deny the notification permission (Android 13+) and cross again. Expect the app to say **alerts
+   cannot be shown**, no notification, and the crossing still in the list.
+7. Turn the phone's network off, cross **five or more** distinct device-and-Place pairs, then bring
+   it back. Expect some alerts to be missing, and expect
+   `docker compose logs tracker | grep push.delivery.outcome` to show `beyond-collapse-bound` for the
+   surplus. Nothing anywhere should say "delivered". Every one of those crossings must still be in
+   the in-app list - that is the whole point of the list.
+8. Clear the app's data and re-enter both tokens. The old routing address is now unnameable, so the
+   server keeps a stale row for it. This is the recorded residual below, not a bug to file.
+
 This mirrors how `holdfast` documented its CI-unprovable power-loss limitation rather than faking a
 test for it. Writing the limitation down is the deliverable; a green test that proved nothing would
 be worse than no test.
@@ -204,16 +303,47 @@ be worse than no test.
 - **The scheduling half is not gate-provable.** The queue and the flush loop are unit-tested against
   a real filesystem and a real socket; that WorkManager actually runs the job when the radio returns
   is an operator check (above).
-- **The device token is stored in plaintext** `SharedPreferences`. Not readable by other apps on a
-  non-rooted device, but readable with root, an unlocked bootloader, or a full-device backup.
-  `allowBackup="false"` is set. **C3** moves it to `EncryptedSharedPreferences` with an Android
-  Keystore master key.
-- **No enrollment flow.** The token is pasted in by hand from `tracker enroll` output. **C3**.
+- **BOTH credentials are stored in plaintext** `SharedPreferences`: the device (write) token, and -
+  since ALERT-2 - the **viewer (read) token** the alert surface needs. Neither is readable by other
+  apps on a non-rooted device; both are readable with root, an unlocked bootloader, or a full-device
+  backup. `allowBackup="false"` is set, which keeps them out of cloud backups.
+
+  The viewer token is a real widening of what this phone carries: it reads the family's whole
+  crossing history. What bounds it is what the app does with it - exactly two routes,
+  `GET /v1/geofence-events` and `POST /v1/push-subscriptions`, neither of which returns a coordinate,
+  and it is never written to a log, a notification or a rendered string. What does **not** bound it is
+  where it is kept. **SECRET-3** is the phase that fixes that, for both credentials at once, which is
+  why they live in one place.
+- **No enrollment flow.** Both tokens are pasted in by hand from `tracker enroll` and
+  `tracker add-viewer` output. **SECRET-3**.
+- **Alerts are received over FCM only.** A deployment configured for UnifiedPush will send, and this
+  client has no distributor path, so nothing would arrive. That is *said* rather than left silent: the
+  app reports "this server sends through a push backend this app cannot receive from", and the in-app
+  crossing list still shows every crossing. The UnifiedPush receive path is deferred, partly because
+  whether a distributor carries the same collapse and pending semantics as FCM is an open research
+  question and this phase asserts nothing about it.
+- **A Firebase project is not part of this repo, and cannot be.** `google-services.json` is
+  deployment-specific and is not committed; the `com.google.gms.google-services` Gradle plugin is not
+  applied. So the module builds, lints and unit-tests with no Firebase project anywhere, which is how
+  the gate runs it - and an app built that way has no registration token at runtime and says so
+  (reason R1) rather than failing to start. A deployment that wants push adds both in its own build.
+- **A phone that forgets its own previous routing address leaves a stale endpoint behind.** A rotated
+  FCM token is a new address, and registration is idempotent on `(provider, address)`, so the app
+  names the address it is replacing and the server removes exactly that one. A reinstall or a restore
+  onto another handset loses that record, so the old row survives until the backend reports the
+  address unregistered - which nothing acts on yet. It wastes a send to a dead address; it does not
+  double-notify a live phone.
+- **The push is never the record.** FCM stores four collapsible messages per device, one per collapse
+  key, and tracker's key is per (device, Place) - so a phone off the network past four distinct pairs
+  has lost the rest, permanently. The in-app crossing list, read back from your own server, is the
+  record. The server counts the surplus as `beyond-collapse-bound` and never as delivered.
 - **Static cadence.** 60 s target, 25 m displacement filter, 2 min batching — the same whether the
   phone is parked or on a motorway. **C4** makes it adaptive.
 - **No map.** **C5**.
 - **Google Play services required.** `FusedLocationProviderClient` is Play services, not AOSP; there
-  is no `LocationManager` fallback, so a fully degoogled phone cannot run this client today.
+  is no `LocationManager` fallback, so a fully degoogled phone cannot run this client today. FCM adds
+  no *new* platform requirement for the same reason - the client was already tied to Play services -
+  which is why the receive path built here is the FCM one.
 - **Background reliability is not absolute** — Doze, App Standby and OEM battery-killers can throttle
   or stop collection regardless of correct implementation. Roadmap §9; not solvable in-app.
 

@@ -178,12 +178,33 @@ type GeofenceEvent struct {
 	FixTS        time.Time
 }
 
+// GeofenceEventRow is one crossing as the READ route serves it: the crossing itself plus the
+// family's own name for the device that made it.
+//
+// The device name is a read-side field and lives here rather than on GeofenceEvent on purpose. The
+// evaluator's GeofenceEvent is produced by a caller that ALREADY holds the store.Device (the
+// ingestion path passes it straight to the push fan-out, which titles the notification with
+// dev.Name), so putting the name on that type would add a field that is empty on every value the
+// evaluator returns - a sometimes-populated field is the shape a silent bug hides in. The read has
+// no Device in hand and joins for it, so the name belongs to the read's own type.
+type GeofenceEventRow struct {
+	GeofenceEvent
+	// DeviceName is the family's own name for the crossing device, from the devices row the read
+	// already joins to scope by family.
+	DeviceName string
+}
+
 // listGeofenceEventsSQL returns a family's recent crossings, newest first. Scoped by family through
 // the device join — a viewer reads only its own family's events, never another's, exactly as the S3
 // reads are scoped. Ordered by fix_ts (the crossing's event-time, §5.3), id breaking ties so the
 // order is total and pagination is stable.
+//
+// `d.name` comes off the join that was already there for the family scope: naming the device costs
+// no extra query and no extra row, which is why the read route carries the name rather than a client
+// resolving it from /v1/positions (that route returns coordinates, which the alert surface must not
+// hold).
 const listGeofenceEventsSQL = `
-	SELECT e.device_id, e.geofence_id, g.name, e.transition::text, e.fix_ts
+	SELECT e.device_id, e.geofence_id, g.name, e.transition::text, e.fix_ts, d.name
 	FROM geofence_events e
 	JOIN devices   d ON d.id = e.device_id
 	JOIN geofences g ON g.id = e.geofence_id
@@ -198,7 +219,7 @@ const MaxGeofenceEventsLimit = 1000
 
 // ListGeofenceEvents returns the family's most recent crossings, newest first, capped. limit is
 // clamped to [1, MaxGeofenceEventsLimit]. Scoped to one family in the SQL.
-func ListGeofenceEvents(ctx context.Context, q db.Querier, familyID string, limit int) ([]GeofenceEvent, error) {
+func ListGeofenceEvents(ctx context.Context, q db.Querier, familyID string, limit int) ([]GeofenceEventRow, error) {
 	switch {
 	case limit < 1:
 		limit = 1
@@ -212,10 +233,10 @@ func ListGeofenceEvents(ctx context.Context, q db.Querier, familyID string, limi
 	}
 	defer rows.Close()
 
-	var out []GeofenceEvent
+	var out []GeofenceEventRow
 	for rows.Next() {
-		var e GeofenceEvent
-		if err := rows.Scan(&e.DeviceID, &e.GeofenceID, &e.GeofenceName, &e.Transition, &e.FixTS); err != nil {
+		var e GeofenceEventRow
+		if err := rows.Scan(&e.DeviceID, &e.GeofenceID, &e.GeofenceName, &e.Transition, &e.FixTS, &e.DeviceName); err != nil {
 			return nil, fmt.Errorf("scan geofence event: %w", err)
 		}
 		out = append(out, e)

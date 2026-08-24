@@ -59,7 +59,16 @@ func getPlaces(database DB, logger *slog.Logger) http.HandlerFunc {
 // event-time in epoch seconds — the same time convention as every other timestamp in the API (§5.3
 // "derive from ts order").
 type geofenceEventResponse struct {
-	DeviceID   string `json:"device_id"`
+	DeviceID string `json:"device_id"`
+	// DeviceName is the family's own name for the crossing device (ALERT-2 D6/A27), carried on the
+	// same row as the crossing so a client can render "Alice's phone arrived at School" without a
+	// second call. It is additive: a client that ignores it behaves exactly as it did before.
+	//
+	// It is here rather than resolved client-side from /v1/positions because that route returns every
+	// device's latest COORDINATE, and the alert surface's privacy boundary is that it holds none. The
+	// same viewer credential already receives this exact name as the title of every push for this
+	// family, so naming it here widens no exposure.
+	DeviceName string `json:"device_name"`
 	PlaceID    string `json:"place_id"`
 	PlaceName  string `json:"place_name"`
 	Transition string `json:"transition"` // "enter" | "exit"
@@ -98,6 +107,7 @@ func getGeofenceEvents(database DB, logger *slog.Logger) http.HandlerFunc {
 		for _, e := range events {
 			out = append(out, geofenceEventResponse{
 				DeviceID:   e.DeviceID,
+				DeviceName: e.DeviceName,
 				PlaceID:    e.GeofenceID,
 				PlaceName:  e.GeofenceName,
 				Transition: e.Transition,

@@ -106,10 +106,12 @@
     <string name="explain_permissions">About permissions</string>
     <string name="explain_server">About server settings</string>
     <string name="explain_counters">About these counters</string>
+    <string name="explain_alerts">About alerts</string>
     <string name="explanation_back">Back</string>
     <string name="explanation_title_permissions">About permissions</string>
     <string name="explanation_title_server">About server settings</string>
     <string name="explanation_title_counters">About these counters</string>
+    <string name="explanation_title_alerts">About alerts</string>
     <!-- Heading for the live sentence the home screen deliberately does not draw. -->
     <string name="explanation_detail_heading">What happened just now</string>
 
@@ -136,5 +138,61 @@
     <string name="explain_counter_dropped">Dropped counts fixes measured during this run that will never reach the server. It is shown as prominently as Delivered on purpose: an app that only ever displays its successes is how silent fix loss stays silent.</string>
     <string name="explain_counter_not_recorded">A counter that has never been measured reads “not recorded”, never 0 and never a dash. A measured zero still reads 0, because “we checked and it is none” and “we never checked” are different facts and a reader deciding whether their family\'s trail has a hole in it needs to be able to tell them apart. If the queue directory cannot be read at all, the queued figure alone reads “unavailable” and everything else on the screen keeps working.</string>
     <string name="explain_collection_trouble">When something stops collection or delivery, the card names the KIND of trouble in a few words - server settings incomplete, location permission lost, Android refused collection, reporting failed, device token rejected - and the sentence describing exactly what happened is shown at the top of this page. The sentence is kept off the card because it is not ours to keep short: a network failure or an Android exception supplies its own wording, and a paragraph on a phone card is a paragraph nobody reads.</string>
+    <!-- The alert surface's paragraphs (ALERT-2). One per delivery state, in the same closed set the
+         card's labels come from, plus the crossings list, the discard count and the two limitations
+         a person needs before they trust a notification to arrive. -->
+    <string name="explain_alerts_checking">Alerts are still being checked. This phone asks the server whether it is registered and which push backend the server uses, and that answer has not come back yet. The crossings list below does not wait for it.</string>
+    <string name="explain_alerts_not_configured">No viewer token has been entered yet, so this phone is not registered and no crossings can be read. Run \"tracker add-viewer\" on the server and paste the token into the Server card above. Until then an empty list is not an empty family log, it is an app that has not been given a credential.</string>
+    <string name="explain_alerts_cannot_show">Notifications are blocked for this app, so a crossing cannot be shown as one however well the rest of the path works. Grant the notification permission in system settings. Crossings are still read and still listed below while it is blocked.</string>
+    <string name="explain_alerts_not_registered_refused">The server refused this viewer token, so this phone is not registered to receive alerts. Check the token in the Server card above; a device token is refused on this route by construction.</string>
+    <string name="explain_alerts_not_registered_unreachable">This phone could not reach the server to register for alerts. Check the server address in the Server card above, then reopen the app to try again.</string>
+    <string name="explain_alerts_r1">This phone has no usable push configuration, so there is no address to register. An app built with no Firebase project in it reaches this state, and so does a phone whose push service is unavailable. Crossings are still listed below.</string>
+    <string name="explain_alerts_r2">This server has no push backend configured, so it will never send an alert whatever this phone does. The registration is stored anyway, so configuring a backend later starts alerts without registering again. Crossings are still listed below.</string>
+    <string name="explain_alerts_r3">This server sends through a push backend this app cannot receive from. This app receives from Firebase Cloud Messaging only. Crossings are still listed below.</string>
+    <string name="explain_alerts_r4">This server does not report which push backend it uses, so this app cannot tell whether one is configured at all. It is older than the field that reports it. Crossings are still listed below.</string>
+    <string name="explain_alerts_armed">A viewer token is entered, this phone is registered with the backend the server says it uses, and notifications are permitted, so a crossing will arrive as a notification. Arrival is still never guaranteed, which is why the list below is the record and the notification is not.</string>
+    <string name="explain_crossings_states">The crossings list states which of four things happened, and they are deliberately different sentences. \"No crossings recorded yet\" means the server was asked and answered with nothing. Each \"Crossings unread\" state means the list could NOT be read - a rejected token, a server that could not be reached, or an answer this app could not parse - and none of those is an empty family log.</string>
+    <string name="explain_alerts_discarded">A push that does not carry a complete crossing - its kind, the device name, the Place name and the direction - renders no notification, and is counted here instead. No missing part of it is guessed at, and the count is shown rather than kept quiet, because a discarded push is an alert somebody did not get.</string>
+    <string name="explain_alerts_limitation">The push backend holds only four pending alerts per phone, one per device-and-place pair, and then discards the rest. This list, read back from your server, is the record; the notification is not.</string>
+    <string name="explain_viewer_plaintext">The viewer token is stored unencrypted in this app\'s private data, exactly as the device token is, until secure storage ships (roadmap SECRET-3). It reads the whole family\'s crossings, so treat it as the more sensitive of the two. Cloud backup of the app\'s data is already switched off.</string>
+
     <string name="explain_collection_freshness">While collection is running and a fix has arrived within the reporting interval, the counters are labelled as current. When collection is stopped, has been killed by the system, or has produced no fix for longer than that interval, the same counters are labelled “last known” with the time they were last updated. A frozen readout is never presented as a live one, and when collection resumes the counters go back to reading as current.</string>
+
+    <!-- Viewer credential (ALERT-2). A second, separate credential: the crossings route and push
+         registration are viewer routes, and the device (write) token is a 401 on both. -->
+    <string name="config_viewer_token_label">Viewer token (from tracker add-viewer)</string>
+
+    <!-- Crossing alerts. The channel is separate from the collection service's ongoing notice: one
+         is "this phone is sharing its location", the other is "somebody arrived somewhere". A person
+         must be able to silence either without silencing the other. Neither ever carries a
+         coordinate; a lock screen is not a private surface. -->
+    <string name="alert_channel_name">Arrivals and departures</string>
+    <string name="alert_channel_description">Tells you when a family member arrives at or leaves a place you have defined.</string>
+
+    <!-- The alert surface. One label per delivery state, a few words each, and the paragraph for
+         each one is the explain_alerts_* string of the same name, read behind "About alerts". Every
+         state names itself in WORDS: which one a person is in is never carried by a colour, and the
+         four not-receivable reasons are four different labels rather than one shared sentence. -->
+    <string name="alerts_title">Alerts</string>
+    <string name="alerts_status_checking">Checking alert setup…</string>
+    <string name="alerts_status_not_configured">No viewer token set</string>
+    <string name="alerts_status_cannot_show">Alerts cannot be shown</string>
+    <string name="alerts_status_not_registered_refused">Not registered: token refused</string>
+    <string name="alerts_status_not_registered_unreachable">Not registered: server unreachable</string>
+    <string name="alerts_status_r1">Not receivable: no push address</string>
+    <string name="alerts_status_r2">Not receivable: server sends none</string>
+    <string name="alerts_status_r3">Not receivable: backend unsupported</string>
+    <string name="alerts_status_r4">Not receivable: backend not reported</string>
+    <string name="alerts_status_armed">Alerts armed</string>
+    <string name="alerts_discarded">Incomplete alerts discarded: %1$d</string>
+
+    <!-- The crossings list. The three failures all lead with "unread" so that none of them can be
+         read as the empty family log, which is the one thing this list must never be mistaken for. -->
+    <string name="crossings_title">Recent crossings</string>
+    <string name="crossings_checking">Reading crossings…</string>
+    <string name="crossings_empty">No crossings recorded yet</string>
+    <string name="crossings_credential_rejected">Crossings unread: token rejected</string>
+    <string name="crossings_unreachable">Crossings unread: server unreachable</string>
+    <string name="crossings_server_error">Crossings unread: unreadable answer</string>
+    <string name="crossings_refresh">Refresh crossings</string>
 </resources>

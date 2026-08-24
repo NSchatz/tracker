@@ -49,6 +49,16 @@ type DB interface {
 // capturing stub stands in) and lets a deployment with push disabled drop in a no-op.
 type Notifier interface {
 	NotifyGeofenceEvents(ctx context.Context, dev store.Device, events []store.GeofenceEvent)
+
+	// EndpointRegistered says an endpoint has re-presented itself through registration. That is the
+	// only evidence tracker ever gets that a receiving app has RUN, so it is what resets the
+	// per-endpoint collapse-key accounting (ALERT-2 A20). A backend accepting a message is not
+	// evidence of anything and must never call this.
+	EndpointRegistered(ctx context.Context, provider, token string)
+
+	// EndpointRemoved says an endpoint has been superseded by a rotated routing address and deleted
+	// (ALERT-2 A24), so any state held against it can go.
+	EndpointRemoved(ctx context.Context, provider, token string)
 }
 
 // noopNotifier is the Notifier a deployment with push disabled (or a test that does not care) gets. It
@@ -57,6 +67,8 @@ type Notifier interface {
 type noopNotifier struct{}
 
 func (noopNotifier) NotifyGeofenceEvents(context.Context, store.Device, []store.GeofenceEvent) {}
+func (noopNotifier) EndpointRegistered(context.Context, string, string)                        {}
+func (noopNotifier) EndpointRemoved(context.Context, string, string)                           {}
 
 // healthTimeout bounds the health check's database ping. A /healthz that hangs is worse than one
 // that fails: an orchestrator waiting on it cannot tell "slow" from "wedged".
@@ -67,6 +79,28 @@ const healthTimeout = 2 * time.Second
 // working. http.MaxBytesReader turns an over-large body into a clean 400, not an OOM.
 const maxBodyBytes = 64 << 10
 
+// options is New's tunable surface. It exists so a value the handlers need but did not previously
+// have - the deployment's configured push backend - can be threaded in without changing New's
+// signature at every call site, the same shape internal/push uses for the dispatcher.
+type options struct {
+	// configuredPushProvider is what config.PushProvider holds: "" (push disabled), "fcm" or
+	// "unifiedpush". The registration response reports it (ALERT-2 D7/A22) because a client cannot
+	// infer it: the server accepts and stores a subscription with a 201 whether or not a backend is
+	// configured, so "registered" and "registered into a deployment that will never send" look
+	// identical from the outside.
+	configuredPushProvider string
+}
+
+// Option tunes the handler New builds.
+type Option func(*options)
+
+// WithConfiguredPushProvider tells the handler which push backend the deployment configured, so an
+// accepted registration can name it. Unset means "none configured", which is exactly what an
+// unconfigured deployment should report.
+func WithConfiguredPushProvider(provider string) Option {
+	return func(o *options) { o.configuredPushProvider = provider }
+}
+
 // New builds the HTTP handler. notifier delivers S6 push alerts for the crossings ingestion records;
 // a nil notifier means push is disabled (a no-op is substituted), so a deployment without a push
 // backend still ingests, evaluates and serves the event log — it just sends no alerts.
@@ -75,9 +109,13 @@ const maxBodyBytes = 64 << 10
 // rather than a package default so that no route can quietly fall back to 120/900 while the operator
 // believes they configured something else: a caller has to say which windows this handler applies,
 // and config.Load is the only thing that decides what they are.
-func New(database DB, notifier Notifier, windows presentation.Windows, logger *slog.Logger) http.Handler {
+func New(database DB, notifier Notifier, windows presentation.Windows, logger *slog.Logger, opts ...Option) http.Handler {
 	if notifier == nil {
 		notifier = noopNotifier{}
+	}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
 
 	r := chi.NewRouter()
@@ -121,7 +159,7 @@ func New(database DB, notifier Notifier, windows presentation.Windows, logger *s
 		// family's crossings can reach it. It is a WRITE by the viewer credential — a viewer registers
 		// only under itself (the viewer id comes from the token, never the body) — which is why it sits
 		// in the viewer group rather than behind the device token.
-		r.Post("/v1/push-subscriptions", registerPushSubscription(database, logger))
+		r.Post("/v1/push-subscriptions", registerPushSubscription(database, notifier, o.configuredPushProvider, logger))
 	})
 
 	// The live-map surface (S4). GET /v1/stream is an SSE feed of a family's position updates; it

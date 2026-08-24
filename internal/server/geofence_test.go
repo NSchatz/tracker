@@ -40,7 +40,10 @@ func (h *harness) postFixAt(t *testing.T, token auth.Token, lat, lon float64, ts
 }
 
 type wireEvent struct {
-	DeviceID   string `json:"device_id"`
+	DeviceID string `json:"device_id"`
+	// DeviceName is ALERT-2's additive field (D6/A27): the family's own name for the crossing
+	// device, on the same row as the crossing.
+	DeviceName string `json:"device_name"`
 	PlaceID    string `json:"place_id"`
 	PlaceName  string `json:"place_name"`
 	Transition string `json:"transition"`

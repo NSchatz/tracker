@@ -36,6 +36,12 @@ one of `no-position`, `live`, `recent`, `stale` - on `GET /v1/positions` and on 
 and `GET /v1/positions` now lists **every device in the family**, including one that has never
 reported. See *Presentation state* below; it is normative for both surfaces.
 
+As of **ALERT-2**, `/v1` gains three **additive** fields and nothing else - `configured_provider` on
+an accepted registration, an optional `replaces_token` on the registration request, and `device_name`
+on each `GET /v1/geofence-events` row. Every existing route shape, status code and error body is
+unchanged, and a client that ignores all three behaves exactly as it does today: a breaking change to
+this schema is still a `/v2`, never a silent redefinition of `/v1`.
+
 ---
 
 ## Authentication
@@ -580,11 +586,22 @@ The caller's family's crossings, **newest first**. **Viewer** token; family-scop
 
 ```json
 [
-  {"device_id":"…","place_id":"…","place_name":"Home","transition":"enter","ts":1752566400}
+  {"device_id":"…","device_name":"Alice's phone","place_id":"…","place_name":"Home","transition":"enter","ts":1752566400}
 ]
 ```
 
 `transition` is `"enter"` or `"exit"`; `ts` is the crossing fix's device event-time, in epoch seconds.
+
+**`device_name` is additive (ALERT-2)** and carries the family's own name for the crossing device, on
+the same row as the crossing, so a client can render "Alice's phone arrived at Home" without a second
+call. A client that ignores it behaves exactly as it did before. It comes off the `devices` join the
+read already performs to scope by family, so it costs no extra query.
+
+It is here rather than resolved client-side from `GET /v1/positions` on purpose: that route does
+return `device_name`, and it returns every device's latest **coordinate** with it. The first-party
+alert surface's privacy boundary is that it holds no coordinate at all, so it must not read a route
+that serves one. Naming the device here widens nothing: the same viewer credential already receives
+this exact name as the title of every push for the same family.
 
 ### Managing Places (operator CLI)
 
@@ -613,23 +630,56 @@ a field in the body — so a viewer can only register an endpoint under itself.
 **Request** (viewer token; strict decode — unknown fields and trailing data are rejected):
 
 ```json
-{"provider": "fcm", "token": "the-endpoint-address"}
+{"provider": "fcm", "token": "the-endpoint-address", "replaces_token": "the-previous-address"}
 ```
 
 - **`provider`** — `"fcm"` or `"unifiedpush"` (required). Any other value is a `400`.
 - **`token`** — the routing address (required, non-empty). Its meaning depends on `provider`:
   - **`fcm`** — the app's FCM **registration token** (the opaque device id from Firebase).
   - **`unifiedpush`** — the distributor-issued **endpoint URL** the server POSTs to.
+- **`replaces_token`** - **optional, additive (ALERT-2).** A routing address this registration
+  supersedes: the one this same phone was registered under before its address rotated. When present,
+  the server removes that endpoint **if and only if the authenticated viewer registered it**, and
+  then stores the new one. Omit it (do not send an empty string) when nothing is being replaced.
 
-**Success** — `201` with the stored subscription's id and provider:
+**Success** - `201`:
 
 ```json
-{"id": "…", "provider": "fcm"}
+{"id": "…", "provider": "fcm", "configured_provider": "fcm"}
 ```
+
+- **`id`**, **`provider`** - the stored subscription's id, and the provider the caller registered.
+- **`configured_provider`** - **additive (ALERT-2)**: the push backend **this deployment** has
+  configured (`TRACKER_PUSH_PROVIDER`), or **`""`** when it has configured none. The field is always
+  present, so a client can distinguish "this deployment configured nothing" (empty) from "this server
+  predates the field" (absent). A client that ignores it behaves exactly as it did before.
+
+  It exists because a client cannot infer it. Registration is just a subscription row: the server
+  accepts one and answers `201` whether or not a backend is configured, so without this field
+  "registered and armed" and "registered into a deployment that will never send" are the same
+  response. The registration is accepted and stored either way - a deployment can configure a backend
+  after a phone has registered.
 
 Registration is **idempotent** on `(provider, token)`: the same phone re-registering (a fresh launch, a
 rotated FCM token re-sent) refreshes the existing row and moves it to the presenting viewer — it never
 creates a duplicate that would push the same phone twice per crossing.
+
+### The rotated routing address, and why `replaces_token` exists
+
+Idempotency on `(provider, token)` refreshes an **unchanged** address. A rotated FCM registration
+token is a **different** address, so it inserts a second row and the phone holds two deliverable
+endpoints - one crossing, two notifications - until something removes the old one. The phone is the
+only party that knows its own previous address, so it names it.
+
+The removal is **authorized, and silent about what it did**. A `replaces_token` naming an address that
+is not registered under the authenticated viewer removes **nothing** and produces a response identical
+to the succeeding case. Otherwise the route would be an oracle: a caller could learn whether an
+address is registered anywhere, or unregister somebody else's phone by guessing.
+
+**Known limitation.** A phone that has lost its own record of the previous address - a reinstall, a
+restore onto another handset - cannot name it, so that stale row survives. It wastes a send to a dead
+address; it does not double-notify a live phone, because the address it points at is the dead one.
+Acting on a backend's "this address is unregistered" report is not implemented.
 
 ### What a push contains
 
@@ -652,6 +702,44 @@ possible; the freshest state arrives on the device's next crossing. A push **nev
 ingestion**: it runs on a bounded, retrying background worker, a persistent failure is logged (not
 crashed), and a backlog past the pending cap is dropped. Push is **disabled** unless the deployment
 configures a backend (`TRACKER_PUSH_PROVIDER`); see the README's *Configuration*.
+
+### Delivery accounting: three outcomes, and none of them is "delivered"
+
+FCM never tells tracker that a phone received a message; it tells tracker that FCM **accepted** one,
+which is a fact about a queue in somebody else's datacentre. So the server records exactly three
+outcomes per crossing per endpoint, and a backend accepting a message is never recorded as delivery:
+
+| outcome | what it means |
+|---|---|
+| `handed-over` | given to the backend, with no observed evidence of arrival |
+| `beyond-collapse-bound` | handed over while **four or more** distinct collapse keys were already pending for that endpoint |
+| `dropped` | never handed over: the pending queue was full, the retries were exhausted, or no sender is configured for that provider |
+
+`beyond-collapse-bound` quantifies what "best-effort" costs. FCM stores **four** collapsible messages
+per device, one per collapse key, and tracker's collapse key is per `(device, Place)` - so a phone
+that has been off the network past four distinct device-and-Place pairs has lost the rest. The
+surplus is recorded as its own outcome and **never asserts which** of the pending messages the backend
+discarded, because the backend does not say.
+
+**Where to read it.** Each outcome is one structured log record with the message
+`push.delivery.outcome`, carrying the provider, the collapse key and the crossing's
+`device_id`/`place_id`/`transition`/`ts`. No coordinate, ever - the same boundary the push itself
+holds. Grep the deployment's log for it:
+
+```bash
+docker compose logs tracker | grep push.delivery.outcome
+```
+
+**Two properties worth stating.** The pending-key accounting is **process state** - no schema, no
+migration - so a restart forgets it, and a later crossing is then reported `handed-over` where an
+unrestarted server would have said `beyond-collapse-bound`. That direction of loss is permitted: it
+moves toward knowing less, never toward a delivery claim. And an endpoint that **re-presents itself
+through registration** is treated as having nothing pending, because a registration is the only
+evidence tracker ever gets that the receiving app has run.
+
+**None of this filters the record.** `GET /v1/geofence-events` returns every crossing unchanged
+whatever its delivery outcome was. The crossing log is the record; the push is a best-effort
+notification about it.
 
 ---
 
