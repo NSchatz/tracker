@@ -1,5 +1,11 @@
 // Refuter artifact for S0010-tracker-server-1, impl gate ordinal 2, finding F5.
 //
+// ADOPTED AS A PERMANENT REGRESSION TEST in the fix loop that closed F5. The test body and the
+// function name are the gate's own, verbatim, so its re-run command works unchanged; everything the
+// comment below describes in the present tense is the defect as it STOOD, and `poll` now decides its
+// batch against the cursor the poll began with. Restore the old predicate and this test fails again -
+// which is the negative control that was run, and the reason it stays in the suite.
+//
 // AC15: "WHEN a fresh stream connection is opened (no resume cursor), THE SYSTEM SHALL deliver an
 // initial snapshot containing every device in the family, each carrying the presentation value
 // computed at delivery time: one `position` event per device holding a fix, one `presentation`
