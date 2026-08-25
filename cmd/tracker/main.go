@@ -35,6 +35,7 @@ import (
 	"github.com/NSchatz/tracker/internal/auth"
 	"github.com/NSchatz/tracker/internal/config"
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/NSchatz/tracker/internal/presentation"
 	"github.com/NSchatz/tracker/internal/push"
 	"github.com/NSchatz/tracker/internal/retention"
 	"github.com/NSchatz/tracker/internal/secretscan"
@@ -110,6 +111,10 @@ func runServe() error {
 
 	logger := newLogger(cfg.LogLevel)
 	logger.Info("starting", "addr", cfg.Addr, "database", cfg.Redacted())
+	// Which presentation windows this instance applies, in seconds and under the variable names an
+	// operator would set. Logged unconditionally, defaults included: "I set nothing" and "I set 120"
+	// must be equally answerable from the log of a running container.
+	cfg.LogEffectiveWindows(logger)
 
 	// Signals cancel the root context, which unwinds everything below.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -165,8 +170,11 @@ func runServe() error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           server.New(pool, notifier, logger),
+		Addr: cfg.Addr,
+		Handler: server.New(pool, notifier, presentation.Windows{
+			LiveSeconds:  cfg.LiveWindowSeconds,
+			StaleSeconds: cfg.StaleWindowSeconds,
+		}, logger),
 		ReadHeaderTimeout: 10 * time.Second,
 		// TLS 1.2 floor (roadmap §7: TLS 1.3 preferred, 1.2 fallback). Harmless when the server runs
 		// plaintext — it only takes effect on the TLS path below.

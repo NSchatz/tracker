@@ -14,6 +14,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -77,7 +79,38 @@ type Config struct {
 	// a window nobody chose would be worse than keeping it, so purging is opt-in with a number the
 	// operator sets, not a guess the server makes.
 	RetentionDays int
+
+	// LiveWindowSeconds and StaleWindowSeconds are the two age thresholds that turn "how long ago did
+	// this phone last reach us" into the single presentation value every read surface publishes
+	// (SPEC.md, "Presentation state"). A device whose age is at or under LiveWindowSeconds is `live`,
+	// past it and at or under StaleWindowSeconds is `recent`, past that is `stale`.
+	//
+	// They are SECONDS, held as int64 rather than a time.Duration on purpose: the documented
+	// representable range is 1..2^63-1 SECONDS, which a nanosecond-based Duration cannot hold (it tops
+	// out near 292 years). Every number in this file, in the start-up log and in every error below is
+	// seconds, so there is no unit to lose in a conversion.
+	//
+	// The pair is validated together (LiveWindowSeconds strictly less than StaleWindowSeconds): if it
+	// were not, no device could ever be `recent` and a whole documented state would be silently
+	// unreachable — the class of silent-wrong-default this package refuses.
+	LiveWindowSeconds  int64
+	StaleWindowSeconds int64
 }
+
+// The presentation windows' environment variables and their defaults, in SECONDS.
+//
+// The defaults are the ones SPEC.md publishes: two minutes of "live" and fifteen minutes before a
+// device is called `stale`. Unlike the DSN these have a safe default, so an unset (or empty, or
+// whitespace-only) variable is NOT a refusal — it is the default. A PRESENT but unparseable value
+// still is a refusal: an operator who typed `TRACKER_LIVE_WINDOW_SECONDS=2m` meant a window, and
+// quietly serving 120 instead would be the silent-wrong-default the fail-safe forbids.
+const (
+	EnvLiveWindowSeconds  = EnvPrefix + "LIVE_WINDOW_SECONDS"
+	EnvStaleWindowSeconds = EnvPrefix + "STALE_WINDOW_SECONDS"
+
+	DefaultLiveWindowSeconds  int64 = 120
+	DefaultStaleWindowSeconds int64 = 900
+)
 
 // Push backend identifiers. These match internal/store's push_provider values and internal/push's
 // senders; a config that names a backend the deployment cannot build is refused at Load, not
@@ -111,6 +144,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	liveWindow, err := envWindowSeconds(EnvLiveWindowSeconds, DefaultLiveWindowSeconds)
+	if err != nil {
+		return nil, err
+	}
+	staleWindow, err := envWindowSeconds(EnvStaleWindowSeconds, DefaultStaleWindowSeconds)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
 		DatabaseURL:        dsn,
 		Addr:               envOr(EnvPrefix+"ADDR", ":8080"),
@@ -122,6 +164,8 @@ func Load() (*Config, error) {
 		TLSKeyFile:         strings.TrimSpace(os.Getenv(EnvPrefix + "TLS_KEY_FILE")),
 		AllowPlaintext:     envBool(EnvPrefix + "ALLOW_PLAINTEXT"),
 		RetentionDays:      retentionDays,
+		LiveWindowSeconds:  liveWindow,
+		StaleWindowSeconds: staleWindow,
 	}
 
 	if err := c.validate(); err != nil {
@@ -192,7 +236,35 @@ func (c *Config) validate() error {
 	if c.RetentionDays < 0 {
 		return fmt.Errorf("%sRETENTION_DAYS %d is negative; use 0 to keep history forever or a positive number of days", EnvPrefix, c.RetentionDays)
 	}
+
+	// The window ORDER is checked on the EFFECTIVE pair — whatever each variable resolved to, set or
+	// defaulted — because that is the pair the server would actually apply. Setting only
+	// TRACKER_STALE_WINDOW_SECONDS=60 is the worked case: the effective pair is (120, 60), no device
+	// could ever be `recent`, and refusing here is the difference between an operator learning that at
+	// boot and a family's map quietly never showing one of its four documented states.
+	if c.LiveWindowSeconds >= c.StaleWindowSeconds {
+		return fmt.Errorf("%s (%d seconds) must be strictly less than %s (%d seconds); with these effective "+
+			"values no device could ever be `recent`",
+			EnvLiveWindowSeconds, c.LiveWindowSeconds, EnvStaleWindowSeconds, c.StaleWindowSeconds)
+	}
 	return nil
+}
+
+// LogEffectiveWindows records the presentation windows the process will actually apply, in seconds and
+// under the variable names an operator would set — so "which windows is this instance running?" is
+// answerable from `docker logs` without guessing whether a variable was picked up.
+//
+// It is a method here rather than a line in main so that WHAT gets logged is testable: the values are
+// only useful if they are the effective ones (defaults included), and a start-up log nobody asserts is
+// a start-up log that drifts.
+func (c *Config) LogEffectiveWindows(logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	logger.Info("presentation windows",
+		EnvLiveWindowSeconds, c.LiveWindowSeconds,
+		EnvStaleWindowSeconds, c.StaleWindowSeconds,
+		"unit", "seconds")
 }
 
 // ErrTLSRequired is the server start-up refusal when neither a TLS certificate/key pair nor the
@@ -270,6 +342,43 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+// envWindowSeconds reads one presentation window under the grammar SPEC.md publishes, or refuses.
+//
+// The grammar is deliberately narrow, and the narrowness is the point: a base-10 whole number of
+// SECONDS, no unit suffix and no fractional part, in the representable range 1..2^63-1.
+//
+//   - EMPTINESS IS MEASURED AFTER THE TRIM. Unset, empty, and whitespace-only are ONE case — NOT
+//     CONFIGURED — and not configured means the default. A rendered compose file with an unset shell
+//     default hands the process an empty string, and refusing to boot over that would make an
+//     untouched deployment un-startable.
+//   - Anything else that is present is validated, never coerced. `2m` and `120s` are the tempting
+//     ones: a duration string is a reasonable thing for an operator to type and it is NOT this
+//     grammar, so it is a loud refusal naming the variable rather than a silent 0 or 2.
+//   - `99999999999999999999` is whole and positive but outside the representable range. ParseInt
+//     reports that as its own error, which is why the range needs no separate check: the alternative
+//     is silent truncation to 2^63-1, a window nobody asked for.
+func envWindowSeconds(key string, def int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, fmt.Errorf("%s %q is outside the representable range: a window is a whole number of "+
+				"seconds from 1 to %d", key, raw, int64(math.MaxInt64))
+		}
+		return 0, fmt.Errorf("%s %q is not a whole number of seconds: write the number of SECONDS in "+
+			"base 10, with no unit suffix and no fractional part (e.g. %d), or leave it unset for the default",
+			key, raw, def)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("%s %d is not positive: a window is a whole number of seconds from 1 to %d",
+			key, n, int64(math.MaxInt64))
+	}
+	return n, nil
 }
 
 // envInt reads an integer with a default when unset/blank. A present-but-unparseable value is a

@@ -39,6 +39,11 @@ leaves a place you have defined.
 > local server that enforces the same idempotency contract) and the rest is an **operator check on a
 > real device**, written down in [`android/README.md`](android/README.md) rather than faked with a
 > passing test.
+> As of **S0010** every device a viewer reads carries a **server-computed presentation state** —
+> `no-position` | `live` | `recent` | `stale` — on `GET /v1/positions`, on the SSE stream and on the
+> map, and `/v1/positions` now lists **every device in the family** rather than only the ones that
+> have reported. So *"this phone has never been set up"* is finally distinguishable from *"this phone
+> went quiet an hour ago"*, and no browser derives liveness from a clock the server does not control.
 > It is not a finished tracker, and this README will say so until it is. The wire contract is in
 > [`SPEC.md`](SPEC.md); the plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 
@@ -165,7 +170,10 @@ A **viewer** reads a family's location back over three poll-able routes, each re
 bearer token and each scoped to that viewer's own family. The full contract is [`SPEC.md`](SPEC.md);
 the essentials:
 
-- **`GET /v1/positions`** — the latest fix per device in the family, ordered by device name.
+- **`GET /v1/positions`** — **every device** in the family, in one total order, each carrying exactly
+  one **presentation state** (`no-position` | `live` | `recent` | `stale`). A device holding a fix
+  carries its latest one plus `presentation` and `last_contact_at`; a device that has never reported
+  (or whose fixes have all been purged) is a three-key entry with **no coordinate at all**.
 - **`GET /v1/devices/{id}/history`** — one device's fixes, newest first, within an optional
   `from`/`to` window, paginated with `limit`/`offset`.
 - **`GET /v1/near?lat=&lon=&m=`** — the family's fixes within `m` **metres** of a point, nearest
@@ -183,18 +191,59 @@ Two properties are load-bearing and each is pinned by the authz-matrix tests:
 > These routes answer a one-shot request. For a **live** map that pushes updates without polling,
 > see the SSE stream below (S4).
 
+### Is this phone off, or has it never been set up? (presentation state)
+
+A viewer could not previously tell *"this phone has never checked in"* — a setup problem — from
+*"this phone stopped checking in an hour ago"* — a liveness problem, and the only one worth worrying
+about. Both rendered as an absence: the read API omitted a device holding no fix, and the map drew no
+marker for it. So every device now carries one **server-computed** presentation value on every
+surface a viewer reads.
+
+Four properties are load-bearing, and each is pinned by a test:
+
+- **The server computes it; no client re-derives it.** A browser whose clock is hours off must still
+  render what the server sent. That is why the value rides the wire instead of a timestamp a page
+  compares against `Date.now()`.
+- **Age is `now - max(received_at)` across ALL the device's fixes, never the current position's own
+  arrival.** They differ exactly when a fix arrived that did not become the current position — an
+  offline backlog flush, or a phone whose clock runs fast — and in both cases the device is plainly
+  alive while the row on display is old. The aggregate rides the wire as `last_contact_at`, beside
+  and distinct from the unchanged `received_at`.
+- **A device that has never reported is never `stale`.** The ordered test terminates at "holds no
+  fix", so no age comparison is ever made for it, however long ago it was enrolled. The same step is
+  what makes a device whose last fix retention purging deleted become `no-position` from that
+  instant — on both surfaces at once, so an open map takes the marker down rather than leaving it
+  where the server no longer has anything.
+- **`0,0` is unrepresentable for an unlocated device, not merely unused.** Its entry is exactly
+  `{device_id, device_name, presentation}` — no `lat`, `lon`, `ts`, `received_at` or
+  `last_contact_at`, and no zeros. Null Island is a real place off the coast of Ghana and a family
+  map must not be able to plot a phone there because a struct field defaulted.
+
+The windows are `TRACKER_LIVE_WINDOW_SECONDS` / `TRACKER_STALE_WINDOW_SECONDS` (below). The full
+contract — token spellings, the ordered test, boundary inclusivity, the wire shapes and the stream's
+three event types — is [`SPEC.md`](SPEC.md).
+
 ## Watching the live map (S4)
 
 A **viewer** watches the family move in real time over one long-lived connection, instead of polling.
 
-- **`GET /v1/stream`** — a **Server-Sent Events** feed of the family's **position updates**. On
-  connect it sends the current position of every device (the snapshot that paints the map), then
-  pushes each device's new position as it arrives. Every event carries an `id` (the fix's receive
-  time, in microseconds).
+- **`GET /v1/stream`** — a **Server-Sent Events** feed of the family's **position updates and
+  presentation state**. On connect it describes every device in the family (a `position` event for
+  each one holding a fix, a `presentation` event carrying the three-key unlocated entry for each one
+  holding none), then pushes changes as they happen. There are exactly **three** event types —
+  `position`, `presentation`, `error` — and **only `position` carries an `id`**, so a consumer that
+  handles only `position` events sees exactly the event set it saw before presentation state existed,
+  with unchanged ids and unchanged resume.
 - **`GET /map`** — a minimal, server-served **Leaflet** page that consumes the stream: paste a viewer
   token and watch markers move. It loads Leaflet **from tracker itself** (vendored under `/static`),
   never a third-party CDN — a self-hosted privacy product should not tell someone else's server who is
-  watching. (Map *tiles* still come from OpenStreetMap; markers render and move without them.)
+  watching. (Map *tiles* still come from OpenStreetMap; markers render and move without them.) It
+  labels every device with the state word the server sent, lists the ones that are present but not
+  located, and reports connection health as a **separate axis** from device state: a dropped stream
+  or an `error` event marks every state *unconfirmed* rather than freezing a green map, and the
+  server **re-states the whole family** on the first successful read after an outage, so health can
+  get better again and not only worse. The procedure that confirms what a browser actually renders,
+  and the record of what was seen, are in [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md).
 
 Two properties are load-bearing, each pinned by a test:
 
@@ -331,6 +380,8 @@ a password, and keeping it on the environment means there is no config artefact 
 | `TRACKER_TLS_KEY_FILE` | for TLS | *none* | PEM private key (a secret — mounted, never committed) |
 | `TRACKER_ALLOW_PLAINTEXT` | no | *unset* | `1` to run **without** TLS (dev, or behind a TLS-terminating proxy). Required if no cert/key is set, or the server refuses to start |
 | `TRACKER_RETENTION_DAYS` | no | `0` | drop `fixes` older than this many days on a daily timer; `0` = keep forever (no purge) |
+| `TRACKER_LIVE_WINDOW_SECONDS` | no | `120` | at or under this age a device is `live` (whole **seconds**, no unit suffix) |
+| `TRACKER_STALE_WINDOW_SECONDS` | no | `900` | past this age a device is `stale` (whole **seconds**); must be strictly greater than the live window |
 | `TRACKER_PUSH_PROVIDER` | no | *disabled* | `fcm` \| `unifiedpush` — the S6 push backend; unset = no push |
 | `TRACKER_FCM_PROJECT_ID` | when `fcm` | *none* | the Firebase project id the FCM v1 endpoint is scoped to |
 | `TRACKER_FCM_CREDENTIALS_FILE` | when `fcm` | *none* | path to the Google service-account JSON key (mounted, never committed) |
@@ -346,6 +397,16 @@ pair (cert without key, or vice versa) is refused too — that is a deploy that 
 and is not. `tracker config-lint` is stricter than start-up: it fails on **any** plaintext endpoint
 (`ALLOW_PLAINTEXT` does not satisfy it) and additionally scans the repo for checked-in secrets, so a
 production config cannot ship plaintext by inheriting the dev default.
+
+**The presentation windows are seconds, and empty means the default.** Unset, empty and
+whitespace-only are one case - not configured - and not configured is `120` / `900`, because a
+rendered compose file with an unset shell default hands the process an empty string and refusing to
+boot over a value nobody typed would be the wrong answer to it. A value somebody *did* type and got
+wrong is a refusal: `2m`, `120s`, `1.5`, `abc`, `0`, `-5` and anything outside 1..2^63-1 seconds all
+refuse to start, naming the variable. Each defaults independently and the ordering is checked on the
+**effective** pair, so setting only `TRACKER_STALE_WINDOW_SECONDS=60` gives (120, 60) and refuses -
+no device could ever be `recent`. A successful start logs both effective values under their variable
+names.
 
 **Push is disabled unless a backend is named**, and a named backend that is missing what it needs to send
 also refuses to start — `TRACKER_PUSH_PROVIDER=fcm` without a project id and a credentials file is a
@@ -447,7 +508,13 @@ Things that are true today and are not hidden:
   wants where everyone is now — but it means the stream is not a lossless replay of every fix; the
   full trail is `GET /v1/devices/{id}/history`. The stream polls the database on a short interval
   rather than being pushed from ingestion, which keeps it stateless across replicas at the cost of up
-  to that interval of latency.
+  to that interval of latency. The interval is one second, and half a second under the two tightest
+  legal window pairs, so a time-driven transition always lands inside its announcement bound.
+- **An empty family is not told when an outage ends.** After an `error` event the server re-states
+  the family on its first successful read, which is what clears a map's *unconfirmed* marks. A family
+  with **no devices at all** has nothing to re-state and the wire contract has no fourth event type
+  to carry an "all clear", so that one page keeps its interruption notice until the viewer
+  reconnects. Named rather than hidden; a fourth event type is the fix, and it is not this change.
 - **A stream position update can be delayed by one fix under a rare write race.** The stream's cursor
   is `received_at`; if two fixes for a family commit out of `received_at` order within one poll
   interval, the later-committing one can be skipped until that device's *next* fix re-establishes it.

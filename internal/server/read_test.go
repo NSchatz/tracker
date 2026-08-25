@@ -289,20 +289,26 @@ func readAuthzMatrix(t *testing.T, h *harness) {
 	})
 }
 
-// positionsQuery pins GET /v1/positions' query: the newest fix per device in one family, ordered by
-// name, and nobody else's — asserted directly against the store on the shared container.
+// positionsQuery pins the query behind GET /v1/positions — now store.FamilyDeviceStates, which
+// enumerates DEVICES rather than fixes: which fix is current (the newest by the device's `ts`), that
+// the server's receive-time rides along, that a device holding no fix still produces a row, and that
+// no other family's device or fix can ever appear. Asserted directly against the store on the shared
+// container.
 func positionsQuery(t *testing.T, h *harness) {
 	ctx := context.Background()
 	familyID, d1 := h.makeFamilyWithDevice(t, "alice")
 	base := time.Now().Truncate(time.Second).Add(-time.Hour) // inside the ingest window
 
-	t.Run("an empty family has no positions", func(t *testing.T) {
-		got, err := store.LatestPositions(ctx, h.pool, familyID)
+	t.Run("a device with no fixes still appears, with neither half", func(t *testing.T) {
+		got, err := store.FamilyDeviceStates(ctx, h.pool, familyID)
 		if err != nil {
-			t.Fatalf("LatestPositions: %v", err)
+			t.Fatalf("FamilyDeviceStates: %v", err)
 		}
-		if len(got) != 0 {
-			t.Fatalf("empty family returned %d positions, want 0", len(got))
+		if len(got) != 1 {
+			t.Fatalf("got %d device states, want 1 (the device exists; it has just never reported)", len(got))
+		}
+		if got[0].Current != nil || got[0].LastContact != nil {
+			t.Fatalf("a never-reported device came back with a position or a last contact: %+v", got[0])
 		}
 	})
 
@@ -311,26 +317,29 @@ func positionsQuery(t *testing.T, h *harness) {
 	h.ingest(t, d1, base.Add(2*time.Minute), 12.4964, 41.9028)
 	h.ingest(t, d1, base.Add(time.Minute), 12.2, 41.2)
 
-	t.Run("the latest fix per device wins", func(t *testing.T) {
-		got, err := store.LatestPositions(ctx, h.pool, familyID)
+	t.Run("the latest fix by ts is the current position", func(t *testing.T) {
+		got, err := store.FamilyDeviceStates(ctx, h.pool, familyID)
 		if err != nil {
-			t.Fatalf("LatestPositions: %v", err)
+			t.Fatalf("FamilyDeviceStates: %v", err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("got %d positions, want 1", len(got))
+		if len(got) != 1 || got[0].Current == nil {
+			t.Fatalf("got %+v, want one device with a current position", got)
 		}
-		if !got[0].TS.Equal(base.Add(2 * time.Minute)) {
-			t.Fatalf("latest ts = %s, want the newest fix %s", got[0].TS, base.Add(2*time.Minute))
+		if !got[0].Current.TS.Equal(base.Add(2 * time.Minute)) {
+			t.Fatalf("current ts = %s, want the newest fix %s", got[0].Current.TS, base.Add(2*time.Minute))
 		}
-		if got[0].Lon < 12.49 || got[0].Lon > 12.50 {
-			t.Fatalf("latest lon = %v, want ~12.4964 (axis order survived)", got[0].Lon)
+		if got[0].Current.Lon < 12.49 || got[0].Current.Lon > 12.50 {
+			t.Fatalf("current lon = %v, want ~12.4964 (axis order survived)", got[0].Current.Lon)
 		}
-		if got[0].ReceivedAt.IsZero() {
+		if got[0].Current.ReceivedAt.IsZero() {
 			t.Fatal("received_at is zero; the server's receive-time must ride along")
+		}
+		if got[0].LastContact == nil || got[0].LastContact.IsZero() {
+			t.Fatal("last contact is absent; a device holding fixes has a max(received_at)")
 		}
 	})
 
-	// A second device in the SAME family, named to sort AFTER "alice-phone".
+	// A second device in the SAME family.
 	zhash := sha256.Sum256([]byte(t.Name() + "/zack"))
 	d2, err := store.CreateDevice(ctx, h.pool, familyID, "zack-phone", zhash[:])
 	if err != nil {
@@ -338,13 +347,20 @@ func positionsQuery(t *testing.T, h *harness) {
 	}
 	h.ingest(t, d2, base, 12.5, 41.5)
 
-	t.Run("positions are ordered by device name", func(t *testing.T) {
-		got, err := store.LatestPositions(ctx, h.pool, familyID)
+	t.Run("every device in the family comes back", func(t *testing.T) {
+		got, err := store.FamilyDeviceStates(ctx, h.pool, familyID)
 		if err != nil {
-			t.Fatalf("LatestPositions: %v", err)
+			t.Fatalf("FamilyDeviceStates: %v", err)
 		}
-		if len(got) != 2 || got[0].DeviceName != "alice-phone" || got[1].DeviceName != "zack-phone" {
-			t.Fatalf("positions not ordered by name: %+v", got)
+		if len(got) != 2 {
+			t.Fatalf("got %d device states, want 2", len(got))
+		}
+		ids := map[string]bool{}
+		for _, s := range got {
+			ids[s.DeviceID] = true
+		}
+		if !ids[d1] || !ids[d2] {
+			t.Fatalf("device states %+v do not cover both devices", got)
 		}
 	})
 
@@ -352,24 +368,24 @@ func positionsQuery(t *testing.T, h *harness) {
 		otherFamily, other := h.makeFamilyWithDevice(t, "intruder")
 		h.ingest(t, other, base, 12.9, 41.9)
 
-		got, err := store.LatestPositions(ctx, h.pool, familyID)
+		got, err := store.FamilyDeviceStates(ctx, h.pool, familyID)
 		if err != nil {
-			t.Fatalf("LatestPositions: %v", err)
+			t.Fatalf("FamilyDeviceStates: %v", err)
 		}
 		if len(got) != 2 {
-			t.Fatalf("another family got a fix and this family now reports %d positions, want 2 — scope leaked", len(got))
+			t.Fatalf("another family got a device and this family now reports %d states, want 2 — scope leaked", len(got))
 		}
-		for _, p := range got {
-			if p.DeviceID == other {
-				t.Fatal("another family's device appeared in this family's positions")
+		for _, s := range got {
+			if s.DeviceID == other {
+				t.Fatal("another family's device appeared in this family's device states")
 			}
 		}
-		otherGot, err := store.LatestPositions(ctx, h.pool, otherFamily)
+		otherGot, err := store.FamilyDeviceStates(ctx, h.pool, otherFamily)
 		if err != nil {
-			t.Fatalf("LatestPositions(other): %v", err)
+			t.Fatalf("FamilyDeviceStates(other): %v", err)
 		}
 		if len(otherGot) != 1 || otherGot[0].DeviceID != other {
-			t.Fatalf("the other family sees %d positions, want exactly its own device", len(otherGot))
+			t.Fatalf("the other family sees %d states, want exactly its own device", len(otherGot))
 		}
 	})
 }

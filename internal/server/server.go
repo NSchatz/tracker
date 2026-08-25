@@ -19,6 +19,7 @@ import (
 
 	"github.com/NSchatz/tracker/internal/auth"
 	"github.com/NSchatz/tracker/internal/db"
+	"github.com/NSchatz/tracker/internal/presentation"
 	"github.com/NSchatz/tracker/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -69,7 +70,12 @@ const maxBodyBytes = 64 << 10
 // New builds the HTTP handler. notifier delivers S6 push alerts for the crossings ingestion records;
 // a nil notifier means push is disabled (a no-op is substituted), so a deployment without a push
 // backend still ingests, evaluates and serves the event log — it just sends no alerts.
-func New(database DB, notifier Notifier, logger *slog.Logger) http.Handler {
+//
+// windows are the presentation windows every read surface evaluates against. They are a PARAMETER
+// rather than a package default so that no route can quietly fall back to 120/900 while the operator
+// believes they configured something else: a caller has to say which windows this handler applies,
+// and config.Load is the only thing that decides what they are.
+func New(database DB, notifier Notifier, windows presentation.Windows, logger *slog.Logger) http.Handler {
 	if notifier == nil {
 		notifier = noopNotifier{}
 	}
@@ -101,7 +107,7 @@ func New(database DB, notifier Notifier, logger *slog.Logger) http.Handler {
 	// an empty result is [], and another family's data never leaves this boundary.
 	r.Group(func(r chi.Router) {
 		r.Use(requireViewer(database, logger))
-		r.Get("/v1/positions", getPositions(database, logger))
+		r.Get("/v1/positions", getPositions(database, windows, logger))
 		r.Get("/v1/devices/{id}/history", getDeviceHistory(database, logger))
 		r.Get("/v1/near", getNear(database, logger))
 
@@ -124,7 +130,7 @@ func New(database DB, notifier Notifier, logger *slog.Logger) http.Handler {
 	// in the query string (see getStream / SPEC.md). /map and /static are the minimal Leaflet page and
 	// its vendored assets — a static shell that carries no family data itself; the data behind it is
 	// still the authenticated stream.
-	r.Get("/v1/stream", getStream(database, logger))
+	r.Get("/v1/stream", getStream(database, windows, logger))
 	r.Get("/map", serveMapPage(logger))
 	r.Handle("/static/*", mapAssets())
 

@@ -12,7 +12,6 @@ package server_test
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -164,90 +163,87 @@ func TestStreamSSE(t *testing.T) {
 	t.Run("auth: query token works, no/unknown/device token is 401", func(t *testing.T) {
 		streamAuth(t, h, srv)
 	})
-	t.Run("PositionsSince: exclusive cursor, received_at order, family scope", func(t *testing.T) {
-		positionsSinceQuery(t, h)
+	t.Run("last contact as of an instant: the resume sweep's referent, family-scoped", func(t *testing.T) {
+		lastContactAsOfQuery(t, h)
 	})
 }
 
-// positionsSinceQuery pins the stream's cursor query directly against the store: `since` is
-// exclusive, results are ordered by received_at ascending (the property that makes received_at a
-// resumable id), and another family's fixes never appear.
-func positionsSinceQuery(t *testing.T, h *harness) {
+// lastContactAsOfQuery pins store.FamilyLastContactAsOf, the query the resume sweep's referent is
+// computed from, directly against the store.
+//
+// It replaces the old store.PositionsSince probe. That cursor query is GONE: one statement
+// (store.FamilyDeviceStates) now serves both GET /v1/positions and the stream, because a query driven
+// by the fixes table cannot enumerate a device that has none. The cursor properties the old probe
+// pinned — an exclusive boundary, arrival order, no cross-family bleed — are asserted end to end by
+// streamContract and streamResume above, through the real handler. What has no other store-level
+// probe is this query, and it carries the new disclosure risk: an aggregate over another family's
+// arrival times would be a leak, and "no fix at or before the instant" must be an ABSENT key rather
+// than a zero time, because that absence is exactly what the sweep reads as "this client was never
+// told anything about this device".
+func lastContactAsOfQuery(t *testing.T, h *harness) {
 	ctx := context.Background()
-	familyID, d1 := h.makeFamilyWithDevice(t, "since-1")
+	familyID, d1 := h.makeFamilyWithDevice(t, "asof-1")
 	base := time.Now().Truncate(time.Second).Add(-time.Hour) // inside the ingest window
 
-	var zero time.Time
-	if got, err := store.PositionsSince(ctx, h.pool, familyID, zero); err != nil {
-		t.Fatalf("PositionsSince(empty family): %v", err)
+	// No fixes yet: the device is absent from the map entirely, not present with a zero time.
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, time.Now()); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(no fixes): %v", err)
 	} else if len(got) != 0 {
-		t.Fatalf("empty family returned %d positions, want 0", len(got))
+		t.Fatalf("a family whose devices have never reported returned %d entries, want 0", len(got))
 	}
 
 	h.ingest(t, d1, base, 12.4964, 41.9028)
-
-	// Read back the row's received_at so we can probe the cursor boundary exactly.
 	var recv1 time.Time
 	if err := h.pool.QueryRow(ctx, `SELECT received_at FROM fixes WHERE device_id = $1`, d1).Scan(&recv1); err != nil {
 		t.Fatalf("read received_at: %v", err)
 	}
 
-	// since == the row's own received_at → excluded (the cursor is exclusive, so re-passing the last
-	// id never re-delivers the row that produced it).
-	if got, err := store.PositionsSince(ctx, h.pool, familyID, recv1); err != nil {
-		t.Fatalf("PositionsSince(== received_at): %v", err)
-	} else if len(got) != 0 {
-		t.Fatalf("an exclusive cursor at the row's own received_at returned %d rows, want 0", len(got))
+	// The bound is INCLUSIVE: a fix that arrived exactly at the instant had arrived by then.
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, recv1); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(== received_at): %v", err)
+	} else if last, ok := got[d1]; !ok || !last.Equal(recv1) {
+		t.Fatalf("as of the fix's own arrival the map is %+v, want the device at %s", got, recv1)
 	}
-	// since just before it → included.
-	if got, err := store.PositionsSince(ctx, h.pool, familyID, recv1.Add(-time.Microsecond)); err != nil {
-		t.Fatalf("PositionsSince(< received_at): %v", err)
-	} else if len(got) != 1 || got[0].DeviceID != d1 {
-		t.Fatalf("cursor just before the row returned %+v, want exactly device d1", got)
-	}
-
-	// A second device, ingested later, must sort AFTER d1 by received_at (not by name or id). The
-	// sleep guarantees a distinct, later received_at so the ordering assertion is not a coin flip.
-	time.Sleep(3 * time.Millisecond)
-	d2hash := sha256.Sum256([]byte(t.Name() + "/since-2"))
-	d2, err := store.CreateDevice(ctx, h.pool, familyID, "since-2-phone", d2hash[:])
-	if err != nil {
-		t.Fatalf("CreateDevice d2: %v", err)
-	}
-	h.ingest(t, d2, base.Add(time.Minute), 9.19, 45.4642)
-
-	got, err := store.PositionsSince(ctx, h.pool, familyID, zero)
-	if err != nil {
-		t.Fatalf("PositionsSince(both): %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d positions, want 2", len(got))
-	}
-	if got[0].DeviceID != d1 || got[1].DeviceID != d2 {
-		t.Fatalf("positions not ordered by received_at ascending: %s then %s, want d1 then d2", got[0].DeviceID, got[1].DeviceID)
-	}
-	if got[0].ReceivedAt.After(got[1].ReceivedAt) {
-		t.Fatalf("received_at not non-decreasing: %s then %s", got[0].ReceivedAt, got[1].ReceivedAt)
+	// A microsecond earlier it had not arrived, so the device has NO entry — the absence the sweep
+	// reads as "this device has no cursor-instant value".
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, recv1.Add(-time.Microsecond)); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(< received_at): %v", err)
+	} else if _, ok := got[d1]; ok {
+		t.Fatalf("a fix that had not yet arrived was counted: %+v", got)
 	}
 
-	// Another family's fix never appears in this family's stream cursor.
-	otherFamily, other := h.makeFamilyWithDevice(t, "since-intruder")
+	// A later fix moves the aggregate forward, and the earlier instant still reads the old value —
+	// which is what makes two resumes on one cursor emit the same set however much has happened since.
+	h.ingest(t, d1, base.Add(30*time.Minute), 9.19, 45.4642)
+	var recv2 time.Time
+	if err := h.pool.QueryRow(ctx,
+		`SELECT max(received_at) FROM fixes WHERE device_id = $1`, d1).Scan(&recv2); err != nil {
+		t.Fatalf("read max(received_at): %v", err)
+	}
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, time.Now()); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(now): %v", err)
+	} else if last := got[d1]; !last.Equal(recv2) {
+		t.Fatalf("last contact now = %s, want the NEWEST arrival %s", last, recv2)
+	}
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, recv1); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(as of the first arrival): %v", err)
+	} else if last := got[d1]; !last.Equal(recv1) {
+		t.Fatalf("as of the first arrival last contact = %s, want %s — the aggregate is not as-of", last, recv1)
+	}
+
+	// Another family's arrivals never appear, in either direction.
+	otherFamily, other := h.makeFamilyWithDevice(t, "asof-intruder")
 	h.ingest(t, other, base, 12.9, 41.9)
-	after, err := store.PositionsSince(ctx, h.pool, familyID, zero)
+	after, err := store.FamilyLastContactAsOf(ctx, h.pool, familyID, time.Now())
 	if err != nil {
-		t.Fatalf("PositionsSince(after intruder): %v", err)
+		t.Fatalf("FamilyLastContactAsOf(after intruder): %v", err)
 	}
-	if len(after) != 2 {
-		t.Fatalf("another family's fix leaked into this family's stream: %d positions, want 2", len(after))
+	if _, leaked := after[other]; leaked || len(after) != 1 {
+		t.Fatalf("another family's device appeared in this family's last-contact map: %+v", after)
 	}
-	for _, p := range after {
-		if p.DeviceID == other {
-			t.Fatal("another family's device appeared in this family's stream cursor")
-		}
-	}
-	if got, err := store.PositionsSince(ctx, h.pool, otherFamily, zero); err != nil {
-		t.Fatalf("PositionsSince(other family): %v", err)
-	} else if len(got) != 1 || got[0].DeviceID != other {
+	if got, err := store.FamilyLastContactAsOf(ctx, h.pool, otherFamily, time.Now()); err != nil {
+		t.Fatalf("FamilyLastContactAsOf(other family): %v", err)
+	} else if len(got) != 1 {
 		t.Fatalf("the other family sees %+v, want exactly its own device", got)
 	}
 }
@@ -404,7 +400,7 @@ func streamAuth(t *testing.T, h *harness, srv *httptest.Server) {
 // a stub DB and a one-shot recorder suffice.
 func TestMapPageAndAssets(t *testing.T) {
 	t.Parallel()
-	handler := server.New(stubDB{}, nil, discardLogger())
+	handler := server.New(stubDB{}, nil, defaultWindows, discardLogger())
 
 	t.Run("GET /map is the HTML page", func(t *testing.T) {
 		rec := httptest.NewRecorder()

@@ -1,6 +1,10 @@
 package server
 
-import "time"
+import (
+	"time"
+
+	"github.com/NSchatz/tracker/internal/presentation"
+)
 
 // SetStreamPollInterval lets the SSE tests shrink the stream's database-poll cadence so a
 // reconnect/resume assertion does not wait a production second per poll. It returns a restore func.
@@ -13,3 +17,8 @@ func SetStreamPollInterval(d time.Duration) func() {
 	streamPollInterval = d
 	return func() { streamPollInterval = old }
 }
+
+// StreamPollTick exposes the per-connection poll cadence so a test can assert the property the
+// contract actually needs — that the cadence leaves room INSIDE the sweep bound B for the query that
+// follows it — rather than eyeballing two constants that happen to be equal.
+func StreamPollTick(w presentation.Windows) time.Duration { return streamPollTick(w) }
