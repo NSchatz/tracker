@@ -249,18 +249,31 @@ func (c *streamConn) poll(ctx context.Context) error {
 	// 1. Positions. Every device whose CURRENT position arrived strictly after the cursor, in arrival
 	//    order so the ids stay monotonic. This is the S4 contract untouched — same predicate, same
 	//    id, same ordering — and it is what a `position`-only consumer sees.
+	//
+	//    The BATCH is decided against `since`: the cursor as this poll BEGAN, captured before a single
+	//    event goes out. That is the pre-S0010 predicate exactly — `received_at > $2` in SQL, one
+	//    value, evaluated once per poll — and it has to stay that way, because `received_at` defaults
+	//    to Postgres now(), the TRANSACTION timestamp, so any one statement writing fixes for several
+	//    devices stamps every row with the IDENTICAL instant. Re-testing later rows against a cursor
+	//    already advanced onto that instant silently drops every device but the first of the tie: no
+	//    `position` event (the strictly-after test now fails) and no `presentation` event either
+	//    (snapshotUnlocated speaks only for devices with no fix at all), so the device vanishes from
+	//    the connection until it reports again. See regress_0010_F5_test.go.
 	sortByArrival(states)
+	since := c.since
 	positioned := make(map[string]bool, len(states))
 	for i := range states {
 		s := states[i]
-		if s.Current == nil || !s.Current.ReceivedAt.After(c.since) {
+		if s.Current == nil || !s.Current.ReceivedAt.After(since) {
 			continue
 		}
 		if err := c.writeEvent(eventPosition, s.Current.ReceivedAt.UnixMicro(), entryFor(s, at, c.windows)); err != nil {
 			return err
 		}
 		// Advance the cursor to THIS event's arrival, in step with the id just sent. Rows are in
-		// arrival order, so this is monotonic and a mid-batch disconnect resumes exactly here.
+		// arrival order, so this is monotonic and a mid-batch disconnect resumes exactly here. Ties
+		// leave it on the shared instant once the whole tie has been written, so the next poll
+		// re-delivers none of them.
 		c.since = s.Current.ReceivedAt
 		positioned[s.DeviceID] = true
 	}

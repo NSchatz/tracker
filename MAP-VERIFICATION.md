@@ -386,3 +386,14 @@ PARTITION; this run deleted the rows instead, which leaves the device in the sam
 to (holding no fix) but is not the same SQL. The partition-drop path is covered by the Go test
 `TestStreamPurgeToNoPosition`, which asserts the same unlocated event and the same cross-surface
 identity. Everything else in the table above is a rendered outcome that was read off the page.
+
+**What has changed in the server since the observation, stated rather than left for a reader to
+find.** One further commit touches server code after `eb58f53`: the fix for implementation verdict 2's
+finding F5, which makes `streamConn.poll` decide its batch of `position` events against the cursor as
+the poll BEGAN instead of one advanced mid-loop, so two devices whose current positions share a
+`received_at` microsecond both reach the stream. It changes no wire shape, no event type, no
+presentation value and not one byte of `internal/server/static/map.html`, and every input the fourteen
+rows above were read against is produced the same way it was on the day. Its only visible effect on a
+map is that a device which the tie used to swallow now arrives as an ordinary `position` event, taking
+the AC28(a) branch that was observed here. The rows therefore stand as written; nothing in them was
+re-run, and this paragraph is the disclosure, not a claim of re-observation.
