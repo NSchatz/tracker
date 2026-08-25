@@ -251,8 +251,8 @@ func (c *streamConn) poll(ctx context.Context) error {
 	//    id, same ordering — and it is what a `position`-only consumer sees.
 	//
 	//    The BATCH is decided against `since`: the cursor as this poll BEGAN, captured before a single
-	//    event goes out. That is the pre-S0010 predicate exactly — `received_at > $2` in SQL, one
-	//    value, evaluated once per poll — and it has to stay that way, because `received_at` defaults
+	//    event goes out. That is the pre-S0010 predicate exactly (`received_at > $2` in SQL, one
+	//    value, evaluated once per poll), and it has to stay that way, because `received_at` defaults
 	//    to Postgres now(), the TRANSACTION timestamp, so any one statement writing fixes for several
 	//    devices stamps every row with the IDENTICAL instant. Re-testing later rows against a cursor
 	//    already advanced onto that instant silently drops every device but the first of the tie: no
