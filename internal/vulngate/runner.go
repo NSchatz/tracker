@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // rePinnedVersion is an EXACT govulncheck version: v1.1.4 and the like. `latest`, a branch, a bare
@@ -15,43 +17,81 @@ import (
 // different answer on different days and cannot be reproduced from the tree.
 var rePinnedVersion = regexp.MustCompile(`^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?$`)
 
-// GovulncheckRunner invokes the pinned govulncheck exactly as `make govulncheck` always has:
-// `go run golang.org/x/vuln/cmd/govulncheck@<version> ./...`. The version comes from the Makefile,
-// which is the only place tool versions are pinned in this repo.
+// toolName is the binary `go install` produces for the govulncheck command.
+const toolName = "govulncheck"
+
+// modulePath is the pinned tool, unchanged from what this gate has always run.
+const modulePath = "golang.org/x/vuln/cmd/govulncheck"
+
+// GovulncheckRunner builds the pinned govulncheck and then EXECUTES IT DIRECTLY, rather than through
+// `go run`.
+//
+// That distinction is the whole reason this type exists. `go run pkg@version prog-args` collapses the
+// program's exit status: when the program exits non-zero, `go run` prints "exit status N" on stderr and
+// itself exits 1. govulncheck's statuses are its verdict — 0 is "nothing reachable", 3 is
+// "vulnerabilities found", anything else is "I could not run" — and a gate that cannot tell those apart
+// cannot apply a recorded suppression to the middle one. So the tool is installed to a throwaway GOBIN
+// at its pinned version and invoked as itself, and the status the gate reads is govulncheck's own.
 type GovulncheckRunner struct {
 	Version  string   // exact module version, e.g. "v1.1.4"
 	Patterns []string // package patterns to scan, e.g. ["./..."]
-	Dir      string   // working directory; empty means the process's own
+	Dir      string   // working directory for the scan; empty means the process's own
 }
 
-// Args builds the `go run` argument list, refusing an unpinned version.
-func (r GovulncheckRunner) Args() ([]string, error) {
+// InstallArgs builds the `go install` argument list, refusing an unpinned version.
+func (r GovulncheckRunner) InstallArgs() ([]string, error) {
 	if !rePinnedVersion.MatchString(r.Version) {
 		return nil, fmt.Errorf("govulncheck version %q is not an exact pin (want e.g. v1.1.4); GOVULNCHECK_VERSION is pinned in the Makefile and may move forward, never float", r.Version)
 	}
+	return []string{"install", modulePath + "@" + r.Version}, nil
+}
+
+// ScanArgs is the argument list govulncheck itself is given: the package patterns, nothing else. No
+// -show, no -format, no flag that could narrow or soften what it reports.
+func (r GovulncheckRunner) ScanArgs() ([]string, error) {
 	if len(r.Patterns) == 0 {
 		return nil, errors.New("no package patterns to scan; the gate scans ./... and must never be narrowed to nothing")
 	}
-	args := []string{"run", "golang.org/x/vuln/cmd/govulncheck@" + r.Version}
-	return append(args, r.Patterns...), nil
+	return append([]string(nil), r.Patterns...), nil
 }
 
-// Run executes govulncheck and returns its output and exit status. A process that could not be started
-// at all comes back as an error, never as a clean result.
+// Run executes govulncheck and returns its output and its own exit status. A tool that could not be
+// built or could not be started comes back as an error, never as a clean result.
 func (r GovulncheckRunner) Run(ctx context.Context) (Result, error) {
-	args, err := r.Args()
+	installArgs, err := r.InstallArgs()
+	if err != nil {
+		return Result{}, err
+	}
+	scanArgs, err := r.ScanArgs()
 	if err != nil {
 		return Result{}, err
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "go", args...)
-	cmd.Dir = r.Dir
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Env = os.Environ()
+	binDir, err := os.MkdirTemp("", "vulngate-")
+	if err != nil {
+		return Result{}, fmt.Errorf("making a directory for the pinned govulncheck: %w", err)
+	}
+	defer os.RemoveAll(binDir)
 
-	runErr := cmd.Run()
+	var installOut bytes.Buffer
+	install := exec.CommandContext(ctx, "go", installArgs...)
+	install.Env = append(os.Environ(), "GOBIN="+binDir)
+	install.Stdout = &installOut
+	install.Stderr = &installOut
+	if err := install.Run(); err != nil {
+		return Result{Stderr: installOut.String()},
+			fmt.Errorf("building the pinned govulncheck (`go %s`): %w: %s",
+				strings.Join(installArgs, " "), err, strings.TrimSpace(installOut.String()))
+	}
+
+	var stdout, stderr bytes.Buffer
+	scan := exec.CommandContext(ctx, filepath.Join(binDir, toolName), scanArgs...)
+	scan.Dir = r.Dir
+	scan.Stdout = &stdout
+	scan.Stderr = &stderr
+	scan.Env = os.Environ()
+
+	runErr := scan.Run()
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 
 	var exitErr *exec.ExitError
@@ -62,8 +102,8 @@ func (r GovulncheckRunner) Run(ctx context.Context) (Result, error) {
 		// The tool ran and chose a status. Whether that status is a verdict is the gate's call.
 		res.ExitCode = exitErr.ExitCode()
 	default:
-		// The tool never ran: `go` missing, the context cancelled, the binary unexecutable.
-		return res, fmt.Errorf("running `go %s`: %w", args[0], runErr)
+		// The tool never ran: the binary vanished, the context was cancelled, exec failed.
+		return res, fmt.Errorf("running the pinned govulncheck: %w", runErr)
 	}
 	return res, nil
 }

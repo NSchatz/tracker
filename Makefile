@@ -11,13 +11,15 @@
 STATICCHECK_VERSION ?= 2025.1.1
 GOVULNCHECK_VERSION ?= v1.1.4
 
-# The GO TOOLCHAIN is the one version this repo cannot state only here: CI provisions it
-# (.github/workflows/ci.yml GO_VERSION) and the Dockerfile's builder image bakes it into the
-# shipped binary, and those are different builds. Two copies held in step by hope is how the
-# compiler CI proves things with drifts from the compiler production runs — and because
+# The GO TOOLCHAIN is the one version this repo cannot state only here. CI provisions it
+# (.github/workflows/ci.yml GO_VERSION), the Dockerfile's builder image bakes it into the
+# shipped binary, and go.mod's `toolchain` directive is what a local `go build` downloads —
+# three different builds, so one copy will not do. Copies held in step by hope is how the
+# compiler CI proves things with drifts from the compiler production runs, and because
 # govulncheck scans the standard library of whichever toolchain executes it, that drift
 # surfaces as a vulnerability gate that is green here and red there. internal/toolchain
-# asserts the copies agree; it runs inside `make test`, so `make check` fails on a
+# asserts the copies agree and that go.mod's `go` directive — a LANGUAGE FLOOR, not a pin —
+# never climbs above them; it runs inside `make test`, so `make check` fails on a
 # half-landed bump and names the files that disagree.
 
 # Android client gate (C0). The tasks below ARE the Android half of `make check`: an app

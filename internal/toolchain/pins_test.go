@@ -18,8 +18,8 @@ func TestRepoToolchainPinsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectPins: %v", err)
 	}
-	if len(pins) < 2 {
-		t.Fatalf("found %d toolchain pins (%v); tracker states the Go version in the Dockerfile AND in CI, so fewer than two means the check stopped looking", len(pins), pins)
+	if len(pins) < 3 {
+		t.Fatalf("found %d toolchain pins (%v); tracker states the Go version in the Dockerfile, in CI, and in go.mod's toolchain directive, so fewer than three means the check stopped looking", len(pins), pins)
 	}
 	floor, err := LanguageFloor(repoRoot)
 	if err != nil {
@@ -64,15 +64,15 @@ func TestCollectPinsFindsDockerfileAndWorkflows(t *testing.T) {
 		"Dockerfile":                    "FROM golang:1.25.14-bookworm AS build\nWORKDIR /src\n",
 		".github/workflows/ci.yml":      "env:\n  GO_VERSION: \"1.25.14\"\n",
 		".github/workflows/release.yml": "env:\n  GO_VERSION: '1.25.14'\n",
-		"go.mod":                        "module example.com/x\n\ngo 1.25.12\n",
+		"go.mod":                        "module example.com/x\n\ngo 1.25.12\n\ntoolchain go1.25.14\n",
 	})
 
 	pins, err := CollectPins(root)
 	if err != nil {
 		t.Fatalf("CollectPins: %v", err)
 	}
-	if len(pins) != 3 {
-		t.Fatalf("got %d pins, want 3: %v", len(pins), pins)
+	if len(pins) != 4 {
+		t.Fatalf("got %d pins, want 4: %v", len(pins), pins)
 	}
 	files := map[string]bool{}
 	for _, p := range pins {
@@ -81,7 +81,7 @@ func TestCollectPinsFindsDockerfileAndWorkflows(t *testing.T) {
 			t.Errorf("%s: got version %q, want 1.25.14", p, p.Version)
 		}
 	}
-	for _, want := range []string{"Dockerfile", ".github/workflows/ci.yml", ".github/workflows/release.yml"} {
+	for _, want := range []string{"Dockerfile", ".github/workflows/ci.yml", ".github/workflows/release.yml", "go.mod"} {
 		if !files[want] {
 			t.Errorf("no pin collected from %s", want)
 		}

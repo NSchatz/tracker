@@ -27,10 +27,11 @@ make smoke     # the real compose stack; asserts /healthz answers 200
 and **nowhere else**: restating them in `ci.yml` is how CI silently drifts away from the gate a human
 runs.
 
-The one exception is the **Go toolchain**, which CI provisions (`GO_VERSION` in `ci.yml`) and the
-`Dockerfile` bakes into the shipped binary — different builds, so one copy will not do. `internal/toolchain`
-asserts those two name the same version and that `go.mod`'s `go` directive (a *language floor*) never
-climbs above it. It runs inside `make test`, so a half-landed bump fails `make check` naming the files.
+The one exception is the **Go toolchain**, which CI provisions (`GO_VERSION` in `ci.yml`), the
+`Dockerfile` bakes into the shipped binary, and `go.mod`'s `toolchain` directive gives a local
+`go build` — three different builds, so one copy will not do. `internal/toolchain` asserts all three name
+the same version and that `go.mod`'s `go` directive (a *language floor*) never climbs above it. It runs
+inside `make test`, so a half-landed bump fails `make check` naming the files that disagree.
 
 **`govulncheck` records, it never ignores.** An advisory it reports is either remediated at source — bump
 the module, raise the toolchain to the `Fixed in` version — or written down in

@@ -1,14 +1,14 @@
 // Package toolchain asserts that every file in this repo which PINS THE GO TOOLCHAIN names the same
 // version, and that go.mod's language floor never climbs above it.
 //
-// tracker states the toolchain twice: the `FROM golang:<X>-bookworm` builder in the Dockerfile that
-// compiles the SHIPPED binary, and `GO_VERSION` in the CI workflow that compiles the binary the gate
-// tests. Two copies of a version held in step by hope is exactly how the compiler CI proves things
-// with drifts away from the compiler production runs — and, because govulncheck scans the standard
-// library of whichever toolchain executes it, that drift shows up as a vulnerability gate that is
-// green on one machine and red on another for a reason no diff explains. So the agreement is asserted
-// by a test that fails and names the disagreeing files, never by a comment asking the next person to
-// remember.
+// tracker states the toolchain in three places: the `FROM golang:<X>-bookworm` builder in the
+// Dockerfile that compiles the SHIPPED binary, `GO_VERSION` in the CI workflow that compiles the binary
+// the gate tests, and go.mod's `toolchain` directive, which is what a developer's `go build` downloads
+// and runs. Copies of a version held in step by hope is exactly how the compiler CI proves things with
+// drifts away from the compiler production runs — and, because govulncheck scans the standard library
+// of whichever toolchain executes it, that drift shows up as a vulnerability gate that is green on one
+// machine and red on another for a reason no diff explains. So the agreement is asserted by a test that
+// fails and names the disagreeing files, never by a comment asking the next person to remember.
 //
 // The `go` directive in go.mod is a LANGUAGE FLOOR, not a toolchain pin. It may sit below the pinned
 // toolchain; it may not sit above it, because that would demand a compiler the pinned image does not
@@ -52,8 +52,12 @@ var (
 	// remembers to extend this list.
 	reWorkflowGo = regexp.MustCompile(`^\s*GO_VERSION:\s*["']?(\d+(?:\.\d+){1,2})["']?\s*(?:#.*)?$`)
 
-	// go.mod's language floor: `go 1.25.12`.
+	// go.mod's language floor: `go 1.26.0`.
 	reGoDirective = regexp.MustCompile(`^go\s+(\d+(?:\.\d+){1,2})\s*(?://.*)?$`)
+
+	// go.mod's toolchain directive: `toolchain go1.26.8`. Unlike the `go` directive this IS a
+	// toolchain pin — it is what a local `go build` downloads and runs — so it has to name X too.
+	reToolchainDirective = regexp.MustCompile(`^toolchain\s+go(\d+(?:\.\d+){1,2})\s*(?://.*)?$`)
 )
 
 // CollectPins finds every toolchain pin under root. It is an ERROR to find none: a check that silently
@@ -90,6 +94,14 @@ func CollectPins(root string) ([]Pin, error) {
 		return nil, fmt.Errorf("no workflow under .github/workflows states a GO_VERSION: the toolchain pin check has nothing to compare")
 	}
 	pins = append(pins, workflowPins...)
+
+	// go.mod's `toolchain` directive, when present: the version a local `go build` downloads and runs,
+	// which is a toolchain pin in every sense that matters.
+	toolchainPins, err := scanFile(filepath.Join(root, "go.mod"), "go.mod", "toolchain directive", reToolchainDirective)
+	if err != nil {
+		return nil, err
+	}
+	pins = append(pins, toolchainPins...)
 
 	return pins, nil
 }

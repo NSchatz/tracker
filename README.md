@@ -476,14 +476,15 @@ skipped and never honoured; and any `govulncheck` exit status that is not a verd
 own error, because a tool that could not run has not told you the code is clean. `internal/vulngate`
 enforces that, and its own tests — which run inside `make check` — prove it still turns red on demand.
 
-**The Go toolchain is stated in two files, and they are checked against each other.** CI provisions it
-(`GO_VERSION` in `.github/workflows/ci.yml`) and the `Dockerfile`'s builder image bakes it into the
-shipped binary; those are different builds, so one copy will not do. `internal/toolchain` asserts the two
-name the same version and that `go.mod`'s `go` directive — a *language floor*, not a toolchain pin —
-never climbs above it. It runs inside `make check`, so a half-landed bump fails and names the files that
-disagree, instead of leaving CI to prove things with a compiler production never runs. That matters more
-than it sounds: `govulncheck` scans the standard library of whichever toolchain executes it, so a split
-pin is a vulnerability gate that answers differently depending on where it ran.
+**The Go toolchain is stated in three files, and they are checked against each other.** CI provisions it
+(`GO_VERSION` in `.github/workflows/ci.yml`), the `Dockerfile`'s builder image bakes it into the shipped
+binary, and `go.mod`'s `toolchain` directive is what a local `go build` downloads and runs; those are
+three different builds, so one copy will not do. `internal/toolchain` asserts all three name the same
+version and that `go.mod`'s `go` directive — a *language floor*, not a toolchain pin — never climbs above
+it. It runs inside `make check`, so a half-landed bump fails and names the files that disagree, instead of
+leaving CI to prove things with a compiler production never runs. That matters more than it sounds:
+`govulncheck` scans the standard library of whichever toolchain executes it, so a split pin is a
+vulnerability gate that answers differently depending on where it ran.
 
 ## Known limitations
 

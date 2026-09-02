@@ -1,7 +1,7 @@
 # The ONLY surface that can keep `make check` green in the face of an advisory govulncheck reports.
 #
 # An advisory belongs here ONLY when no fix exists anywhere — not in the module graph, not in a Go
-# patch release. Everything else is remediated at source: bump the implicated module, or raise the Go
+# release. Everything else is remediated at source: bump the implicated module, or raise the Go
 # toolchain to the version govulncheck names in `Fixed in`. A record is not a way to defer that work.
 #
 # The file is a YAML sequence. Each entry is a mapping with EXACTLY these four keys:
@@ -27,5 +27,5 @@
 # internal/vulngate's own tests prove each of those still bites, and they run inside `make check`.
 #
 # Nothing is recorded today: every advisory govulncheck reported against this repo had a fix, and each
-# was taken (Go toolchain 1.25.12 -> 1.25.14, github.com/moby/go-archive v0.2.0 -> v0.3.0).
+# was taken at source.
 []

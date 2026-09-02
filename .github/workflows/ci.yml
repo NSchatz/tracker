@@ -18,11 +18,12 @@ env:
   # both places is how a Makefile bump leaves CI silently running a different tool than a
   # human does.
   #
-  # The Go toolchain is the one version that MUST be stated twice — here and as the
-  # Dockerfile's builder image — because CI and the shipped image are different builds.
-  # internal/toolchain asserts the two agree, inside `make check`, so a half-landed bump
-  # fails loudly instead of leaving CI proving things with a compiler production never runs.
-  GO_VERSION: "1.25.14"
+  # The Go toolchain is the one version that MUST be restated — here, as the Dockerfile's
+  # builder image, and as go.mod's `toolchain` directive — because CI, the shipped image and
+  # a developer's `go build` are three different builds. internal/toolchain asserts they
+  # agree, inside `make check`, so a half-landed bump fails loudly instead of leaving CI to
+  # prove things with a compiler production never runs.
+  GO_VERSION: "1.26.8"
 
 jobs:
   check:
