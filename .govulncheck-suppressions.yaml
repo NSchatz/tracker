@@ -1,0 +1,31 @@
+# The ONLY surface that can keep `make check` green in the face of an advisory govulncheck reports.
+#
+# An advisory belongs here ONLY when no fix exists anywhere — not in the module graph, not in a Go
+# patch release. Everything else is remediated at source: bump the implicated module, or raise the Go
+# toolchain to the version govulncheck names in `Fixed in`. A record is not a way to defer that work.
+#
+# The file is a YAML sequence. Each entry is a mapping with EXACTLY these four keys:
+#
+#   id            the OSV identifier as govulncheck prints it, matching GO-[0-9]{4}-[0-9]+
+#   reason        why no remediation exists today, naming the module or stdlib package and what is
+#                 absent (no fixed release, a fix only in a major version this repo cannot take, ...)
+#   reachability  the symbol and call path govulncheck reports, and the argument for why this repo
+#                 cannot exercise it
+#   recorded      the ISO date (YYYY-MM-DD) the entry was written
+#
+# Enforced by internal/vulngate, which runs as the `govulncheck` step of `make check-go`:
+#
+#   - an advisory that is reported and NOT recorded here fails the gate, naming the id;
+#   - a record whose id the current run does NOT report is STALE and fails the gate, naming the id —
+#     a suppression may not outlive the advisory it was written for;
+#   - a record that is missing a key, carries a key outside the four, has an id that does not match
+#     the pattern, or a date that is not ISO, is MALFORMED and fails the gate naming the entry. It is
+#     never skipped and never honoured;
+#   - this file being absent, or holding an empty sequence, means "no suppressions" and is not an
+#     error. It is also not a way to pass: with no records, every reported advisory is unrecorded.
+#
+# internal/vulngate's own tests prove each of those still bites, and they run inside `make check`.
+#
+# Nothing is recorded today: every advisory govulncheck reported against this repo had a fix, and each
+# was taken (Go toolchain 1.25.12 -> 1.25.14, github.com/moby/go-archive v0.2.0 -> v0.3.0).
+[]

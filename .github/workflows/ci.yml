@@ -17,7 +17,12 @@ env:
   # the gate below is `make check`, so the Makefile owns those versions. Pinning them in
   # both places is how a Makefile bump leaves CI silently running a different tool than a
   # human does.
-  GO_VERSION: "1.25.12"
+  #
+  # The Go toolchain is the one version that MUST be stated twice — here and as the
+  # Dockerfile's builder image — because CI and the shipped image are different builds.
+  # internal/toolchain asserts the two agree, inside `make check`, so a half-landed bump
+  # fails loudly instead of leaving CI proving things with a compiler production never runs.
+  GO_VERSION: "1.25.14"
 
 jobs:
   check:

@@ -27,6 +27,19 @@ make smoke     # the real compose stack; asserts /healthz answers 200
 and **nowhere else**: restating them in `ci.yml` is how CI silently drifts away from the gate a human
 runs.
 
+The one exception is the **Go toolchain**, which CI provisions (`GO_VERSION` in `ci.yml`) and the
+`Dockerfile` bakes into the shipped binary — different builds, so one copy will not do. `internal/toolchain`
+asserts those two name the same version and that `go.mod`'s `go` directive (a *language floor*) never
+climbs above it. It runs inside `make test`, so a half-landed bump fails `make check` naming the files.
+
+**`govulncheck` records, it never ignores.** An advisory it reports is either remediated at source — bump
+the module, raise the toolchain to the `Fixed in` version — or written down in
+`.govulncheck-suppressions.yaml` with `id`, `reason`, `reachability` and `recorded`. That file is the only
+suppression surface there is. Unrecorded fails; a record the current run no longer reports is **stale** and
+fails; a malformed record fails naming the entry; and any `govulncheck` exit status that is not a verdict
+fails with the tool's own error. Do not reach for `|| true`, a `-` prefix, a report-only mode or a floating
+`GOVULNCHECK_VERSION` — `internal/vulngate` and its self-tests exist to make each of those visible.
+
 As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
 (`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable
 Docker daemon (for the PostGIS tests) **and** a JDK 17 + an Android SDK. The Android half resolves the
