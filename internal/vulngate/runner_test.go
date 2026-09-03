@@ -23,10 +23,20 @@ func TestRunnerBuildsThePinnedTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanArgs: %v", err)
 	}
-	// govulncheck is invoked with the scan scope and NOTHING else: no -show, no -format, no flag that
-	// could narrow or soften what it reports.
-	if !reflect.DeepEqual(scan, []string{"./..."}) {
-		t.Errorf("got %v, want [./...]", scan)
+	// govulncheck is invoked with the JSON format and the scan scope, and NOTHING else. `-format json`
+	// is the one flag, and it WIDENS the gate: the stream carries every advisory as a finding, at
+	// whatever depth the tool traced it, where the text report splits them across sections and prints
+	// two of the three only under -show verbose. No -scan, no -mode, no -show: nothing may ask
+	// govulncheck for less than it knows.
+	if !reflect.DeepEqual(scan, []string{"-format", "json", "./..."}) {
+		t.Errorf("got %v, want [-format json ./...]", scan)
+	}
+	for _, narrowing := range []string{"-scan", "-mode", "-show"} {
+		for _, arg := range scan {
+			if arg == narrowing {
+				t.Errorf("the gate passes %s, which can only make govulncheck report less: %v", narrowing, scan)
+			}
+		}
 	}
 }
 

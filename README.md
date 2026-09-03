@@ -470,11 +470,22 @@ advisory it reports is either **remediated at source** — bump the implicated m
 toolchain to the version it names in `Fixed in` — or **written down** in
 [`.govulncheck-suppressions.yaml`](.govulncheck-suppressions.yaml) with a reason, the reported call path
 and the date it was recorded. There is no third option and no other suppression surface. An unrecorded
-advisory fails; a record whose advisory the current run no longer reports fails, because a suppression
-must not outlive the advisory it was written for; a malformed record fails naming the entry, never
-skipped and never honoured; and any `govulncheck` exit status that is not a verdict fails with the tool's
-own error, because a tool that could not run has not told you the code is clean. `internal/vulngate`
-enforces that, and its own tests — which run inside `make check` — prove it still turns red on demand.
+advisory fails; a record for an advisory `govulncheck` says *has* a fix fails, because that case is
+remediated and not recorded; a record whose advisory the current run no longer reports fails, because a
+suppression must not outlive the advisory it was written for; a malformed record fails naming the entry,
+never skipped and never honoured; and any `govulncheck` exit status other than the one a run that
+produced a report exits with fails with the tool's own error, because a tool that could not run has not
+told you the code is clean. `internal/vulngate` enforces that, and its own tests — which run inside
+`make check` — prove it still turns red on demand.
+
+**"An advisory it reports" means all three levels.** `govulncheck` reports at three depths — it traced a
+call path to a vulnerable *symbol*, it found a vulnerable *package* imported, or it found a vulnerable
+*module* required — and its text report splits those across `=== Symbol Results ===`, `=== Package
+Results ===` and `=== Module Results ===`, printing the last two only under `-show verbose`. The gate
+therefore reads the tool's `-format json` stream, where every advisory arrives as a `finding` object
+whatever depth it was traced to. That is the one flag it passes, and it *widens* what the gate sees:
+reading the text report means reading part of the verdict, and the suppression file is the only thing
+allowed to make the verdict smaller.
 
 **The Go toolchain is stated in three files, and they are checked against each other.** CI provisions it
 (`GO_VERSION` in `.github/workflows/ci.yml`), the `Dockerfile`'s builder image bakes it into the shipped

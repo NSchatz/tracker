@@ -2,7 +2,8 @@
 #
 # An advisory belongs here ONLY when no fix exists anywhere — not in the module graph, not in a Go
 # release. Everything else is remediated at source: bump the implicated module, or raise the Go
-# toolchain to the version govulncheck names in `Fixed in`. A record is not a way to defer that work.
+# toolchain to the version govulncheck names in `Fixed in`. A record is not a way to defer that work,
+# and the gate refuses a record for an advisory govulncheck says is fixed somewhere.
 #
 # The file is a YAML sequence. Each entry is a mapping with EXACTLY these four keys:
 #
@@ -13,9 +14,13 @@
 #                 cannot exercise it
 #   recorded      the ISO date (YYYY-MM-DD) the entry was written
 #
-# Enforced by internal/vulngate, which runs as the `govulncheck` step of `make check-go`:
+# Enforced by internal/vulngate, which runs as the `govulncheck` step of `make check-go` and reads
+# govulncheck's WHOLE verdict — every advisory it reports, whether it traced a call path to a
+# vulnerable symbol, found a vulnerable package imported, or only found a vulnerable module required:
 #
 #   - an advisory that is reported and NOT recorded here fails the gate, naming the id;
+#   - a record for an advisory govulncheck says HAS a fix fails the gate, naming the fixed version —
+#     that case is remediated at source, never recorded;
 #   - a record whose id the current run does NOT report is STALE and fails the gate, naming the id —
 #     a suppression may not outlive the advisory it was written for;
 #   - a record that is missing a key, carries a key outside the four, has an id that does not match
@@ -25,7 +30,26 @@
 #     error. It is also not a way to pass: with no records, every reported advisory is unrecorded.
 #
 # internal/vulngate's own tests prove each of those still bites, and they run inside `make check`.
-#
-# Nothing is recorded today: every advisory govulncheck reported against this repo had a fix, and each
-# was taken at source.
-[]
+
+- id: GO-2026-5932
+  reason: >-
+    golang.org/x/crypto/openpgp is unmaintained and unsafe BY DESIGN, so there is no fixed release
+    and there will not be one: the advisory's affected range is `introduced: 0` with no `fixed`
+    event, govulncheck prints `Fixed in: N/A`, and the upstream remedy is to stop importing the
+    package rather than to upgrade the module. Bumping golang.org/x/crypto cannot clear it at any
+    version. The module is not a direct dependency — `go mod why -m golang.org/x/crypto` resolves it
+    through internal/testsupport -> github.com/testcontainers/testcontainers-go ->
+    golang.org/x/crypto/ssh — so the only way to drop it from the graph is to drop testcontainers,
+    which would mean dropping the real-PostGIS tests this repo's spatial correctness rests on.
+  reachability: >-
+    govulncheck reports this at MODULE level only. The finding's trace is the single frame
+    golang.org/x/crypto@v0.56.0 — no package frame, no symbol frame — which is the tool saying it
+    found no import of an affected package and therefore no call path to trace. The advisory names
+    seven affected imports: golang.org/x/crypto/openpgp and its packet, armor, clearsign, errors,
+    elgamal and s2k subpackages. None is in this module's build graph: `go list -deps -test ./... |
+    grep -c golang.org/x/crypto/openpgp` is 0, so not one of them is compiled into the tracker
+    binary or into any test binary. The x/crypto packages that ARE built are ssh, curve25519,
+    chacha20, blowfish, cryptobyte and poly1305, pulled in by testcontainers' SSH transport, and the
+    advisory names none of them. tracker itself never parses OpenPGP data: it has no signature,
+    keyring or armored-message path anywhere in cmd/ or internal/.
+  recorded: "2026-09-03"

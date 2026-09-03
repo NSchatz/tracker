@@ -36,10 +36,21 @@ inside `make test`, so a half-landed bump fails `make check` naming the files th
 **`govulncheck` records, it never ignores.** An advisory it reports is either remediated at source — bump
 the module, raise the toolchain to the `Fixed in` version — or written down in
 `.govulncheck-suppressions.yaml` with `id`, `reason`, `reachability` and `recorded`. That file is the only
-suppression surface there is. Unrecorded fails; a record the current run no longer reports is **stale** and
-fails; a malformed record fails naming the entry; and any `govulncheck` exit status that is not a verdict
-fails with the tool's own error. Do not reach for `|| true`, a `-` prefix, a report-only mode or a floating
-`GOVULNCHECK_VERSION` — `internal/vulngate` and its self-tests exist to make each of those visible.
+suppression surface there is. Unrecorded fails; a record for an advisory that **has** a fix fails, because
+that case is remediated, not recorded; a record the current run no longer reports is **stale** and fails; a
+malformed record fails naming the entry; and any `govulncheck` exit status other than the one a run that
+produced a report exits with fails with the tool's own error. Do not reach for `|| true`, a `-` prefix, a
+report-only mode or a floating `GOVULNCHECK_VERSION` — `internal/vulngate` and its self-tests exist to make
+each of those visible.
+
+**"An advisory it reports" is all three levels.** `govulncheck` reports a vulnerable symbol it traced a
+call path to, a vulnerable package that is imported, and a vulnerable module that is merely required; its
+text report puts those under three different section headings and prints two of them only under
+`-show verbose`. So the gate reads the `-format json` stream instead, where every advisory is a `finding`
+object at whatever depth it was traced to, and it refuses a stream whose `config` says the scan asked for
+less than `scan_level: symbol` / `scan_mode: source`. Reading the text report is reading **part** of the
+verdict, and `.govulncheck-suppressions.yaml` is the only thing allowed to make the verdict smaller. Do
+not narrow the invocation to get a green gate — that is the same move as `|| true`, spelled differently.
 
 As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
 (`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable

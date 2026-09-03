@@ -28,10 +28,11 @@ const modulePath = "golang.org/x/vuln/cmd/govulncheck"
 //
 // That distinction is the whole reason this type exists. `go run pkg@version prog-args` collapses the
 // program's exit status: when the program exits non-zero, `go run` prints "exit status N" on stderr and
-// itself exits 1. govulncheck's statuses are its verdict — 0 is "nothing reachable", 3 is
-// "vulnerabilities found", anything else is "I could not run" — and a gate that cannot tell those apart
-// cannot apply a recorded suppression to the middle one. So the tool is installed to a throwaway GOBIN
-// at its pinned version and invoked as itself, and the status the gate reads is govulncheck's own.
+// itself exits 1. govulncheck's status is what tells the gate whether the tool RAN — a `-format json`
+// run that produced a report exits 0, and every other status means it did not produce one — and a gate
+// that cannot tell those apart reads a tool that never ran as a tool that found nothing. So the tool is
+// installed to a throwaway GOBIN at its pinned version and invoked as itself, and the status the gate
+// reads is govulncheck's own.
 type GovulncheckRunner struct {
 	Version  string   // exact module version, e.g. "v1.1.4"
 	Patterns []string // package patterns to scan, e.g. ["./..."]
@@ -46,13 +47,24 @@ func (r GovulncheckRunner) InstallArgs() ([]string, error) {
 	return []string{"install", modulePath + "@" + r.Version}, nil
 }
 
-// ScanArgs is the argument list govulncheck itself is given: the package patterns, nothing else. No
-// -show, no -format, no flag that could narrow or soften what it reports.
+// jsonFormat asks govulncheck for its machine-readable stream.
+//
+// This is the ONE flag the gate passes, and it WIDENS what the gate reads rather than narrowing it.
+// govulncheck's text report splits the verdict into `=== Symbol Results ===`, `=== Package Results
+// ===` and `=== Module Results ===`, and prints the last two only under `-show verbose`; anything
+// reading that text reads part of the verdict, and C3/R5 reserves making the verdict smaller to
+// `.govulncheck-suppressions.yaml`. The JSON stream has no sections — every advisory arrives as a
+// `finding` object whatever depth it was traced to — and it carries the `fixed_version` R4 needs.
+// No -scan, no -mode, no -show: nothing here may ask govulncheck for less than it knows.
+var jsonFormat = []string{"-format", "json"}
+
+// ScanArgs is the argument list govulncheck itself is given: the JSON format and the package
+// patterns, nothing else.
 func (r GovulncheckRunner) ScanArgs() ([]string, error) {
 	if len(r.Patterns) == 0 {
 		return nil, errors.New("no package patterns to scan; the gate scans ./... and must never be narrowed to nothing")
 	}
-	return append([]string(nil), r.Patterns...), nil
+	return append(append([]string(nil), jsonFormat...), r.Patterns...), nil
 }
 
 // Run executes govulncheck and returns its output and its own exit status. A tool that could not be
