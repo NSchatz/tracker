@@ -27,6 +27,31 @@ make smoke     # the real compose stack; asserts /healthz answers 200
 and **nowhere else**: restating them in `ci.yml` is how CI silently drifts away from the gate a human
 runs.
 
+The one exception is the **Go toolchain**, which CI provisions (`GO_VERSION` in `ci.yml`), the
+`Dockerfile` bakes into the shipped binary, and `go.mod`'s `toolchain` directive gives a local
+`go build` — three different builds, so one copy will not do. `internal/toolchain` asserts all three name
+the same version and that `go.mod`'s `go` directive (a *language floor*) never climbs above it. It runs
+inside `make test`, so a half-landed bump fails `make check` naming the files that disagree.
+
+**`govulncheck` records, it never ignores.** An advisory it reports is either remediated at source — bump
+the module, raise the toolchain to the `Fixed in` version — or written down in
+`.govulncheck-suppressions.yaml` with `id`, `reason`, `reachability` and `recorded`. That file is the only
+suppression surface there is. Unrecorded fails; a record for an advisory that **has** a fix fails, because
+that case is remediated, not recorded; a record the current run no longer reports is **stale** and fails; a
+malformed record fails naming the entry; and any `govulncheck` exit status other than the one a run that
+produced a report exits with fails with the tool's own error. Do not reach for `|| true`, a `-` prefix, a
+report-only mode or a floating `GOVULNCHECK_VERSION` — `internal/vulngate` and its self-tests exist to make
+each of those visible.
+
+**"An advisory it reports" is all three levels.** `govulncheck` reports a vulnerable symbol it traced a
+call path to, a vulnerable package that is imported, and a vulnerable module that is merely required; its
+text report puts those under three different section headings and prints two of them only under
+`-show verbose`. So the gate reads the `-format json` stream instead, where every advisory is a `finding`
+object at whatever depth it was traced to, and it refuses a stream whose `config` says the scan asked for
+less than `scan_level: symbol` / `scan_mode: source`. Reading the text report is reading **part** of the
+verdict, and `.govulncheck-suppressions.yaml` is the only thing allowed to make the verdict smaller. Do
+not narrow the invocation to get a green gate — that is the same move as `|| true`, spelled differently.
+
 As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
 (`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable
 Docker daemon (for the PostGIS tests) **and** a JDK 17 + an Android SDK. The Android half resolves the

@@ -4,7 +4,7 @@
 # migrations are embedded in it (internal/db), so there is no migrations directory to
 # ship alongside it and no schema/binary skew to manage.
 
-FROM golang:1.25.12-bookworm AS build
+FROM golang:1.26.8-bookworm AS build
 WORKDIR /src
 
 # Dependencies first, so a source-only change does not re-download the module graph.

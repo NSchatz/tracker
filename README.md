@@ -465,6 +465,38 @@ project's correctness *is* spatial SQL, which cannot be tested against a mock �
 assert what we already believed. A gate that skips its bedrock when the database is missing reports green
 while proving nothing, so a missing daemon is an error here, not a pass.
 
+**The vulnerability gate records; it never ignores.** `govulncheck` runs on every `make check`, and an
+advisory it reports is either **remediated at source** — bump the implicated module, raise the Go
+toolchain to the version it names in `Fixed in` — or **written down** in
+[`.govulncheck-suppressions.yaml`](.govulncheck-suppressions.yaml) with a reason, the reported call path
+and the date it was recorded. There is no third option and no other suppression surface. An unrecorded
+advisory fails; a record for an advisory `govulncheck` says *has* a fix fails, because that case is
+remediated and not recorded; a record whose advisory the current run no longer reports fails, because a
+suppression must not outlive the advisory it was written for; a malformed record fails naming the entry,
+never skipped and never honoured; and any `govulncheck` exit status other than the one a run that
+produced a report exits with fails with the tool's own error, because a tool that could not run has not
+told you the code is clean. `internal/vulngate` enforces that, and its own tests — which run inside
+`make check` — prove it still turns red on demand.
+
+**"An advisory it reports" means all three levels.** `govulncheck` reports at three depths — it traced a
+call path to a vulnerable *symbol*, it found a vulnerable *package* imported, or it found a vulnerable
+*module* required — and its text report splits those across `=== Symbol Results ===`, `=== Package
+Results ===` and `=== Module Results ===`, printing the last two only under `-show verbose`. The gate
+therefore reads the tool's `-format json` stream, where every advisory arrives as a `finding` object
+whatever depth it was traced to. That is the one flag it passes, and it *widens* what the gate sees:
+reading the text report means reading part of the verdict, and the suppression file is the only thing
+allowed to make the verdict smaller.
+
+**The Go toolchain is stated in three files, and they are checked against each other.** CI provisions it
+(`GO_VERSION` in `.github/workflows/ci.yml`), the `Dockerfile`'s builder image bakes it into the shipped
+binary, and `go.mod`'s `toolchain` directive is what a local `go build` downloads and runs; those are
+three different builds, so one copy will not do. `internal/toolchain` asserts all three name the same
+version and that `go.mod`'s `go` directive — a *language floor*, not a toolchain pin — never climbs above
+it. It runs inside `make check`, so a half-landed bump fails and names the files that disagree, instead of
+leaving CI to prove things with a compiler production never runs. That matters more than it sounds:
+`govulncheck` scans the standard library of whichever toolchain executes it, so a split pin is a
+vulnerability gate that answers differently depending on where it ran.
+
 ## Known limitations
 
 Things that are true today and are not hidden:

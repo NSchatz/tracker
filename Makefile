@@ -11,6 +11,17 @@
 STATICCHECK_VERSION ?= 2025.1.1
 GOVULNCHECK_VERSION ?= v1.1.4
 
+# The GO TOOLCHAIN is the one version this repo cannot state only here. CI provisions it
+# (.github/workflows/ci.yml GO_VERSION), the Dockerfile's builder image bakes it into the
+# shipped binary, and go.mod's `toolchain` directive is what a local `go build` downloads —
+# three different builds, so one copy will not do. Copies held in step by hope is how the
+# compiler CI proves things with drifts from the compiler production runs, and because
+# govulncheck scans the standard library of whichever toolchain executes it, that drift
+# surfaces as a vulnerability gate that is green here and red there. internal/toolchain
+# asserts the copies agree and that go.mod's `go` directive — a LANGUAGE FLOOR, not a pin —
+# never climbs above them; it runs inside `make test`, so `make check` fails on a
+# half-landed bump and names the files that disagree.
+
 # Android client gate (C0). The tasks below ARE the Android half of `make check`: an app
 # that assembles, lints clean, and passes its JVM unit tests. Versions (AGP, Kotlin, SDK
 # levels) are pinned in android/gradle/libs.versions.toml and android/app/build.gradle.kts —
@@ -37,6 +48,10 @@ build:
 # on cannot be tested against a mock, so internal/testsupport starts a real PostGIS with
 # testcontainers. It FAILS — never skips — if it cannot. A green `make check` on a machine
 # without Docker would be a gate proving nothing.
+#
+# This target also carries the two assertions that guard the gate itself: internal/toolchain
+# (every file pinning the Go toolchain names the same version) and internal/vulngate (the
+# vulnerability gate still turns red on an unrecorded, malformed or stale suppression).
 test:
 	go test -race -covermode=atomic ./...
 
@@ -49,8 +64,16 @@ vet:
 staticcheck:
 	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 
+# The vulnerability gate. cmd/vulngate runs the pinned govulncheck UNCHANGED — same tool, same
+# version, same ./... scope — and then decides the exit status: an advisory is either remediated
+# at source or recorded in .govulncheck-suppressions.yaml with a reason, a reachability argument
+# and a date. An unrecorded advisory fails, a record whose advisory is no longer reported fails,
+# a malformed record fails, and any govulncheck exit status that is not a verdict fails with the
+# tool's own error — a tool that could not run has not told us the code is clean.
+#
+# internal/vulngate's tests run inside `make test` above and prove each of those still bites.
 govulncheck:
-	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	go run ./cmd/vulngate -govulncheck-version=$(GOVULNCHECK_VERSION) ./...
 
 # The Android client gate — assemble the debug APK, run Android Lint, run the JVM unit
 # tests. Uses the committed Gradle wrapper (pinned to 8.9), so the only host requirements
