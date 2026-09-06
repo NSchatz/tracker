@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -47,19 +46,23 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.nschatz.tracker.R
 import com.nschatz.tracker.collect.ClientPreferences
+import com.nschatz.tracker.collect.CollectionIntent
+import com.nschatz.tracker.collect.CollectionPresentation
+import com.nschatz.tracker.collect.CollectionPresentationPolicy
+import com.nschatz.tracker.collect.CollectionState
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.ConfigStatus
 import com.nschatz.tracker.collect.LocationCollectionService
+import com.nschatz.tracker.collect.RecordedReasons
 import com.nschatz.tracker.permission.CollectionCapability
-import com.nschatz.tracker.permission.LocationGrants
 import com.nschatz.tracker.permission.LocationPermissionFlow
 import com.nschatz.tracker.permission.PermissionStep
 import com.nschatz.tracker.permission.SettingsReason
+import com.nschatz.tracker.permission.readLocationGrants
 import com.nschatz.tracker.queue.FixQueues
 import com.nschatz.tracker.queue.FixUploadWorker
 
@@ -82,6 +85,11 @@ class MainActivity : ComponentActivity() {
         // listing, and the flush is unique work that a pending one absorbs.
         CollectionStatus.recordQueued(FixQueues.of(this).size())
         FixUploadWorker.enqueueFlush(this)
+        // The durable recorded reason, loaded so the screen can present it. This is the ONLY thing
+        // opening the app restores from disk about collection: opening it deliberately does NOT
+        // start collection, and the running state it shows is a live signal, never a stored one.
+        // See CollectionPresentationPolicy for why that distinction is the load-bearing one.
+        CollectionState(this).publish()
         enableEdgeToEdge()
         setContent {
             TrackerTheme {
@@ -112,7 +120,10 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val activity = context as? Activity
 
-    var grants by remember { mutableStateOf(readGrants(context)) }
+    var grants by remember { mutableStateOf(readLocationGrants(context)) }
+
+    val collectionState = remember { CollectionState(context) }
+    var intentReading by remember { mutableStateOf(collectionState.intent()) }
 
     // rememberSaveable, NOT remember.
     //
@@ -133,7 +144,15 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) grants = readGrants(context)
+            if (event == Lifecycle.Event.ON_RESUME) {
+                grants = readLocationGrants(context)
+                // The intent and the recorded reason are re-read on every resume for the same
+                // reason the grants are: both can have been changed by something outside this
+                // screen while it was away - the notification's Stop action, or a boot receiver in
+                // a process that has since been reclaimed.
+                intentReading = collectionState.intent()
+                collectionState.publish()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -142,7 +161,7 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
-        grants = readGrants(context)
+        grants = readLocationGrants(context)
     }
 
     val sdkInt = Build.VERSION.SDK_INT
@@ -195,7 +214,23 @@ private fun HomeScreen(modifier: Modifier = Modifier) {
         }
 
         ServerConfigCard()
-        CollectionCard(canCollect = capability != CollectionCapability.NONE)
+        CollectionCard(
+            canCollect = capability != CollectionCapability.NONE,
+            // The whole of the "what is collection doing" decision, taken by a pure function that
+            // is unit-tested. `CollectionStatus.running` is process-scoped memory owned by the
+            // service, so it is a LIVE signal: a force-stopped or system-killed app opens in a new
+            // process where it reads false, which is what stops this screen from claiming to be
+            // collecting on the strength of a setting nobody has checked.
+            presentation = CollectionPresentationPolicy.forOpen(
+                liveSessionRunning = CollectionStatus.running,
+                reading = intentReading,
+                recorded = CollectionStatus.recordedReason,
+            ),
+            onIntent = { intent ->
+                collectionState.setIntent(intent)
+                intentReading = collectionState.intent()
+            },
+        )
     }
 }
 
@@ -329,9 +364,13 @@ private fun ServerConfigCard() {
 }
 
 @Composable
-private fun CollectionCard(canCollect: Boolean) {
+private fun CollectionCard(
+    canCollect: Boolean,
+    presentation: CollectionPresentation,
+    onIntent: (CollectionIntent) -> Unit,
+) {
     val context = LocalContext.current
-    val running = CollectionStatus.running
+    val running = presentation.running
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -340,11 +379,30 @@ private fun CollectionCard(canCollect: Boolean) {
                 stringResource(if (running) R.string.collection_running else R.string.collection_stopped),
                 style = MaterialTheme.typography.bodyMedium,
             )
+            // ALONGSIDE the running state, whichever state that is. A phone that is collecting but
+            // has not managed a position since it restarted shows "Running." AND this line; a phone
+            // whose automatic start was refused shows "Stopped." AND this line. Presenting a reason
+            // only when stopped would hide the case that exists precisely while collection runs.
+            presentation.reason?.let { WarningText(RecordedReasons.message(it)) }
+            // Asked for, not running, and nothing recorded to say why: no code of ours ran, which
+            // is what a force-stop or an OEM battery manager looks like from in here. Saying so is
+            // the honest answer; a blank space would read as "fine".
+            if (presentation.unexplainedStop) {
+                WarningText(stringResource(R.string.collection_stopped_unexplained))
+            }
             Button(
                 enabled = canCollect,
                 onClick = {
-                    if (running) LocationCollectionService.stop(context)
-                    else LocationCollectionService.start(context)
+                    // The operator's explicit choice, recorded BEFORE the service is asked to do
+                    // anything. It is the fact the next boot reads, and a start whose intent was
+                    // never written is a phone that silently does not come back.
+                    if (running) {
+                        onIntent(CollectionIntent.OFF)
+                        LocationCollectionService.stop(context)
+                    } else {
+                        onIntent(CollectionIntent.ON)
+                        LocationCollectionService.start(context)
+                    }
                 },
             ) {
                 Text(stringResource(if (running) R.string.collection_stop else R.string.collection_start))
@@ -382,25 +440,6 @@ private fun WarningText(text: String) {
         color = MaterialTheme.colorScheme.error,
     )
 }
-
-/**
- * Reads the current grant state from the OS.
- *
- * The framework edge of the permission flow: `checkSelfPermission` is the only Android call
- * involved, and everything decided from its result lives in the pure [LocationPermissionFlow].
- */
-private fun readGrants(context: Context): LocationGrants = LocationGrants(
-    fineLocation = context.isGranted(Manifest.permission.ACCESS_FINE_LOCATION),
-    coarseLocation = context.isGranted(Manifest.permission.ACCESS_COARSE_LOCATION),
-    backgroundLocation = context.isGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
-    // Below API 33 the permission does not exist and notifications are always allowed, so reporting
-    // "granted" is the accurate answer rather than a convenient default.
-    postNotifications = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-        context.isGranted(LocationPermissionFlow.POST_NOTIFICATIONS),
-)
-
-private fun Context.isGranted(permission: String): Boolean =
-    ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
 /**
  * Opens this app's system settings page.

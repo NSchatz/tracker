@@ -73,6 +73,24 @@ object CollectionStatus {
     var lastError: String? by mutableStateOf(null)
         internal set
 
+    /**
+     * The single **recorded reason** held right now, or null when none is.
+     *
+     * The one piece of state here that is a mirror of something durable rather than a fact about
+     * this process's run, and necessarily so: it describes a case that may have happened in a
+     * process that no longer exists - a boot receiver that refused to start collection and was then
+     * reclaimed - and it has to survive to be shown the next time the app is opened.
+     * [CollectionState] owns the disk copy and keeps this one in step; it is here only so the screen
+     * can observe it.
+     *
+     * Distinct from [lastError], which is this run's delivery trouble in the server's or the
+     * network's own words. A recorded reason is about collection not running (or not having a
+     * position to prove it restarted), which is a different question from whether the last flush
+     * worked, and merging them would let a resolved outage clear a live refusal.
+     */
+    var recordedReason: ReasonCase? by mutableStateOf(null)
+        internal set
+
     // The mutators are @Synchronized because they are genuinely called from more than one thread:
     // `recordFlush` runs on the WorkManager worker's thread, while `recordQueued`, `recordDropped`
     // and the service lifecycle callbacks run on the main thread. `delivered += 1` is a

@@ -54,6 +54,11 @@
     <string name="collection_stop">Stop collecting</string>
     <string name="collection_running">Running.</string>
     <string name="collection_stopped">Stopped.</string>
+    <!-- Collection was asked for, is not running, and nothing recorded why. That is what a
+         force-stop or an OEM battery manager looks like from inside the app: no code of ours ran,
+         so no code of ours could write a reason. Saying so beats a blank space, which reads as
+         "fine". -->
+    <string name="collection_stopped_unexplained">Collection is switched on for this phone but is not running, and nothing recorded why. That usually means the app was force-stopped, or a battery manager stopped it: Android does not tell an app it was stopped, and it is not told the phone restarted either. Start collecting again below.</string>
     <string name="collection_no_fix_yet">No fix reported yet.</string>
     <string name="collection_limitation">Fixes are saved on this phone until the server confirms them, so going offline delays reporting instead of losing it. “dropped” means a fix the server permanently refused, one older than 90 days, or one discarded because the offline queue filled up.</string>
 </resources>

@@ -51,9 +51,70 @@ class ClientPreferences(context: Context) {
         allowPlaintextHttp = BuildConfig.DEBUG,
     )
 
+    /**
+     * Reads the operator's persisted collection intent.
+     *
+     * A `ClassCastException` here is not a crash and not a default: something that is not a string
+     * is sitting where the intent lives, which is the unreadable case, and it is reported as such.
+     * The value is never guessed.
+     */
+    fun readCollectionIntent(): IntentReading = try {
+        CollectionIntentCodec.decode(prefs.getString(KEY_COLLECTION_INTENT, null))
+    } catch (_: ClassCastException) {
+        IntentReading.Unreadable
+    }
+
+    /**
+     * Writes the operator's collection intent.
+     *
+     * `commit()`, not `apply()`, and the same for [writeRecordedReason] below. `apply()` returns
+     * before the value is on disk, and the whole point of this value is to be readable **after a
+     * power cycle** - including one that happens moments after the operator tapped Stop. One
+     * synchronous write of a few bytes, on a control the operator touches by hand, is the right
+     * price for the durability the boot path depends on.
+     */
+    fun writeCollectionIntent(intent: CollectionIntent) {
+        prefs.edit().putString(KEY_COLLECTION_INTENT, CollectionIntentCodec.encode(intent)).commit()
+    }
+
+    /**
+     * Reads the recorded reason, or null when none is held.
+     *
+     * A stored value that is not one of the known cases reads as **no reason**, never as a
+     * fabricated one: an unrecognised case cannot be presented honestly, and inventing a case to
+     * show would be worse than showing nothing.
+     */
+    fun readRecordedReason(): ReasonCase? = try {
+        val stored = prefs.getString(KEY_RECORDED_REASON, null)
+        ReasonCase.values().firstOrNull { it.name == stored }
+    } catch (_: ClassCastException) {
+        null
+    }
+
+    /** Writes, replaces, or (with null) clears the single recorded reason. */
+    fun writeRecordedReason(case: ReasonCase?) {
+        val editor = prefs.edit()
+        if (case == null) editor.remove(KEY_RECORDED_REASON) else editor.putString(KEY_RECORDED_REASON, case.name)
+        editor.commit()
+    }
+
     private companion object {
         const val PREFS_NAME = "tracker_client"
         const val KEY_BASE_URL = "base_url"
         const val KEY_DEVICE_TOKEN = "device_token"
+
+        /**
+         * The operator's collection intent, as `"on"` or `"off"`.
+         *
+         * Named here rather than anywhere else because the operator device check for a corrupt
+         * intent needs a documented way to corrupt it: on a debuggable build,
+         * `adb shell run-as com.nschatz.tracker` and edit `shared_prefs/tracker_client.xml`, either
+         * removing this entry (the missing case) or setting it to a value that is not `on` or `off`
+         * (the unreadable case). See `android/README.md`.
+         */
+        const val KEY_COLLECTION_INTENT = "collection_intent"
+
+        /** The single recorded reason, stored as a [ReasonCase] name. */
+        const val KEY_RECORDED_REASON = "collection_recorded_reason"
     }
 }

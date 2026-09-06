@@ -41,6 +41,20 @@
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      REBOOT-1 - collection survives a reboot.
+
+      Without this the app is not told the device booted, and a phone whose operator asked it to
+      report simply stops reporting until somebody notices and opens the app. It is a normal
+      (install-time) permission, not a runtime one: there is no prompt, and the user's control over
+      it is the app's own collection setting plus the location grant the restart still needs.
+
+      It does NOT cover a force-stopped app. ACTION_BOOT_COMPLETED is not delivered to an app in the
+      stopped state until a user action removes it from that state, so this permission buys the
+      ordinary reboot and nothing else; see android/README.md, "Known limitations".
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -66,6 +80,29 @@
             android:name=".collect.LocationCollectionService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!--
+          exported="true" because ACTION_BOOT_COMPLETED is delivered by the system, which is outside
+          this app, and a manifest-declared receiver that is not exported never hears it. That is
+          safe here and only here: BOOT_COMPLETED is a PROTECTED broadcast, which only the system
+          may send, so no other app can forge one. The receiver additionally refuses any intent
+          whose action is not exactly ACTION_BOOT_COMPLETED, so even a delivery route nobody has
+          thought of cannot use it to turn location collection on.
+
+          Not directBootAware: this app's state lives in credential-protected storage, so it has
+          nothing it could read before the first unlock. The consequence is stated rather than
+          hidden - the broadcast arrives when the platform delivers it for a non-direct-boot app,
+          and every operator check for the reboot is written to unlock the device once so that no
+          verdict depends on where that point falls.
+        -->
+        <receiver
+            android:name=".collect.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 
