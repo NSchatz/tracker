@@ -1,0 +1,18 @@
+# DELIBERATELY BROKEN. Do not fix.
+#
+# A version catalog is a dependency manifest, and `1.13.+` is Gradle's dynamic version: it resolves
+# to whatever Google's Maven is serving on the day the build runs, so this file states a preference
+# rather than a pin. internal/pingate must refuse it under P4.
+[versions]
+# The refusal.
+coreKtx = "1.13.+"
+# The controls: exact literals the gate must let through, so the refusal above is about the `+` and
+# not about the scanner disliking version strings.
+agp = "8.5.2"
+kotlin = "1.9.24"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
