@@ -36,7 +36,14 @@ LDFLAGS := -s -w
 
 IMAGE ?= tracker:dev
 
-.PHONY: build test check check-go android fmt vet staticcheck govulncheck tidy clean image compose-check smoke run-db
+# The user-interface grading routes (S0056). The AVD name and the system image are the only two
+# knobs; like every other tool pin in this repo they live HERE and are not restated in ci.yml.
+TRACKER_AVD ?= tracker-ui
+TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
+ANDROID_UI_TASKS ?= connectedDebugAndroidTest
+
+.PHONY: build test check check-go android fmt vet staticcheck govulncheck tidy clean image compose-check smoke run-db \
+	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o tracker ./cmd/tracker
@@ -98,6 +105,43 @@ check: check-go android
 # The Go half of the gate, kept as its own target so `make check-go` can run the server
 # checks alone (e.g. on a machine without the Android SDK). `check` runs both.
 check-go: fmt vet build test staticcheck govulncheck
+
+# --- user-interface grading -----------------------------------------------------
+#
+# tracker ships TWO user interfaces and the umbrella's frontend conventions bind both: the browser
+# map at GET /map, and the Android client's single Compose screen. F2 of those conventions admits
+# exactly ONE grader for a claim about what a person sees — the runtime that draws it — so these
+# four targets drive a real browser engine and a real Android emulator, and refuse loudly rather
+# than skipping when either is missing. That refusal is the deliverable, not a nuisance: a route
+# that goes quiet when its prerequisite is absent reports green while proving nothing, which is the
+# same stance `make android` takes toward a missing SDK and `make test` toward a missing Docker.
+#
+# These are deliberately NOT folded into `make check`. `make check` is the gate a human runs on a
+# laptop; these need a browser engine and a booted emulator, and CI runs all six targets.
+
+# The map's rendered claims, in a real browser engine (AC1-AC11, AC21, AC22), each shown able to go
+# red against a surface mutated to break exactly that claim (AC18).
+verify-ui:
+	go run ./cmd/uiverify web
+
+# The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
+# explanation documents the screen's labels moved their paragraphs into.
+verify-ui-android:
+	go run ./cmd/uiverify docs
+	@TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" ./scripts/android-emulator.sh require
+	@serial="$$(TRACKER_AVD='$(TRACKER_AVD)' TRACKER_SYS_IMAGE='$(TRACKER_SYS_IMAGE)' ./scripts/android-emulator.sh boot | tail -1)"; \
+	echo "instrumented suite on $$serial"; \
+	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
+
+# Both routes, with their prerequisite removed, must exit non-zero naming what is missing (AC19).
+verify-ui-refusal:
+	go run ./cmd/uiverify refusal
+
+# The committed F1-F11 record, checked against what the two routes actually ran (AC20).
+verify-ui-record:
+	go run ./cmd/uiverify record
+
+verify-ui-all: verify-ui verify-ui-android verify-ui-refusal verify-ui-record
 
 # --- deployment ---------------------------------------------------------------
 

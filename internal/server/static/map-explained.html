@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tracker - what the live map shows</title>
+  <style nonce="__CSP_NONCE__">
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --fg: #14181f; --muted: #4d5359; --link: #0b4fa8; --border: #6b7178;
+      --focus: #0b4fa8;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #12161b; --fg: #e9edf2; --muted: #b6bfc9; --link: #8ec2ff; --border: #8b959f;
+              --focus: #8ec2ff; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0 auto; max-width: 44rem; padding: 1.5rem 1rem;
+      font: 16px/1.6 system-ui, sans-serif; background: var(--bg); color: var(--fg);
+    }
+    a { color: var(--link); }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    dt { font-weight: 600; margin-top: .75rem; }
+    dd { margin: 0 0 0 1rem; color: var(--muted); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .back { display: inline-block; min-height: 24px; line-height: 24px; }
+  </style>
+</head>
+<body>
+  <p><a class="back" href="/map">Back to the map</a></p>
+  <h1>What the live map shows</h1>
+
+  <p>
+    This page explains the words on tracker's live map. The map itself keeps its labels to a few
+    words on purpose; the methodology lives here so that the surface stays readable on a phone.
+  </p>
+
+  <h2 id="watching">Watching your family</h2>
+  <p>
+    A <strong>viewer token</strong> is a read credential for one family. Paste it into the map's
+    token field and choose <strong>Watch</strong>. The map then does two things: it asks the server
+    once for the family's devices (so it can tell "this family has no devices" apart from "still
+    connecting"), and it opens a long-lived event stream so positions update without a reload.
+  </p>
+  <p>
+    A token is a live credential. Anyone holding it can see where your family is, so treat a
+    <code>/map?token=...</code> link the way you would treat a password. The map never stores the
+    token anywhere except the field you typed it into, sends it to nobody but the server that served
+    the page, and the page is sent with a <code>Referrer-Policy: no-referrer</code> header so the
+    address bar's token is never handed to the map tile host.
+  </p>
+  <p>
+    <strong>Connection status</strong> is a separate thing from any device's state. The status line
+    reads <em>connecting</em>, <em>live</em>, <em>connection interrupted</em>, or names a refused
+    token. When the feed is interrupted, every device on the page is marked
+    <em>(last known - unconfirmed)</em>: the map keeps showing you the last thing the server said
+    rather than freezing a green map that implies it is still true. When the feed comes back the
+    annotation clears on its own, with no reload, and no device is ever removed to make this happen.
+  </p>
+
+  <h2 id="states">What the state words mean</h2>
+  <p>
+    The <strong>server</strong> decides each device's state and the page renders exactly the word it
+    was sent. The page does no clock arithmetic, so a browser with a wrong clock cannot disagree with
+    the server about whether a phone is live. The four states, and the wire tokens behind them, are:
+  </p>
+  <dl>
+    <dt>live now <code>(live)</code></dt>
+    <dd>The server heard from this phone inside the live window. Where it is shown is where it is.</dd>
+
+    <dt>seen recently <code>(recent)</code></dt>
+    <dd>Past the live window but inside the recent one. The position is real but is not this minute's.</dd>
+
+    <dt>not seen lately <code>(stale)</code></dt>
+    <dd>
+      Older than the recent window. The marker is the last position the server holds, which may be
+      hours old. A phone that is off, out of signal, or has had collection stopped reads this way.
+    </dd>
+
+    <dt>no position recorded <code>(no-position)</code></dt>
+    <dd>
+      The server holds <em>no</em> position for this device at all: it has never reported, or
+      retention purging has deleted every fix it had. This is an absence, not a zero, and the device
+      gets no map marker at any coordinate - a marker at 0,0 would be a real place in the Gulf of
+      Guinea, and showing one there would be a fabricated answer.
+    </dd>
+  </dl>
+  <p>
+    A device can also read <em>- position not readable</em>. That means the server described the
+    device but the coordinate that came with it was missing or was not a number. The device is listed
+    as present and is deliberately left off the map, because guessing a position is worse than
+    admitting there is not one.
+  </p>
+
+  <h2 id="counts">Why the counts name their set</h2>
+  <p>
+    <strong>"3 of 5 on map, 2 without position"</strong> is written that way because "3 devices" is a
+    figure a reader takes for the whole family. The devices left off the map are counted in the same
+    line rather than dropped from the total, so the number you see is never quietly smaller than the
+    family.
+  </p>
+  <p>
+    <strong>"1 of 40 updates unreadable"</strong> counts the stream events and device rows this page
+    was handed against the ones it could not read. One bad update in forty and forty in forty are
+    very different situations, and a bare "1 rejected" cannot tell them apart. An update the page
+    cannot read costs only itself: every other device, the map and the status line keep drawing, and
+    the stream is not closed.
+  </p>
+
+  <h2 id="privacy">What the map talks to</h2>
+  <p>
+    Everything the page needs - its stylesheet, its script, the vendored Leaflet library, the device
+    list and the event stream - comes from the tracker server you pointed your browser at. The single
+    third party is the map <strong>tile</strong> imagery from
+    <code>tile.openstreetmap.org</code>, and no token is ever sent there. A
+    Content-Security-Policy sent with the page pins that down in the browser itself: nothing else may
+    be loaded and nothing else may be connected to, and the policy names no reporting endpoint,
+    because a reporting endpoint is one more place a URL carrying a token could be sent.
+  </p>
+</body>
+</html>

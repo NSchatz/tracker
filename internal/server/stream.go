@@ -21,12 +21,18 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/NSchatz/tracker/internal/auth"
@@ -554,25 +560,133 @@ func parseResumeCursor(r *http.Request) (cursor time.Time, resuming bool) {
 }
 
 // mapAssets serves the static file surface for the live map: the vendored Leaflet library at
-// /static/leaflet.js etc. The embedded paths already carry the `static/` prefix, so the URL
-// /static/leaflet.js resolves to the embedded static/leaflet.js with no rewriting.
-func mapAssets() http.Handler {
-	return http.FileServer(http.FS(staticFS))
+// /static/leaflet.js, and the documents the map's own labels link to. The embedded paths already
+// carry the `static/` prefix, so the URL /static/leaflet.js resolves to the embedded
+// static/leaflet.js with no rewriting.
+//
+// It sends a Content-Security-Policy of its own (F11: EVERY browser surface sets one, and an asset
+// fetched directly by URL is a browser surface). An HTML document under /static gets the same
+// document policy the map page gets, nonce and all; anything else gets the tightest policy there is,
+// because a stylesheet or a script has no legitimate need to load or reach anything at all.
+func mapAssets(logger *slog.Logger) http.Handler {
+	files := http.FileServer(http.FS(staticFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".html") {
+			name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+			serveDocument(w, logger, name)
+			return
+		}
+		setCommonSecurityHeaders(w)
+		w.Header().Set("Content-Security-Policy", assetCSP)
+		files.ServeHTTP(w, r)
+	})
 }
 
 // serveMapPage serves the Leaflet map at GET /map. It is a static shell: it carries no token and no
 // family data itself — the watcher pastes their viewer token into the page, which then opens the
 // authenticated SSE stream. So the page needs no auth, and the data behind it still does.
 func serveMapPage(logger *slog.Logger) http.HandlerFunc {
-	page, err := staticFS.ReadFile("static/map.html")
 	return func(w http.ResponseWriter, r *http.Request) {
+		serveDocument(w, logger, "static/map.html")
+	}
+}
+
+// cspNoncePlaceholder is the literal every embedded HTML document carries where its per-response
+// nonce goes. A literal substitution rather than a template: the value substituted in is
+// base64 of crypto/rand bytes, so there is no escaping question to get wrong, and a document that
+// has lost its placeholder fails loudly at startup (see init below) rather than shipping a page
+// whose inline style and script the browser then silently refuses.
+const cspNoncePlaceholder = "__CSP_NONCE__"
+
+// The one third-party origin the map needs: OpenStreetMap's tile imagery. The viewer token travels
+// in the map page's URL and in the event-stream query string, so every additional host or reporting
+// endpoint in this policy would be one more route a live read credential could leave by. There is
+// deliberately no report-uri and no report-to.
+const tileHost = "https://tile.openstreetmap.org"
+
+// assetCSP governs a non-document asset fetched directly by URL. `default-src 'none'` is the whole
+// policy: leaflet.js and leaflet.css load nothing and connect nowhere.
+const assetCSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// documentCSP builds the policy for an HTML document this server serves. The inline <style> and
+// <script> the map page carries are admitted by NONCE, not by 'unsafe-inline': a nonce that changes
+// every response cannot be replayed by injected markup, which is the entire point of having a policy
+// on a page whose URL carries a credential.
+func documentCSP(nonce string) string {
+	return "default-src 'none'; " +
+		"base-uri 'none'; " +
+		"form-action 'none'; " +
+		"frame-ancestors 'none'; " +
+		"object-src 'none'; " +
+		"script-src 'self' 'nonce-" + nonce + "'; " +
+		"style-src 'self' 'nonce-" + nonce + "'; " +
+		"img-src 'self' data: " + tileHost + "; " +
+		"connect-src 'self'"
+}
+
+// setCommonSecurityHeaders sends the headers every surface here shares.
+//
+// Referrer-Policy is the load-bearing one and it is not cosmetic: the map is opened as
+// /map?token=..., so a browser's default cross-origin referrer behaviour is the difference between
+// the tile host learning this server's origin and the tile host learning a live viewer token.
+// no-referrer sends neither.
+func setCommonSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// serveDocument writes one embedded HTML document with a fresh nonce and the document policy.
+func serveDocument(w http.ResponseWriter, logger *slog.Logger, name string) {
+	page, err := staticFS.ReadFile(name)
+	if err != nil {
+		http.NotFound(w, &http.Request{URL: &url.URL{Path: "/" + name}})
+		return
+	}
+	nonce, err := newNonce()
+	if err != nil {
+		logger.Error("generate CSP nonce", "error", err)
+		writeError(w, logger, http.StatusInternalServerError, "internal", "page unavailable")
+		return
+	}
+	body := strings.ReplaceAll(string(page), cspNoncePlaceholder, nonce)
+
+	setCommonSecurityHeaders(w)
+	w.Header().Set("Content-Security-Policy", documentCSP(nonce))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if _, werr := io.WriteString(w, body); werr != nil {
+		logger.Error("write document", "error", werr, "document", name)
+	}
+}
+
+func newNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
+
+// The documents this server serves as browser surfaces. Every one must carry the nonce placeholder
+// on each of its inline <style>/<script> elements, or the policy above would refuse markup the page
+// needs — a page silenced by its own policy, which is the failure F11 is most often shipped as.
+var htmlDocuments = []string{
+	"static/map.html",
+	"static/map-explained.html",
+	"static/app-explained.html",
+}
+
+func init() {
+	for _, name := range htmlDocuments {
+		body, err := staticFS.ReadFile(name)
 		if err != nil {
-			writeError(w, logger, http.StatusInternalServerError, "internal", "map page unavailable")
-			return
+			panic("server: embedded document missing: " + name + ": " + err.Error())
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if _, werr := w.Write(page); werr != nil {
-			logger.Error("write map page", "error", werr)
+		inline := strings.Count(string(body), "<style") + strings.Count(string(body), "<script")
+		nonces := strings.Count(string(body), cspNoncePlaceholder)
+		if inline == 0 || nonces != inline {
+			panic("server: " + name + " has " + strconv.Itoa(inline) + " inline style/script elements but " +
+				strconv.Itoa(nonces) + " nonce placeholders; the Content-Security-Policy would silence the page")
 		}
 	}
 }

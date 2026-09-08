@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tracker - what the Android app shows</title>
+  <style nonce="__CSP_NONCE__">
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --fg: #14181f; --muted: #4d5359; --link: #0b4fa8; --focus: #0b4fa8;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #12161b; --fg: #e9edf2; --muted: #b6bfc9; --link: #8ec2ff; --focus: #8ec2ff; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0 auto; max-width: 44rem; padding: 1.5rem 1rem;
+      font: 16px/1.6 system-ui, sans-serif; background: var(--bg); color: var(--fg);
+    }
+    a { color: var(--link); }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    dt { font-weight: 600; margin-top: .75rem; }
+    dd { margin: 0 0 0 1rem; color: var(--muted); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <h1>What the Android app shows</h1>
+  <p>
+    tracker's phone app keeps one short label per thing on the screen itself. The paragraphs that
+    explain those labels live here and in the app's own explanation screens, which carry exactly the
+    same words - one affordance per card opens the screen for that card.
+  </p>
+
+  <h2 id="permissions">Permissions</h2>
+  <p id="permission_step_foreground_body">
+    tracker needs location access to report where this phone is. The next screen is the system
+    permission prompt.
+  </p>
+  <p id="permission_step_background_dialog_body">
+    To keep reporting when the app is closed, tracker needs background location. This is a second,
+    separate prompt - Android will not ask for both at once.
+  </p>
+  <p id="permission_step_background_settings_body">
+    On Android 11 and later the permission prompt has no "Allow all the time" option - it can only be
+    set in system settings. Open settings, choose Permissions then Location, and pick "Allow all the
+    time".
+  </p>
+  <p id="permission_step_denied_body">
+    Android will no longer show the permission prompt for this app. Open settings and grant location
+    access there.
+  </p>
+  <p id="permission_ready_body">
+    tracker can collect location continuously, including while the app is closed.
+  </p>
+
+  <h2 id="warnings">Degraded states, named rather than tolerated</h2>
+  <p id="warning_foreground_only">
+    Background location is not granted. Collection works while the app is open, but Android will stop
+    it once the app is closed - the trail will have gaps.
+  </p>
+  <p id="warning_approximate">
+    Only approximate location is granted, so positions may be off by a city block. Grant precise
+    location for an accurate trail.
+  </p>
+  <p id="warning_notifications_blocked">
+    Notifications are blocked, so the ongoing "sharing your location" notice will not be visible.
+    Collection still runs.
+  </p>
+
+  <h2 id="server">Server settings</h2>
+  <p id="config_plaintext_note">
+    The device token is stored unencrypted in this app's private data on the phone until secure
+    storage ships (roadmap C3). On a non-rooted phone with a lock screen no other app can read it,
+    but anyone with root, an unlocked bootloader or a full-device backup can. Cloud backup of the
+    app's data is already switched off.
+  </p>
+  <p id="config_verdict_note">
+    Save reports the verdict of validating what you typed, never a blanket "Saved". A URL the app
+    will refuse to use says so here rather than failing silently at the first fix. A release build
+    also refuses plain <code>http://</code>, so a shipped app cannot send a bearer credential in the
+    clear.
+  </p>
+
+  <h2 id="counters">The counters, and the set each is counted over</h2>
+  <p id="collection_limitation">
+    Fixes are saved on this phone until the server confirms them, so going offline delays reporting
+    instead of losing it. "dropped" means a fix the server permanently refused, one older than 90
+    days, or one discarded because the offline queue filled up.
+  </p>
+  <dl>
+    <dt id="counter_delivered">Delivered</dt>
+    <dd>
+      Fixes the server accepted during THIS run of the app, counted from the moment collection
+      started. It is not a lifetime total and it is not restored from disk: after a restart the
+      honest answer is "not recorded", not a stale number. It counts an idempotent replay the server
+      already had as delivered, so it can over-count a fix that was sent twice.
+    </dd>
+
+    <dt id="counter_queued">Queued</dt>
+    <dd>
+      Fixes currently sitting in the on-disk queue, read from the queue itself rather than counted in
+      memory - which is why it survives a restart when the other two do not. A non-zero value is
+      normal, not an error: it is what the queue looks like while the phone is offline, and it is the
+      number that says nothing has been lost.
+    </dd>
+
+    <dt id="counter_dropped">Dropped</dt>
+    <dd>
+      Fixes measured during this run that will never reach the server. It is shown as prominently as
+      Delivered on purpose: an app that only ever displays its successes is how silent fix loss stays
+      silent.
+    </dd>
+  </dl>
+  <p id="counter_not_recorded">
+    A counter that has never been measured reads <strong>not recorded</strong>, never
+    <code>0</code> and never a dash. A measured zero still reads <strong>0</strong>, because "we
+    checked and it is none" and "we never checked" are different facts and a reader deciding whether
+    their family's trail has a hole in it needs to be able to tell them apart. If the queue directory
+    cannot be read at all, the queued figure alone reads <strong>unavailable</strong> and everything
+    else on the screen keeps working.
+  </p>
+
+  <h2 id="freshness">Current, or last known</h2>
+  <p id="collection_freshness">
+    While collection is running and a fix has arrived within the reporting interval, the counters are
+    labelled as current. When collection is stopped, has been killed by the system, or has produced
+    no fix for longer than that interval, the same counters are labelled <strong>last known</strong>
+    with the time they were last updated. A frozen readout is never presented as a live one, and when
+    collection resumes the counters go back to reading as current.
+  </p>
+</body>
+</html>

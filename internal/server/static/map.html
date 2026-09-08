@@ -11,56 +11,172 @@
        party is the map TILES (OpenStreetMap, below) - device markers render and move with or without
        them, and the in-app map (roadmap C5) removes even that. This page is the interim viewer. -->
   <link rel="stylesheet" href="/static/leaflet.css">
-  <script src="/static/leaflet.js"></script>
+  <script nonce="__CSP_NONCE__" src="/static/leaflet.js"></script>
 
-  <style>
-    :root { color-scheme: light dark; }
+  <style nonce="__CSP_NONCE__">
+    /* Two themes, both authored. `color-scheme` alone only re-paints UA widgets; every colour this
+       page decides is declared here, once per theme, so that "follow the operating system" is a
+       thing the engine can be asked about rather than a thing the stylesheet merely implies.
+       Every pair below clears WCAG 2.2 AA against the surface it is actually painted on: 4.5:1 for
+       text, 3:1 for control boundaries, focus rings and state marks. */
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --surface: #f2f2f2;
+      --fg: #14181f;
+      --muted: #4d5359;
+      --live: #0a6b3d;
+      --error: #a4111a;
+      --warn: #6b4e00;
+      --link: #0b4fa8;
+      --border: #6b7178;
+      --focus: #0b4fa8;
+      --map-bg: #d7dbe0;
+      --control-bg: #ffffff;
+      --control-fg: #14181f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12161b;
+        --surface: #1c2229;
+        --fg: #e9edf2;
+        --muted: #b6bfc9;
+        --live: #64dda4;
+        --error: #ffb3ab;
+        --warn: #f0c65a;
+        --link: #8ec2ff;
+        --border: #8b959f;
+        --focus: #8ec2ff;
+        --map-bg: #232a32;
+        --control-bg: #1c2229;
+        --control-fg: #e9edf2;
+      }
+    }
+
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+    html, body {
+      margin: 0; height: 100%;
+      font: 15px/1.5 system-ui, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+
+    /* One focus rule for everything focusable, authored rather than inherited, so the indicator is a
+       property of the page and not of whichever engine happens to render it. */
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .leaflet-container:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
+
     #bar {
       display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
-      padding: .5rem .75rem; border-bottom: 1px solid #8884;
+      padding: .5rem .75rem; border-bottom: 1px solid var(--border);
+      background: var(--bg);
     }
-    #bar strong { font-size: 1rem; }
-    #token { flex: 1 1 16rem; min-width: 8rem; padding: .35rem .5rem; font: inherit; }
-    #watch { padding: .35rem .8rem; font: inherit; cursor: pointer; }
-    #status { color: #888; }
-    #status.live { color: #16794b; }
-    #status.error { color: #b00020; }
-    #rejected { color: #8a6d00; }
-    #rejected:empty { display: none; }
-    #body { display: flex; height: calc(100% - 3rem); }
-    #panel { width: 20rem; max-width: 45%; overflow: auto; border-right: 1px solid #8884; padding: .5rem .75rem; }
-    #panel h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: #888; margin: .75rem 0 .25rem; }
+    #brand { font-size: 1rem; }
+    #token-label { color: var(--fg); }
+    #token {
+      flex: 1 1 14rem; min-width: 7rem; min-height: 32px;
+      padding: .35rem .5rem; font: inherit;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+    }
+    #watch {
+      min-height: 32px; min-width: 44px; padding: .35rem .8rem; font: inherit; cursor: pointer;
+      background: var(--surface); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+    }
+    #status { color: var(--muted); }
+    #status[data-health="live"] { color: var(--live); }
+    #status[data-health="error"] { color: var(--error); }
+    /* The state a status word carries is never carried by colour alone: the word itself is the
+       state, and the colour only reinforces it. */
+
+    a.doc-link {
+      color: var(--link);
+      display: inline-block; min-height: 24px; min-width: 24px; line-height: 24px;
+      padding: 0 4px;
+    }
+
+    #body { display: flex; height: calc(100% - 3.25rem); }
+    #panel {
+      width: 21rem; max-width: 45%; overflow: auto;
+      border-right: 1px solid var(--border);
+      padding: .5rem .75rem;
+      background: var(--surface); color: var(--fg);
+    }
+    #panel h2, #panel h3 {
+      font-size: .8rem; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--fg); margin: .75rem 0 .25rem;
+    }
+    #panel p { margin: .25rem 0; }
     #panel ul { list-style: none; margin: 0; padding: 0; }
-    #panel li { padding: .2rem 0; border-bottom: 1px solid #8882; }
-    #panel li .state { font-weight: 600; }
-    #panel li .unconfirmed { color: #b00020; }
-    #empty:empty { display: none; }
+    #panel li { padding: .25rem 0; border-bottom: 1px solid var(--border); }
+    #panel li .name { font-weight: 600; }
+    #panel li .state { color: var(--muted); }
+    #panel li[data-state="live"] .state { color: var(--live); }
+    #panel li .unconfirmed { color: var(--error); }
+    #panel li .note { color: var(--warn); }
+    .figure { color: var(--fg); }
+    .detail { color: var(--muted); }
+    #panel-state { font-weight: 600; }
+    #panel-state[data-state="error"] { color: var(--error); }
+    .hidden { display: none; }
+
     #map { flex: 1 1 auto; }
-    @media (prefers-color-scheme: dark) { #status.live { color: #5ad19a; } }
+    /* Leaflet ships one light palette. Re-point its controls at the tokens above so the whole page
+       answers the operating-system preference, and so every boundary on them is measurable. */
+    .leaflet-container { background: var(--map-bg); }
+    .leaflet-bar { border: 2px solid var(--border); box-shadow: none; }
+    .leaflet-bar a, .leaflet-bar a:hover, .leaflet-bar a:focus {
+      background-color: var(--control-bg); color: var(--control-fg);
+      border-bottom: 1px solid var(--border);
+      width: 30px; height: 30px; line-height: 30px;
+    }
+    .leaflet-container .leaflet-control-attribution {
+      background: var(--bg); color: var(--fg); padding: 0 6px;
+    }
+    .leaflet-control-attribution a {
+      color: var(--link);
+      display: inline-block; min-height: 24px; min-width: 24px; line-height: 24px;
+    }
+    .leaflet-attribution-flag { display: none !important; }
+
+    /* Phone first. Under 620px the panel stops competing with the map for width: it stacks above it,
+       full width, scrolling inside itself, so the page body never scrolls sideways. */
+    @media (max-width: 620px) {
+      #body { flex-direction: column; height: calc(100% - 5.5rem); }
+      #panel { width: 100%; max-width: 100%; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--border); }
+      #map { min-height: 12rem; }
+    }
   </style>
 </head>
 <body>
-  <div id="bar">
-    <strong>tracker</strong>
-    <input id="token" type="password" placeholder="viewer token" autocomplete="off" spellcheck="false">
+  <header id="bar" data-region="controls">
+    <strong id="brand">tracker</strong>
+    <label for="token" id="token-label">Viewer token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false">
     <button id="watch">Watch</button>
-    <span id="status">enter a viewer token to watch your family's map</span>
-    <span id="rejected"></span>
-  </div>
+    <p id="status" role="status" aria-live="polite" aria-label="Connection status" data-health="idle">Enter a viewer token</p>
+    <a id="controls-doc" class="doc-link" href="/static/map-explained.html#watching">How watching works</a>
+  </header>
   <div id="body">
-    <div id="panel">
-      <h2>Devices</h2>
-      <p id="empty"></p>
-      <ul id="located"></ul>
-      <h2 id="unlocated-heading" hidden>Present, not located</h2>
-      <ul id="unlocated"></ul>
-    </div>
-    <div id="map"></div>
+    <section id="panel" data-region="devices" aria-labelledby="panel-heading">
+      <h2 id="panel-heading">Devices</h2>
+      <p id="panel-state" data-state="idle">Enter a viewer token</p>
+      <p id="panel-action" class="detail">Then choose Watch</p>
+      <p id="located-count" class="figure hidden"></p>
+      <ul id="located" aria-label="Devices on the map"></ul>
+      <h3 id="unlocated-heading" class="hidden">Without a position</h3>
+      <ul id="unlocated" aria-label="Devices without a position"></ul>
+      <p id="rejected" class="figure hidden"></p>
+      <p id="rejected-detail" class="detail hidden"></p>
+      <a id="devices-doc" class="doc-link" href="/static/map-explained.html#states">What these words mean</a>
+    </section>
+    <div id="map" aria-label="Family map"></div>
   </div>
 
-  <script>
+  <script nonce="__CSP_NONCE__">
     // A live family map with no build step.
     //
     // THE ONE RULE THIS PAGE OBEYS: the SERVER decides what a device's state is, and this page renders
@@ -77,16 +193,27 @@
     //
     // Connection health is a SEPARATE AXIS from device state. A broken stream never turns a family
     // green and never freezes the last states as though they were current: the page keeps the exact
-    // token the server last sent for each device and ANNOTATES it as unconfirmed, alongside a
-    // page-level interruption notice. No device is then presented as CURRENTLY live.
+    // token the server last sent for each device and ANNOTATES it as last known and unconfirmed,
+    // alongside a page-level interruption notice. No device is then presented as CURRENTLY live.
 
     // The complete presentation vocabulary, exactly as the wire spells it (SPEC.md). Anything else
     // arriving under a `presentation` key is an event this page refuses rather than renders.
     var STATE_TOKENS = ['no-position', 'live', 'recent', 'stale'];
 
+    // What a reader sees for each wire token. A state must be legible without colour and without
+    // knowing the protocol, so `no-position` reads as an absence in words rather than as a bare token,
+    // a dash or a zero. The words stay few; the explanation lives in /static/map-explained.html.
+    var STATE_TEXT = {
+      'no-position': 'no position recorded',
+      'live': 'live now',
+      'recent': 'seen recently',
+      'stale': 'not seen lately'
+    };
+
     // The two strings a reader must be able to tell apart from "still connecting".
     var MSG_NO_DEVICES = 'no devices in this family';
-    var MSG_REFUSED = 'viewer token refused: the server would not accept this credential';
+    var MSG_REFUSED = 'viewer token refused';
+    var MSG_UNCONFIRMED = '(last known - unconfirmed)';
 
     var map = L.map('map').setView([20, 0], 2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -95,38 +222,91 @@
     }).addTo(map);
 
     var statusEl = document.getElementById('status');
+    var panelStateEl = document.getElementById('panel-state');
+    var panelActionEl = document.getElementById('panel-action');
+    var locatedCountEl = document.getElementById('located-count');
     var rejectedEl = document.getElementById('rejected');
-    var emptyEl = document.getElementById('empty');
+    var rejectedDetailEl = document.getElementById('rejected-detail');
     var locatedEl = document.getElementById('located');
     var unlocatedEl = document.getElementById('unlocated');
     var unlocatedHeadingEl = document.getElementById('unlocated-heading');
     var tokenEl = document.getElementById('token');
     var watchEl = document.getElementById('watch');
 
-    var devices = {};           // device_id -> {id, name, state, located}
+    var devices = {};           // device_id -> {id, name, state, located, note}
     var markers = {};           // device_id -> Leaflet marker (located devices only)
     var describedByStream = {}; // device_id -> true, once the stream has described it
     var source = null;          // the current EventSource
     var everOpened = false;     // has this connection ever been established?
     var interrupted = false;    // connection health, NOT device state
     var interruptedWhy = '';
-    var rejectedCount = 0;
+    var receivedCount = 0;      // every stream event and positions entry this page was handed
+    var rejectedCount = 0;      // how many of those it could not read
     var lastRejection = '';
     var deviceSetKnown = false; // has GET /v1/positions told us the set is complete?
     var fitted = false;         // have we auto-framed the first located device yet?
+    var watching = false;       // has a watch attempt begun?
+    var failure = '';           // the reason this attempt cannot proceed, or '' - the ERROR state
+    var failureAction = '';
 
-    function setStatus(text, cls) {
+    function setStatus(text, health) {
       statusEl.textContent = text;
-      statusEl.className = cls || '';
+      statusEl.setAttribute('data-health', health || 'idle');
     }
 
-    // label is what a viewer READS for a device. The state token is always in it, in words, so the
-    // four stay distinguishable when colour perception is removed - and the unconfirmed annotation is
-    // added BESIDE the token, never in place of it.
+    // stateText is what a viewer READS for a device state. The four stay distinguishable when colour
+    // perception is removed because the distinguishing thing is the wording, never the paint - and the
+    // unconfirmed annotation is added BESIDE it, never in place of it.
+    function stateText(token) {
+      return STATE_TEXT[token] || token;
+    }
+
     function label(d) {
-      var text = d.name + ' - ' + d.state;
-      if (interrupted) { text += ' (unconfirmed)'; }
+      var text = d.name + ' - ' + stateText(d.state);
+      if (interrupted) { text += ' ' + MSG_UNCONFIRMED; }
       return text;
+    }
+
+    function show(el, on) {
+      if (on) { el.classList.remove('hidden'); } else { el.classList.add('hidden'); }
+    }
+
+    // panelState is the ONE state this view is in. It is computed here, in one place, from one set of
+    // inputs, which is what makes "never two of the three at once" a property of the page rather than
+    // a coincidence of four independent `hidden` flags.
+    function panelState(deviceCount) {
+      if (failure) { return 'error'; }
+      if (!watching) { return 'idle'; }
+      if (!deviceSetKnown) { return 'loading'; }
+      if (deviceCount === 0) { return 'empty'; }
+      return 'ready';
+    }
+
+    function renderPanelState(deviceCount) {
+      var s = panelState(deviceCount);
+      panelStateEl.setAttribute('data-state', s);
+      switch (s) {
+        case 'error':
+          panelStateEl.textContent = failure;
+          panelActionEl.textContent = failureAction;
+          break;
+        case 'idle':
+          panelStateEl.textContent = 'Enter a viewer token';
+          panelActionEl.textContent = 'Then choose Watch';
+          break;
+        case 'loading':
+          panelStateEl.textContent = 'Connecting to your family';
+          panelActionEl.textContent = 'Choose Watch again to retry';
+          break;
+        case 'empty':
+          panelStateEl.textContent = MSG_NO_DEVICES;
+          panelActionEl.textContent = 'Enrol a phone to see it here';
+          break;
+        default:
+          panelStateEl.textContent = 'Watching your family';
+          panelActionEl.textContent = interrupted ? 'Feed interrupted' : 'Live from your server';
+      }
+      return s;
     }
 
     function render() {
@@ -145,15 +325,27 @@
         var li = document.createElement('li');
         li.setAttribute('data-device-id', d.id);
         li.setAttribute('data-state', d.state);
-        li.appendChild(document.createTextNode(d.name + ' '));
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'name';
+        nameSpan.textContent = d.name;
+        li.appendChild(nameSpan);
+        li.appendChild(document.createTextNode(' '));
         var span = document.createElement('span');
         span.className = 'state';
-        span.textContent = d.state;
+        span.textContent = stateText(d.state);
         li.appendChild(span);
+        if (d.note) {
+          li.appendChild(document.createTextNode(' '));
+          var note = document.createElement('span');
+          note.className = 'note';
+          note.textContent = d.note;
+          li.appendChild(note);
+        }
         if (interrupted) {
+          li.appendChild(document.createTextNode(' '));
           var mark = document.createElement('span');
           mark.className = 'unconfirmed';
-          mark.textContent = ' (unconfirmed)';
+          mark.textContent = MSG_UNCONFIRMED;
           li.appendChild(mark);
         }
         if (d.located) {
@@ -164,19 +356,30 @@
           unlocatedCount++;
         }
       }
-      unlocatedHeadingEl.hidden = unlocatedCount === 0;
+      show(unlocatedHeadingEl, unlocatedCount > 0);
 
-      // "No devices" is only sayable once GET /v1/positions has answered: the stream fixes exactly
-      // three event types and none of them marks the snapshot complete, so an empty map before that
-      // response means "still connecting", which is a different thing and must not be claimed.
-      emptyEl.textContent = (deviceSetKnown && ids.length === 0) ? MSG_NO_DEVICES : '';
+      var locatedCount = ids.length - unlocatedCount;
+      // EVERY AGGREGATE STATES ITS SET. "3 devices" beside a map is a figure a reader takes for the
+      // whole family; what is true is "3 of 5 are on the map, 2 have no position", and the two left
+      // out are counted rather than quietly dropped from the denominator.
+      show(locatedCountEl, ids.length > 0);
+      locatedCountEl.textContent = ids.length === 0 ? ''
+        : locatedCount + ' of ' + ids.length + ' on map, ' + unlocatedCount + ' without position';
 
+      // Same rule for the rejects: the count is stated over the events this page was handed, so a
+      // reader can tell one bad event in forty from forty in forty.
+      show(rejectedEl, rejectedCount > 0);
+      show(rejectedDetailEl, rejectedCount > 0);
       rejectedEl.textContent = rejectedCount === 0 ? ''
-        : rejectedCount + ' event(s) rejected: ' + lastRejection;
+        : rejectedCount + ' of ' + receivedCount + ' updates unreadable';
+      rejectedDetailEl.textContent = rejectedCount === 0 ? '' : 'latest: ' + lastRejection;
+
+      renderPanelState(ids.length);
     }
 
     // reject drops ONE event and says so. It never blanks the map, never removes a device, and never
     // stops the stream: an event this page cannot account for is one event lost, not a session lost.
+    // Reasons stay to a few words - the explanation of each lives in the linked document.
     function reject(why) {
       rejectedCount++;
       lastRejection = why;
@@ -186,7 +389,7 @@
     function markInterrupted(why) {
       interrupted = true;
       interruptedWhy = why;
-      setStatus('connection interrupted: ' + why + '. Device states below are no longer confirmed.', 'error');
+      setStatus('connection interrupted', 'error');
       render();
     }
 
@@ -197,9 +400,19 @@
       render();
     }
 
+    function fail(reason, action) {
+      failure = reason;
+      failureAction = action;
+    }
+
+    function clearFailure() {
+      failure = '';
+      failureAction = '';
+    }
+
     function ensureDevice(id, name) {
       if (!devices[id]) {
-        devices[id] = { id: id, name: name || id, state: 'no-position', located: false };
+        devices[id] = { id: id, name: name || id, state: 'no-position', located: false, note: '' };
       } else if (name) {
         devices[id].name = name;
       }
@@ -240,7 +453,7 @@
       // The connection may well still be open, so this is NOT a drop - and it is exactly the case
       // where a map must stop implying that what it is showing is current.
       if (type === 'error') {
-        var why = 'the server reported it cannot read this family\'s data';
+        var why = 'the server cannot read this family';
         try {
           var e = JSON.parse(data);
           if (e && typeof e.message === 'string' && e.message) { why = e.message; }
@@ -249,19 +462,21 @@
         return;
       }
 
+      receivedCount++;
+
       if (type !== 'position' && type !== 'presentation') {
-        reject('unrecognised event type "' + type + '"');
+        reject('unknown event type');
         return;
       }
 
       var p;
-      try { p = JSON.parse(data); } catch (err) { reject('unparseable event data'); return; }
+      try { p = JSON.parse(data); } catch (err) { reject('unreadable event data'); return; }
       if (!p || typeof p !== 'object' || typeof p.device_id !== 'string' || !p.device_id) {
         reject('event names no device');
         return;
       }
       if (STATE_TOKENS.indexOf(p.presentation) < 0) {
-        reject('presentation value "' + String(p.presentation) + '" is outside the four tokens');
+        reject('unknown state word');
         return;
       }
 
@@ -271,11 +486,18 @@
       if (type === 'position') {
         // A position event places or moves this device's marker and renders its state.
         if (!isFiniteNumber(p.lat) || !isFiniteNumber(p.lon)) {
-          reject('position event for ' + d.name + ' carries no usable coordinate');
+          // PRESENT BUT UNLOCATED, never located at a fabricated coordinate. The device keeps its
+          // place in the list and says why it is not on the map; the event still costs itself.
+          d.state = p.presentation;
+          d.located = false;
+          d.note = '- position not readable';
+          removeMarker(p.device_id);
+          reject('coordinate not readable');
           return;
         }
         d.state = p.presentation;
         d.located = true;
+        d.note = '';
         placeMarker(d, p.lat, p.lon);
       } else if (p.presentation === 'no-position') {
         // An UNLOCATED presentation payload: the server no longer holds a position for this device
@@ -283,6 +505,7 @@
         // marker at ANY coordinate, and no marker may survive at coordinates the server has dropped.
         d.state = 'no-position';
         d.located = false;
+        d.note = '';
         removeMarker(p.device_id);
       } else {
         // A LOCATED presentation payload: the device has not moved, only its freshness changed.
@@ -307,22 +530,30 @@
     // this response lands.
     function applyPositions(entries) {
       if (typeof entries === 'string') {
-        try { entries = JSON.parse(entries); } catch (err) { reject('unparseable positions response'); return; }
+        try {
+          entries = JSON.parse(entries);
+        } catch (err) {
+          receivedCount++;
+          reject('unreadable positions reply');
+          return;
+        }
       }
       if (!entries || Object.prototype.toString.call(entries) !== '[object Array]') {
-        reject('positions response is not a JSON array');
+        receivedCount++;
+        reject('positions reply is not a list');
         return;
       }
       deviceSetKnown = true;
 
       for (var i = 0; i < entries.length; i++) {
         var e = entries[i];
+        receivedCount++;
         if (!e || typeof e.device_id !== 'string' || !e.device_id) {
-          reject('a positions entry names no device');
+          reject('a positions row names no device');
           continue;
         }
         if (STATE_TOKENS.indexOf(e.presentation) < 0) {
-          reject('positions entry for ' + e.device_id + ' carries a presentation value outside the four tokens');
+          reject('unknown state word');
           continue;
         }
         var d = ensureDevice(e.device_id, e.device_name);
@@ -332,13 +563,19 @@
         if (e.presentation === 'no-position') {
           d.state = 'no-position';
           d.located = false;
+          d.note = '';
           removeMarker(e.device_id);
         } else if (isFiniteNumber(e.lat) && isFiniteNumber(e.lon)) {
           d.state = e.presentation;
           d.located = true;
+          d.note = '';
           placeMarker(d, e.lat, e.lon);
         } else {
+          // A row the server could not give a coordinate for: present, unlocated, and counted as a
+          // row this view left off the map rather than dropped from the set.
           d.state = e.presentation;
+          d.located = false;
+          d.note = '- position not readable';
         }
       }
       render();
@@ -358,11 +595,12 @@
       everOpened = false;
       interrupted = false;
       interruptedWhy = '';
+      receivedCount = 0;
       rejectedCount = 0;
       lastRejection = '';
       deviceSetKnown = false;
       fitted = false;
-      render();
+      clearFailure();
     }
 
     // refused ends the attempt. It does NOT leave an EventSource retrying in the background, because
@@ -371,18 +609,27 @@
     function refused(detail) {
       if (source) { source.close(); source = null; }
       setStatus(MSG_REFUSED + (detail ? ' (' + detail + ')' : ''), 'error');
+      fail(MSG_REFUSED, 'Check the token, then choose Watch');
+      render();
+    }
+
+    function unreachable(detail) {
+      setStatus('could not reach the server', 'error');
+      fail('Could not reach the server', detail || 'Check the server, then choose Watch');
       render();
     }
 
     function watch() {
       var tok = tokenEl.value.trim();
       reset();
+      watching = true;
       if (!tok) {
-        refused('no viewer token was given');
+        refused('no token given');
         return;
       }
 
-      setStatus('connecting...');
+      setStatus('connecting', 'idle');
+      render();
 
       // The device set, and the credential check. A 401 here is the ONLY reliable way this page can
       // tell "the server refuses this token" from "the network is down": EventSource reports every
@@ -395,7 +642,7 @@
             return null;
           }
           if (!resp.ok) {
-            setStatus('the server could not list this family\'s devices (HTTP ' + resp.status + ')', 'error');
+            unreachable('The server refused to list devices');
             return null;
           }
           return resp.json();
@@ -404,8 +651,8 @@
           if (entries === null || entries === undefined) { return; }
           applyPositions(entries);
         })
-        .catch(function (err) {
-          setStatus('could not reach the server to list devices: ' + err, 'error');
+        .catch(function () {
+          unreachable('Check the server, then choose Watch');
         });
 
       // The token travels in the query string because EventSource cannot set an Authorization header.
@@ -438,8 +685,8 @@
           return;
         }
         markInterrupted(everOpened
-          ? 'the live connection dropped; reconnecting'
-          : 'the live connection could not be opened');
+          ? 'the live connection dropped'
+          : 'the live connection could not open');
       });
     }
 
@@ -447,27 +694,38 @@
     tokenEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') { watch(); } });
     if (urlToken) { watch(); }
 
-    // The verification hook (MAP-VERIFICATION.md).
+    // The verification hook (MAP-VERIFICATION.md, and now cmd/uiverify).
     //
-    // AC28's rejection branches need input the production server has no path to emit - an unparseable
-    // body, an event type outside the three, a presentation token outside the four - and AC26 needs
-    // the same device described twice. Those inputs are constructed BY THE VERIFIER and handed to
-    // exactly the function a wire event goes through, so what is observed is the real routing rather
-    // than a second, test-only one. Nothing here reaches the server or changes what it may send.
+    // The rejection branches need input the production server has no path to emit - an unparseable
+    // body, an event type outside the three, a presentation token outside the four - and the
+    // last-known branch needs a severed feed. Those inputs are constructed BY THE VERIFIER and handed
+    // to exactly the function a wire event goes through, so what is observed is the real routing
+    // rather than a second, test-only one. Nothing here reaches the server or changes what it may
+    // send.
     window.trackerMap = {
       onStreamEvent: onStreamEvent,
       applyPositions: applyPositions,
       stateTokens: STATE_TOKENS,
+      stateText: STATE_TEXT,
       snapshot: function () {
+        var ids = Object.keys(devices);
+        var located = 0;
+        for (var i = 0; i < ids.length; i++) { if (devices[ids[i]].located) { located++; } }
         return {
           devices: JSON.parse(JSON.stringify(devices)),
           markerIds: Object.keys(markers),
           interrupted: interrupted,
           interruptedWhy: interruptedWhy,
+          receivedCount: receivedCount,
           rejectedCount: rejectedCount,
           lastRejection: lastRejection,
           deviceSetKnown: deviceSetKnown,
-          status: statusEl.textContent
+          deviceCount: ids.length,
+          locatedCount: located,
+          panelState: panelStateEl.getAttribute('data-state'),
+          panelStateText: panelStateEl.textContent,
+          status: statusEl.textContent,
+          statusHealth: statusEl.getAttribute('data-health')
         };
       }
     };

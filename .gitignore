@@ -5,3 +5,9 @@
 .env
 *.env
 !.env.example
+
+# what the UI grading routes last ran (cmd/uiverify). This is EVIDENCE, not a record: the
+# committed record is FRONTEND-CONVENTIONS-RECORD.md, and `make verify-ui-record` checks that
+# record against these run artefacts. Committing them would let the check pass on a run nobody
+# had made.
+/build/
