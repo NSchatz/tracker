@@ -200,7 +200,7 @@ func checkKeyboard() Check {
 				return fmt.Errorf("the watch control is not reachable by Tab; tab order was %v", order)
 			}
 			if ti > wi {
-				return fmt.Errorf("Tab reaches the watch control (%d) before the token field (%d), which is not the order they read: %v", wi, ti, order)
+				return fmt.Errorf("tabbing reaches the watch control (%d) before the token field (%d), which is not the order they read: %v", wi, ti, order)
 			}
 
 			// Operable to the same effect a pointer has: type the token and activate the control
@@ -221,7 +221,7 @@ func checkKeyboard() Check {
 				return err
 			}
 			if focused != "#watch" {
-				return fmt.Errorf("Tab from the token field focused %q, not the watch control", focused)
+				return fmt.Errorf("tabbing from the token field focused %q, not the watch control", focused)
 			}
 			if err := r.S.PressKey("\r"); err != nil {
 				return err
