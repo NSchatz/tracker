@@ -22,6 +22,33 @@ make android   # ./gradlew assembleDebug lintDebug testDebugUnitTest
 make smoke     # the real compose stack; asserts /healthz answers 200
 ```
 
+**The user-interface gate is a separate set of targets, and it is not optional.**
+
+```bash
+make verify-ui          # the browser map, in a real browser engine
+make verify-ui-android  # the Android screen, on a BOOTED emulator
+make verify-ui-refusal  # both of those, with their prerequisite removed, must refuse
+make verify-ui-record   # FRONTEND-CONVENTIONS-RECORD.md, against what actually ran
+```
+
+tracker ships two user interfaces and the umbrella's `documentation/frontend-conventions.md` binds
+both. Its clause F2 is the one to internalise: **a claim about what a person SEES is graded by the
+runtime that draws it.** Source text may never grade a rendered property — a grep cannot decide what
+a CSS rule applies to, what won the cascade, or what was shown rather than merely built. So do not
+"verify" a UI change by reading `map.html` or `strings.xml`; run the route. If you are tempted to add
+a `strings.Contains` assertion over the served page for something a person sees, that is the move
+this whole route exists to close.
+
+Two rules go with it, and both are enforced:
+
+- **Every assertion must be shown able to FAIL.** Each check is re-run against the same surface
+  mutated to break exactly the claim it measures (a substitution in the served bytes; a debug-only
+  `UiMutation` for the app), and the route fails if fewer demonstrations ran than there are claims.
+  If you add a rendered claim, add its mutation in the same change.
+- **These routes refuse; they never skip.** No engine, no SDK, no `/dev/kvm`, no booted device: exit
+  non-zero naming the prerequisite. Same stance as the PostGIS tests. `make verify-ui-refusal` is
+  what keeps that from rotting.
+
 `make check` **is** the gate. CI runs exactly this target and so does the umbrella's
 `scripts/verify.sh tracker` — one gate, defined once, in the `Makefile`. Tool versions are pinned there
 and **nowhere else**: restating them in `ci.yml` is how CI silently drifts away from the gate a human

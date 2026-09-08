@@ -1,5 +1,39 @@
 # MAP-VERIFICATION.md - the browser map, verified by eye
 
+> ## SUPERSEDED AS EVIDENCE. Kept as a record.
+>
+> **This document is no longer evidence for any clause `make verify-ui` grades.** The harness this
+> file said it could not have now exists: `cmd/uiverify` drives a real browser engine over the
+> production `/map` and `/static` handlers, in CI and on a laptop, and the clause record is
+> `FRONTEND-CONVENTIONS-RECORD.md`. An eye pass never satisfied F2 of the umbrella's frontend
+> conventions and it does not satisfy it now; the difference is that there is finally something that
+> does.
+>
+> Nothing here has been deleted. What was observed on 2026-08-24 was really observed, and deleting an
+> observation is not the same as superseding it. The table below says, row by row, which machine
+> assertion now grades the property the row was standing in for.
+>
+> | this document's row | now graded by | entry point |
+> |---|---|---|
+> | AC24 each of the four states names itself in words | `AC1-colour-free`, `AC5-absence` | `make verify-ui` |
+> | AC25 a `no-position` device is present, unlocated, and has no marker | `AC5-absence` | `make verify-ui` |
+> | AC26 the map renders the value the server sent, whatever the browser clock says | still this document ONLY | (see below) |
+> | AC27 connection health is a separate axis from device state | `AC8-stale` | `make verify-ui` |
+> | AC28 one bad event is one bad event | `AC7-one-bad-event` | `make verify-ui` |
+> | AC29 an empty family says so | `AC9-three-states` | `make verify-ui` |
+> | AC30 a refused credential says so | `AC9-three-states` | `make verify-ui` |
+>
+> **The one row still carried by an eye is AC26**, the browser-clock skew, and it is named here rather
+> than quietly dropped. `make verify-ui` does not replace the whole `Date` object in the page, so the
+> claim "a browser whose clock is hours off still renders exactly the token the server sent" remains
+> an observation from 2026-08-24 against a page whose rule has not changed. It is a smaller claim than
+> it looks - the page contains no clock arithmetic at all, which `make check-go` can see - but it is
+> not machine-graded, and no row of `FRONTEND-CONVENTIONS-RECORD.md` claims it is.
+>
+> **Do not add a row to section 5 for a clause the record maps to a machine assertion.** A manual pass
+> beside a machine one is confusing rather than reassuring: it invites a future reader to treat the
+> weaker of the two as a second opinion.
+
 The map at `GET /map` is one vendored HTML page with no build step, and this repository carries no
 JavaScript test tooling. Adding a headless-browser harness would be a new external dependency in this
 submodule, which is an operator decision and not one the presentation-state change may take. So the

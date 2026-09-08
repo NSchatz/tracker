@@ -2,9 +2,22 @@
 <resources>
     <string name="app_name">tracker</string>
 
+    <!-- ==========================================================================================
+         WHAT IS ON THE SCREEN, and what is not.
+         The frontend conventions' F8 puts scope labels on the surface and the paragraphs that
+         explain them in the repository's own documentation, linked once per region. On a phone
+         that is not a style preference: a card of prose is a card nobody reads, and the person
+         holding it is trying to answer one question at a glance ("is my location going out?").
+         So every string above the divider is a LABEL - a few words - and every string below it is
+         an EXPLANATION, rendered only on the in-app explanation destination that each card's one
+         affordance opens. The same explanations are committed as a document in this repository
+         (internal/server/static/app-explained.html), and `make verify-ui-android` refuses when one
+         of them has left the screen without landing there.
+         ========================================================================================== -->
+
     <!-- Home screen -->
     <string name="app_title">tracker</string>
-    <string name="app_subtitle">Reports this phone\'s location to your family\'s own server.</string>
+    <string name="app_subtitle">Sends this phone\'s location to your family</string>
 
     <!-- The foreground service's mandatory ongoing notification. Deliberately unambiguous: the
          person carrying the phone must be able to tell, at a glance, that location is being
@@ -16,44 +29,98 @@
 
     <!-- Permission flow -->
     <string name="permission_step_foreground_title">Allow location access</string>
-    <string name="permission_step_foreground_body">tracker needs location access to report where this phone is. The next screen is the system permission prompt.</string>
+    <string name="permission_step_foreground_body">Location access is needed</string>
     <string name="permission_step_foreground_action">Allow location</string>
 
     <string name="permission_step_background_dialog_title">Allow location all the time</string>
-    <string name="permission_step_background_dialog_body">To keep reporting when the app is closed, tracker needs background location. This is a second, separate prompt — Android will not ask for both at once.</string>
+    <string name="permission_step_background_dialog_body">A second, separate prompt</string>
     <string name="permission_step_background_dialog_action">Allow all the time</string>
 
     <string name="permission_step_background_settings_title">Allow location all the time</string>
-    <string name="permission_step_background_settings_body">On Android 11 and later the permission prompt has no “Allow all the time” option — it can only be set in system settings. Open settings, choose Permissions → Location, and pick “Allow all the time”.</string>
+    <string name="permission_step_background_settings_body">Set this in system settings</string>
     <string name="permission_step_background_settings_action">Open settings</string>
 
     <string name="permission_step_denied_title">Location access is blocked</string>
-    <string name="permission_step_denied_body">Android will no longer show the permission prompt for this app. Open settings and grant location access there.</string>
+    <string name="permission_step_denied_body">Grant it in system settings</string>
     <string name="permission_step_denied_action">Open settings</string>
 
     <string name="permission_ready_title">Permissions granted</string>
-    <string name="permission_ready_body">tracker can collect location continuously, including while the app is closed.</string>
+    <string name="permission_ready_body">Collection can run in the background</string>
 
-    <!-- Honest degraded states -->
-    <string name="warning_foreground_only">Background location is not granted. Collection works while the app is open, but Android will stop it once the app is closed — the trail will have gaps.</string>
-    <string name="warning_approximate">Only approximate location is granted, so positions may be off by a city block. Grant precise location for an accurate trail.</string>
-    <string name="warning_notifications_blocked">Notifications are blocked, so the ongoing “sharing your location” notice will not be visible. Collection still runs.</string>
+    <!-- Honest degraded states. Each is a WORD, never a colour: the warning prefix is what makes
+         the state readable to someone who cannot see the red. -->
+    <string name="warning_prefix">Warning</string>
+    <string name="warning_foreground_only">Background location not granted</string>
+    <string name="warning_approximate">Only approximate location granted</string>
+    <string name="warning_notifications_blocked">Notifications blocked</string>
     <string name="action_upgrade_precise">Use precise location</string>
 
     <!-- Server configuration -->
     <string name="config_title">Server</string>
-    <string name="config_url_label">Server URL (https://…)</string>
-    <string name="config_token_label">Device token (from tracker enroll)</string>
+    <string name="config_url_label">Server URL</string>
+    <string name="config_token_label">Device token</string>
     <string name="config_save">Save</string>
-    <string name="config_saved">Saved.</string>
-    <string name="config_plaintext_note">Stored unencrypted on this device until secure storage ships (C3).</string>
+    <string name="config_saved">Saved</string>
+    <string name="config_not_saved">Not saved</string>
+    <string name="config_plaintext_note">Token stored unencrypted</string>
 
     <!-- Collection controls and status -->
     <string name="collection_title">Collection</string>
     <string name="collection_start">Start collecting</string>
     <string name="collection_stop">Stop collecting</string>
-    <string name="collection_running">Running.</string>
-    <string name="collection_stopped">Stopped.</string>
-    <string name="collection_no_fix_yet">No fix reported yet.</string>
-    <string name="collection_limitation">Fixes are saved on this phone until the server confirms them, so going offline delays reporting instead of losing it. “dropped” means a fix the server permanently refused, one older than 90 days, or one discarded because the offline queue filled up.</string>
+    <string name="collection_running">Running</string>
+    <string name="collection_stopped">Stopped</string>
+
+    <!-- The three states this card can be in, exactly one at a time. -->
+    <string name="collection_state_unknown">Checking the queue</string>
+    <string name="collection_state_nothing_yet">Nothing reported yet</string>
+    <string name="collection_state_unreadable">Queue could not be read</string>
+    <string name="collection_state_reporting">Reporting</string>
+
+    <!-- The counters. Each figure names the set it was counted over and from when, because
+         "delivered 3" beside no set is a figure a reader takes for a lifetime total. -->
+    <string name="counter_delivered_label">Delivered</string>
+    <string name="counter_queued_label">Queued</string>
+    <string name="counter_dropped_label">Dropped</string>
+    <string name="counter_set_this_run">this run, from %1$s</string>
+    <string name="counter_set_this_run_unstarted">this run, not started</string>
+    <string name="counter_set_on_disk">on disk, read %1$s</string>
+    <string name="counter_set_on_disk_unread">on disk, not read</string>
+    <string name="figure_not_recorded">not recorded</string>
+    <string name="figure_unavailable">unavailable</string>
+    <string name="counters_current">Counters current</string>
+    <string name="counters_last_known">Last known %1$s</string>
+
+    <!-- One affordance per card, opening this app's own explanation for that card. -->
+    <string name="explain_permissions">About permissions</string>
+    <string name="explain_server">About server settings</string>
+    <string name="explain_counters">About these counters</string>
+    <string name="explanation_back">Back</string>
+    <string name="explanation_title_permissions">About permissions</string>
+    <string name="explanation_title_server">About server settings</string>
+    <string name="explanation_title_counters">About these counters</string>
+
+    <!-- ==========================================================================================
+         THE EXPLANATIONS. Rendered only on the explanation destination, never on the home screen.
+         Every paragraph below is also committed to internal/server/static/app-explained.html.
+         ========================================================================================== -->
+
+    <string name="explain_permission_foreground">tracker needs location access to report where this phone is. The next screen is the system permission prompt.</string>
+    <string name="explain_permission_background_dialog">To keep reporting when the app is closed, tracker needs background location. This is a second, separate prompt — Android will not ask for both at once.</string>
+    <string name="explain_permission_background_settings">On Android 11 and later the permission prompt has no “Allow all the time” option — it can only be set in system settings. Open settings, choose Permissions → Location, and pick “Allow all the time”.</string>
+    <string name="explain_permission_denied">Android will no longer show the permission prompt for this app. Open settings and grant location access there.</string>
+    <string name="explain_permission_ready">tracker can collect location continuously, including while the app is closed.</string>
+    <string name="explain_warning_foreground_only">Background location is not granted. Collection works while the app is open, but Android will stop it once the app is closed — the trail will have gaps.</string>
+    <string name="explain_warning_approximate">Only approximate location is granted, so positions may be off by a city block. Grant precise location for an accurate trail.</string>
+    <string name="explain_warning_notifications_blocked">Notifications are blocked, so the ongoing “sharing your location” notice will not be visible. Collection still runs.</string>
+
+    <string name="explain_config_plaintext">The device token is stored unencrypted in this app\'s private data on the phone until secure storage ships (roadmap C3). On a non-rooted phone with a lock screen no other app can read it, but anyone with root, an unlocked bootloader or a full-device backup can. Cloud backup of the app\'s data is already switched off.</string>
+    <string name="explain_config_verdict">Save reports the verdict of validating what you typed, never a blanket “Saved”. A URL the app will refuse to use says so here rather than failing silently at the first fix. A release build also refuses plain http, so a shipped app cannot send a bearer credential in the clear.</string>
+
+    <string name="explain_collection_limitation">Fixes are saved on this phone until the server confirms them, so going offline delays reporting instead of losing it. “dropped” means a fix the server permanently refused, one older than 90 days, or one discarded because the offline queue filled up.</string>
+    <string name="explain_counter_delivered">Delivered counts fixes the server accepted during THIS run of the app, from the moment collection started. It is not a lifetime total and it is not restored from disk: after a restart the honest answer is “not recorded”, not a stale number. It counts an idempotent replay the server already had as delivered, so it can over-count a fix that was sent twice.</string>
+    <string name="explain_counter_queued">Queued counts fixes currently sitting in the on-disk queue, read from the queue itself rather than counted in memory — which is why it survives a restart when the other two do not. A non-zero value is normal, not an error: it is what the queue looks like while the phone is offline, and it is the number that says nothing has been lost.</string>
+    <string name="explain_counter_dropped">Dropped counts fixes measured during this run that will never reach the server. It is shown as prominently as Delivered on purpose: an app that only ever displays its successes is how silent fix loss stays silent.</string>
+    <string name="explain_counter_not_recorded">A counter that has never been measured reads “not recorded”, never 0 and never a dash. A measured zero still reads 0, because “we checked and it is none” and “we never checked” are different facts and a reader deciding whether their family\'s trail has a hole in it needs to be able to tell them apart. If the queue directory cannot be read at all, the queued figure alone reads “unavailable” and everything else on the screen keeps working.</string>
+    <string name="explain_collection_freshness">While collection is running and a fix has arrived within the reporting interval, the counters are labelled as current. When collection is stopped, has been killed by the system, or has produced no fix for longer than that interval, the same counters are labelled “last known” with the time they were last updated. A frozen readout is never presented as a live one, and when collection resumes the counters go back to reading as current.</string>
 </resources>

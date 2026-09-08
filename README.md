@@ -242,8 +242,20 @@ A **viewer** watches the family move in real time over one long-lived connection
   located, and reports connection health as a **separate axis** from device state: a dropped stream
   or an `error` event marks every state *unconfirmed* rather than freezing a green map, and the
   server **re-states the whole family** on the first successful read after an outage, so health can
-  get better again and not only worse. The procedure that confirms what a browser actually renders,
-  and the record of what was seen, are in [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md).
+  get better again and not only worse. What the page says about a device is written for a person
+  rather than for the wire — a device the server holds no position for reads **"no position
+  recorded"**, not a token or a zero — and the words are explained at
+  [`/static/map-explained.html`](internal/server/static/map-explained.html), which the page links to
+  once per region and the server serves.
+
+  **What a browser actually renders is graded by a browser** (`make verify-ui`, below). The map's
+  page is served with a **Content-Security-Policy** admitting its inline style and script by a
+  per-response nonce, naming exactly one third-party host (the OpenStreetMap tile imagery) and no
+  reporting endpoint, alongside `Referrer-Policy: no-referrer` — the map URL carries a live viewer
+  token, so anything that can carry a URL off-origin would leak a read credential.
+  [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md) is the earlier manual procedure and the record of what
+  was once seen by eye; it is **superseded as evidence** for every clause the browser route now
+  grades, and it says so at the top.
 
 Two properties are load-bearing, each pinned by a test:
 
@@ -452,12 +464,46 @@ schema **owner** (it provisions and drops partitions). See [`THREAT-MODEL.md`](T
 ## Development
 
 ```bash
-make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck
+make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck · Android
 make smoke     # brings the real stack up and asserts /healthz answers 200
+
+make verify-ui          # the browser map's rendered claims, in a real browser engine
+make verify-ui-android  # the Android screen's rendered claims, on a booted emulator
+make verify-ui-refusal  # both of the above, with their prerequisite removed, must refuse
+make verify-ui-record   # the F1-F11 record, against what those routes actually ran
 ```
 
 `make check` is what CI runs and what the umbrella's `scripts/verify.sh tracker` runs — one gate, defined
 once, in the `Makefile`.
+
+### The user-interface gate
+
+tracker ships **two** user interfaces — the browser map and the Android screen — and a claim about
+what a person *sees* is graded by the runtime that draws it, never by searching HTML, CSS, Kotlin or
+a compiled resource table. A text search cannot decide what a CSS rule applies to, what won the
+cascade, or what was shown rather than merely built.
+
+So `make verify-ui` drives **Chromium** over the production `/map` and `/static` handlers and reads
+every number back out of the live engine: contrast from the resolved colours in both themes, focus
+indicators from a pixel diff of the rendering, target sizes from laid-out boxes, accessible names
+from the engine's own accessibility tree, network origins and policy violations from the browser's
+own records. `make verify-ui-android` runs an **instrumented** suite on a booted Android emulator
+with Google's Accessibility Test Framework applied to the tree the platform actually built.
+
+**No assertion in either route may pass vacuously.** Each one is also re-run against the same surface
+mutated to break exactly the claim it measures — one substitution in the bytes the server served, or
+a debug-only `UiMutation` that is inert in a release build — and the route fails if fewer
+demonstrations ran than there are claims. A check that cannot go red is not evidence.
+
+**They refuse; they never skip.** No browser engine, no Android SDK, no `/dev/kvm`, no booted device:
+each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
+as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make
+verify-ui-refusal` is the check that keeps that true. The clause-by-clause record, for both surfaces,
+is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make verify-ui-record`
+refuses a record naming an assertion that did not actually run.
+
+These are **not** folded into `make check`: that target is the gate a human runs on a laptop, and it
+does not need a browser or an emulator. CI runs both.
 
 **`make check` needs a reachable Docker daemon.** The tests start a real PostGIS with
 `testcontainers-go`, and **they fail rather than skip if they cannot**. That is deliberate: this

@@ -33,12 +33,46 @@ import androidx.compose.runtime.setValue
  */
 object CollectionStatus {
 
+    /**
+     * How much of this readout has actually been measured.
+     *
+     * The screen needs three states, and it cannot render them from the counters alone: `0` after a
+     * failed read and `0` after a successful one look identical. [UNKNOWN] is the state before the
+     * first read has happened, [READ] once one has, and [UNREADABLE] when the queue directory could
+     * not be listed - which costs that ONE figure and nothing else on the screen.
+     */
+    enum class ReadState { UNKNOWN, READ, UNREADABLE }
+
+    /** Whether the queue depth has been read, and whether the attempt worked. */
+    var readState: ReadState by mutableStateOf(ReadState.UNKNOWN)
+        internal set
+
     /** Whether the foreground service is currently running. */
     var running: Boolean by mutableStateOf(false)
         internal set
 
-    /** Fixes the server accepted — `201 Created` or a `200` idempotent replay. Both arrived. */
-    var delivered: Int by mutableIntStateOf(0)
+    /**
+     * When the current run started, or null if no run has started in this process.
+     *
+     * The counters below are counted over THIS RUN, and a figure whose set is unnamed is a figure a
+     * reader will take for a lifetime total. This is the "from when" the screen prints beside them.
+     */
+    var runStartedAtMillis: Long? by mutableStateOf(null)
+        internal set
+
+    /** When any counter last moved, so the screen can say whether it is current or last known. */
+    var countersAsOfMillis: Long? by mutableStateOf(null)
+        internal set
+
+    /**
+     * Fixes the server accepted — `201 Created` or a `200` idempotent replay. Both arrived.
+     *
+     * **Null means NOT RECORDED**, and that is different from zero. Before a run has started, or
+     * after a process restart, nothing has been measured, and rendering `0` would tell the person
+     * carrying the phone that nothing has been delivered when the truth is that nobody counted. A
+     * genuine measured zero — a run that has started and delivered nothing yet — is `0`.
+     */
+    var delivered: Int? by mutableStateOf<Int?>(null)
         internal set
 
     /**
@@ -49,7 +83,7 @@ object CollectionStatus {
      * next to [dropped] precisely so the two are not confused: queued fixes are still owed to the
      * server, dropped ones never will be.
      */
-    var queued: Int by mutableIntStateOf(0)
+    var queued: Int? by mutableStateOf<Int?>(null)
         internal set
 
     /**
@@ -62,12 +96,32 @@ object CollectionStatus {
      * left here is genuine, permanent loss, and it stays as prominent as [delivered] so it cannot be
      * silent.
      */
-    var dropped: Int by mutableIntStateOf(0)
+    var dropped: Int? by mutableStateOf<Int?>(null)
         internal set
 
     /** Epoch millis of the last fix the service handed to the reporter, or 0 if none yet. */
     var lastFixAtMillis: Long by mutableLongStateOf(0L)
         internal set
+
+    /**
+     * Puts the readout back where a freshly started process finds it.
+     *
+     * Test-only in effect: the object is a process-scoped singleton, so an instrumented case that
+     * drove it would otherwise leak its state into the next one and the "not recorded" branch would
+     * be unprovable after any case that recorded something.
+     */
+    @Synchronized
+    internal fun clearForTest() {
+        readState = ReadState.UNKNOWN
+        running = false
+        delivered = null
+        queued = null
+        dropped = null
+        runStartedAtMillis = null
+        countersAsOfMillis = null
+        lastFixAtMillis = 0L
+        lastError = null
+    }
 
     /** The last failure, in the words the server or the network used. Null once something works. */
     var lastError: String? by mutableStateOf(null)
@@ -88,9 +142,14 @@ object CollectionStatus {
      * itself, which is the only source that can tell the truth about it.
      */
     @Synchronized
-    internal fun reset() {
+    internal fun reset(now: Long = System.currentTimeMillis()) {
+        // A run has STARTED, so these are now measured and their measured value is zero. That is a
+        // different fact from "nobody has counted", which is what null means, and the screen renders
+        // them differently on purpose.
         delivered = 0
         dropped = 0
+        runStartedAtMillis = now
+        countersAsOfMillis = now
         lastFixAtMillis = 0L
         lastError = null
     }
@@ -102,11 +161,21 @@ object CollectionStatus {
      * the last delivery attempt worked, and wiping the error here would make an ongoing outage look
      * resolved every time a new fix was measured.
      *
-     * @param queueDepth how many fixes are now waiting.
+     * @param queueDepth how many fixes are now waiting, or **null when the queue could not be
+     *   read**. A queue that could not be listed is reported as unreadable rather than as empty:
+     *   showing `0` while fixes sit on disk misrepresents the one thing the durable queue exists to
+     *   guarantee, and showing `0` when nothing could be counted at all is worse still.
      */
     @Synchronized
-    internal fun recordQueued(queueDepth: Int) {
+    internal fun recordQueued(queueDepth: Int?, now: Long = System.currentTimeMillis()) {
+        if (queueDepth == null) {
+            readState = ReadState.UNREADABLE
+            queued = null
+            return
+        }
+        readState = ReadState.READ
         queued = queueDepth
+        countersAsOfMillis = now
     }
 
     /**
@@ -116,10 +185,19 @@ object CollectionStatus {
      * delivered nine fixes and discarded one is not a clean bill of health.
      */
     @Synchronized
-    internal fun recordFlush(delivered: Int, discarded: Int, queued: Int, reason: String?) {
-        this.delivered += delivered
-        this.dropped += discarded
+    internal fun recordFlush(
+        delivered: Int,
+        discarded: Int,
+        queued: Int,
+        reason: String?,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        this.delivered = (this.delivered ?: 0) + delivered
+        this.dropped = (this.dropped ?: 0) + discarded
         this.queued = queued
+        this.readState = ReadState.READ
+        this.countersAsOfMillis = now
+        if (this.runStartedAtMillis == null) this.runStartedAtMillis = now
         when {
             reason != null -> lastError = reason
             delivered > 0 && discarded == 0 -> lastError = null
@@ -127,16 +205,18 @@ object CollectionStatus {
     }
 
     @Synchronized
-    internal fun recordDropped(reason: String) {
-        dropped += 1
+    internal fun recordDropped(reason: String, now: Long = System.currentTimeMillis()) {
+        dropped = (dropped ?: 0) + 1
+        countersAsOfMillis = now
         lastError = reason
     }
 
     /** Records [count] fixes lost at once — evicted from a full queue, say. */
     @Synchronized
-    internal fun recordDroppedBatch(count: Int, reason: String) {
+    internal fun recordDroppedBatch(count: Int, reason: String, now: Long = System.currentTimeMillis()) {
         if (count <= 0) return
-        dropped += count
+        dropped = (dropped ?: 0) + count
+        countersAsOfMillis = now
         lastError = reason
     }
 

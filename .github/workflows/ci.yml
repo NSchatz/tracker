@@ -60,6 +60,84 @@ jobs:
       - name: make check
         run: make check
 
+  ui:
+    # The USER-INTERFACE gate, and it is a separate job because it needs prerequisites `make check`
+    # does not: a browser engine and a booted Android emulator.
+    #
+    # tracker ships two user interfaces, and the umbrella's frontend conventions bind both. F2 of
+    # those conventions admits exactly one grader for a claim about what a person SEES — the runtime
+    # that draws it — so these four targets drive Chromium over the served map and an emulator over
+    # the app's one screen. All four REFUSE LOUDLY rather than skipping when their prerequisite is
+    # missing, which is why a runner that lost its browser or its /dev/kvm turns this job red
+    # instead of quietly grading nothing.
+    #
+    # As everywhere else in this repo, the version pins live in the build files, never here: the AVD
+    # name and the system image are Makefile variables, the Android tool versions are in
+    # android/gradle/libs.versions.toml, and Chromium is whatever the runner image ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      # The map's rendered claims, in a real browser engine. The runner image ships Google Chrome;
+      # cmd/uiverify finds it on PATH and exits non-zero naming it if it ever stops being there.
+      - name: make verify-ui (the browser map)
+        run: make verify-ui
+
+      # Hardware acceleration for the emulator. Without /dev/kvm an x86_64 Android image does not
+      # boot at all — it segfaults under QEMU's interpreter — so this is a prerequisite, not a
+      # speed-up, and `scripts/android-emulator.sh` says so by name when it is absent.
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: provision the emulator
+        run: |
+          set -euo pipefail
+          image="$(make -s print-sys-image)"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "emulator" "$image"
+          echo no | avdmanager create avd -n "$(make -s print-avd)" -k "$image" -d pixel_5 --force
+
+      # The Android screen's rendered claims, on that emulator, with the platform accessibility
+      # checks enabled over every rendered view.
+      - name: make verify-ui-android (the Android screen)
+        run: make verify-ui-android
+
+      # Both routes, with their prerequisite removed, must exit non-zero naming what is missing.
+      # This is the check that keeps the two above from ever degrading into a silent skip.
+      - name: make verify-ui-refusal (the refusal paths still bite)
+        run: make verify-ui-refusal
+
+      # The committed F1-F11 record, checked against what the two routes ACTUALLY ran above. It runs
+      # last for that reason: it refuses a record naming an assertion nobody executed.
+      - name: make verify-ui-record (the clause record)
+        run: make verify-ui-record
+
+      - name: upload the UI grading evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-grading-evidence
+          path: |
+            build/uiverify/
+            android/app/build/outputs/androidTest-results/
+          if-no-files-found: warn
+
   smoke:
     # The deploy gate. `make check` proves the code is correct; this proves the SHIPPED
     # ARTEFACT works — that the image builds, the binary finds its database, and the

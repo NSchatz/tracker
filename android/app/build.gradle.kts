@@ -87,4 +87,20 @@ dependencies {
     implementation(libs.play.services.location)
 
     testImplementation(libs.junit)
+
+    // The instrumented UI suite (S0056). These are androidTest-only: they never reach the shipped
+    // APK, and `make check` — assemble + lint + JVM unit tests — is unchanged by their presence.
+    // The suite they support runs on a booted emulator via `make verify-ui-android`, which refuses
+    // loudly rather than skipping when there is none.
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.accessibility.test.framework)
+    androidTestImplementation(libs.guava)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

@@ -43,7 +43,7 @@ TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck tidy clean image compose-check smoke run-db \
-	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all
+	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o tracker ./cmd/tracker
@@ -142,6 +142,14 @@ verify-ui-record:
 	go run ./cmd/uiverify record
 
 verify-ui-all: verify-ui verify-ui-android verify-ui-refusal verify-ui-record
+
+# CI provisions the emulator from these, so that the AVD name and the system image stay pinned HERE
+# and are never restated in ci.yml - the same rule the Go tools and the Android SDK levels follow.
+print-avd:
+	@echo "$(TRACKER_AVD)"
+
+print-sys-image:
+	@echo "$(TRACKER_SYS_IMAGE)"
 
 # --- deployment ---------------------------------------------------------------
 

@@ -166,7 +166,7 @@ class LocationCollectionService : Service() {
         // the depth is read from disk rather than assumed to be zero, and a flush is asked for
         // straight away so a backlog left by a killed process starts draining without waiting for
         // the next fix.
-        CollectionStatus.recordQueued(queue.size())
+        CollectionStatus.recordQueued(queue.depth())
         FixUploadWorker.enqueueFlush(this)
         CollectionStatus.running = true
         startLocationUpdates()
@@ -256,7 +256,7 @@ class LocationCollectionService : Service() {
                             "fix(es) were discarded. The server has not been reachable for a long time.",
                     )
                 }
-                CollectionStatus.recordQueued(queue.size())
+                CollectionStatus.recordQueued(queue.depth())
                 FixUploadWorker.enqueueFlush(this)
             }
 
