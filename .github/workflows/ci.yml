@@ -105,13 +105,22 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # ANDROID_AVD_HOME is pinned for the whole job so the step that CREATES the AVD and the script
+      # that looks for it cannot disagree about where it lives - avdmanager's default has moved
+      # across cmdline-tools releases, and a mismatch reads as "no emulator", which is the one thing
+      # this route must never say when there is one.
       - name: provision the emulator
+        env:
+          ANDROID_AVD_HOME: ${{ github.workspace }}/.avd
         run: |
           set -euo pipefail
+          mkdir -p "$ANDROID_AVD_HOME"
           image="$(make -s print-sys-image)"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --install "platform-tools" "emulator" "$image"
           echo no | avdmanager create avd -n "$(make -s print-avd)" -k "$image" -d pixel_5 --force
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          ls -la "$ANDROID_AVD_HOME"
 
       # The Android screen's rendered claims, on that emulator, with the platform accessibility
       # checks enabled over every rendered view.

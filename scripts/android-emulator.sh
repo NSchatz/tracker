@@ -54,11 +54,43 @@ require() {
 	[ -f "$img_path/system.img" ] || refuse "the system image $SYS_IMAGE (looked for $img_path/system.img)" \
 		"sdkmanager --install '$SYS_IMAGE'"
 
-	avdhome="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-	[ -f "$avdhome/$AVD_NAME.ini" ] || refuse "an AVD named '$AVD_NAME' under $avdhome" \
-		"avdmanager create avd -n $AVD_NAME -k '$SYS_IMAGE' -d pixel_5"
+	avdhome="$(find_avd_home)"
+	if [ -z "$avdhome" ]; then
+		refuse "an AVD named '$AVD_NAME' (looked in: $(avd_home_candidates | tr '\n' ' '))" \
+			"ANDROID_AVD_HOME=<dir> avdmanager create avd -n $AVD_NAME -k '$SYS_IMAGE' -d pixel_5"
+	fi
 
-	echo "ok: SDK=$sdk emulator=$emu image=$SYS_IMAGE avd=$AVD_NAME"
+	echo "ok: SDK=$sdk emulator=$emu image=$SYS_IMAGE avd=$AVD_NAME avd_home=$avdhome"
+}
+
+# avd_home_candidates lists every directory avdmanager might have written the AVD to.
+#
+# This is a list rather than one path because avdmanager's own answer has moved across
+# cmdline-tools releases (ANDROID_AVD_HOME, then ANDROID_PREFS_ROOT, with ANDROID_SDK_HOME as the
+# legacy spelling), and a runner that sets one of them makes the create step and this check disagree
+# about where the AVD is. The refusal names every place it looked, so a mismatch diagnoses itself
+# rather than reading as "no emulator".
+avd_home_candidates() {
+	[ -n "${ANDROID_AVD_HOME:-}" ] && echo "$ANDROID_AVD_HOME"
+	[ -n "${ANDROID_PREFS_ROOT:-}" ] && echo "$ANDROID_PREFS_ROOT/avd"
+	[ -n "${ANDROID_SDK_HOME:-}" ] && echo "$ANDROID_SDK_HOME/.android/avd"
+	echo "$HOME/.android/avd"
+	return 0
+}
+
+# find_avd_home echoes the first candidate that actually holds this AVD, or nothing.
+find_avd_home() {
+	local dir
+	while read -r dir; do
+		[ -n "$dir" ] || continue
+		if [ -f "$dir/$AVD_NAME.ini" ]; then
+			echo "$dir"
+			return 0
+		fi
+	done <<EOF
+$(avd_home_candidates)
+EOF
+	return 0
 }
 
 boot() {
@@ -67,6 +99,10 @@ boot() {
 	sdk="$(sdk_root)"
 	emu="$sdk/emulator/emulator"
 	adb="$sdk/platform-tools/adb"
+	# The emulator resolves the AVD the same way avdmanager wrote it, so hand it the directory the
+	# AVD was actually found in rather than hoping the two agree.
+	ANDROID_AVD_HOME="$(find_avd_home)"
+	export ANDROID_AVD_HOME
 
 	"$adb" start-server >/dev/null 2>&1
 	if "$adb" devices | grep -q "^emulator-.*device$"; then
