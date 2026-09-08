@@ -67,6 +67,14 @@ quietly stopped finding anything. Do not "fix" those trees, do not add a `pin-ch
 it. New pinned reference to resolve? Get the value from the publisher once and write it down; a pin
 resolved twice can silently differ.
 
+**`make pin-check` is RED right now, and the one thing it names is true.**
+`android/gradle/wrapper/gradle-wrapper.properties` has no `distributionSha256Sum`, so the wrapper still
+downloads and runs `gradle-8.9-bin.zip` without checking the bytes. The line it needs is
+`distributionSha256Sum=d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab`, and the
+reason it is not there is that the Claude Code tool layer classifies that path as a sensitive file and
+refuses to write it - see `work/specs/S0059-tracker-pinning-1/blocked-gradle-wrapper-sha256.md` in the
+umbrella. Add the line by hand and the gate goes green; every other category already passes.
+
 As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
 (`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable
 Docker daemon (for the PostGIS tests) **and** a JDK 17 + an Android SDK. The Android half resolves the
