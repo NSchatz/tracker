@@ -3,6 +3,7 @@ package uiverify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,37 +51,87 @@ func (r *Refusal) Error() string {
 func (r *Refusal) Unwrap() error { return r.Underlying }
 
 // browserCandidates are the engine binaries this route knows how to drive, in preference order.
+//
+// Google Chrome comes first and that is not a preference about the browser. On Ubuntu 24.04
+// `/usr/bin/chromium` is frequently a SNAP wrapper, and a snap-confined browser cannot read the
+// temporary profile directory the driver creates, so it starts and then never publishes a DevTools
+// endpoint - "websocket url timeout reached", which reads exactly like a broken harness. The
+// packaged Chrome on the CI runner image has no such confinement. Where only chromium exists (a
+// plain Debian package, as in this project's container) the search falls through to it and works.
 var browserCandidates = []string{
+	"google-chrome-stable",
+	"google-chrome",
 	"chromium",
 	"chromium-browser",
-	"google-chrome",
-	"google-chrome-stable",
 	"chrome",
 }
 
-// FindEngine locates a Chromium-family browser, or refuses by name.
-func FindEngine() (string, error) {
+// FindEngines lists every Chromium-family browser on PATH, in preference order, or refuses by name.
+// It returns a LIST rather than one path because "found on PATH" and "will actually start under a
+// driver" are different questions, and only the second one matters.
+func FindEngines() ([]string, error) {
 	if p := os.Getenv("TRACKER_BROWSER"); p != "" {
 		if _, err := os.Stat(p); err != nil {
-			return "", &Refusal{
+			return nil, &Refusal{
 				Criterion:    webCriteria,
 				Prerequisite: "the browser engine named by TRACKER_BROWSER (" + p + ")",
 				HowToObtain:  "unset TRACKER_BROWSER to search PATH, or point it at an installed Chromium",
 				Underlying:   err,
 			}
 		}
-		return p, nil
+		return []string{p}, nil
 	}
+	var found []string
 	for _, c := range browserCandidates {
 		if p, err := exec.LookPath(c); err == nil {
-			return p, nil
+			found = append(found, p)
 		}
 	}
-	return "", &Refusal{
-		Criterion:    webCriteria,
-		Prerequisite: "a Chromium-family browser engine on PATH (tried: " + strings.Join(browserCandidates, ", ") + ")",
-		HowToObtain:  "install chromium (Debian: the chromium package; CI: browser-actions/setup-chrome@v1), or set TRACKER_BROWSER to its path",
+	if len(found) == 0 {
+		return nil, &Refusal{
+			Criterion:    webCriteria,
+			Prerequisite: "a Chromium-family browser engine on PATH (tried: " + strings.Join(browserCandidates, ", ") + ")",
+			HowToObtain:  "install chromium (Debian: the chromium package) or Google Chrome, or set TRACKER_BROWSER to its path",
+		}
 	}
+	return found, nil
+}
+
+// NewSessionFrom tries each engine in turn and returns the first that actually starts under the
+// driver. It refuses only when every one of them has failed, naming each and why.
+func NewSessionFrom(ctx context.Context, engines []string) (*Session, string, error) {
+	var reasons []string
+	for _, e := range engines {
+		s, err := NewSession(ctx, e)
+		if err == nil {
+			return s, e, nil
+		}
+		reasons = append(reasons, e+": "+firstLine(err))
+	}
+	return nil, "", &Refusal{
+		Criterion:    webCriteria,
+		Prerequisite: "a browser engine that will actually START under a driver",
+		HowToObtain: "install Google Chrome, or a NON-SNAP chromium (a snap-confined browser starts but " +
+			"never publishes a DevTools endpoint), or set TRACKER_BROWSER to one that does",
+		Underlying: errors.New("every engine found on PATH failed:\n      " + strings.Join(reasons, "\n      ")),
+	}
+}
+
+// firstLine reduces one engine's failure to a line, keeping the CAUSE rather than the wrapper. A
+// list of "missing prerequisite: a browser engine that will actually start" repeated per candidate
+// tells a reader nothing; "websocket url timeout reached" tells them it is a snap.
+func firstLine(err error) string {
+	var r *Refusal
+	if errors.As(err, &r) && r.Underlying != nil {
+		return strings.TrimSpace(r.Underlying.Error())
+	}
+	for _, l := range strings.Split(err.Error(), "\n") {
+		l = strings.TrimSpace(l)
+		if l != "" && !strings.HasPrefix(l, "REFUSED") {
+			return l
+		}
+	}
+	return err.Error()
 }
 
 const webCriteria = "AC1-AC11, AC21, AC22 (the map's rendered claims, F1/F2/F9/F10/F11)"

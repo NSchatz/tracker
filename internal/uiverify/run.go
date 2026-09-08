@@ -23,17 +23,16 @@ type Result struct {
 // fail. It returns the results and a nil error only when every check passed AND every check was
 // demonstrated; a Refusal is returned unchanged so the caller can print it and exit non-zero.
 func RunWeb(ctx context.Context, out io.Writer) ([]Result, error) {
-	engine, err := FindEngine()
+	engines, err := FindEngines()
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(out, "engine:  %s\n", engine)
-
-	sess, err := NewSession(ctx, engine)
+	sess, engine, err := NewSessionFrom(ctx, engines)
 	if err != nil {
 		return nil, err
 	}
 	defer sess.Close()
+	fmt.Fprintf(out, "engine:  %s (of %d found)\n", engine, len(engines))
 
 	stack := NewStack()
 	defer stack.Close()
