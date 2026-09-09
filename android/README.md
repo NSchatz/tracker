@@ -116,23 +116,39 @@ be evidence about the mock, not about Android.
   own scheduler back to itself, which is why `FixUploadWorker` was kept free of decisions instead.
 - **Battery cost**, and whether an OEM battery manager (Samsung, Xiaomi, …) kills the service anyway.
 
-#### Why there are no instrumented tests in this phase
+#### Why the instrumented suite grades the SCREEN and nothing else
 
-The roadmap sketched instrumented tests with `LocationManager` mock providers for C1. There are none,
-for two reasons, in order of importance:
+The roadmap sketched instrumented tests with `LocationManager` mock providers for C1, and there were
+none, for a reason that still holds: **they would not prove the thing that matters.** An instrumented
+test grants permissions with `GrantPermissionRule`, which hands them over programmatically. That
+bypasses the entire two-step flow — the dialog, the settings round-trip, the Android 11 behaviour
+change — which *is* the risky part of C1. A green instrumented test would say "permissions we granted
+ourselves are granted". Mock providers have the same shape of problem: they prove the app can read a
+location the test injected, not that the fused provider delivers one on a real phone under Doze.
 
-1. **They would not prove the thing that matters.** An instrumented test grants permissions with
-   `GrantPermissionRule`, which hands them over programmatically. That bypasses the entire two-step
-   flow — the dialog, the settings round-trip, the Android 11 behaviour change — which *is* the risky
-   part of C1. A green instrumented test would say "permissions we granted ourselves are granted".
-   Mock providers have the same shape of problem: they prove the app can read a location the test
-   injected, not that the fused provider delivers one on a real phone under Doze.
-2. **The CI environment cannot run them.** There is no `/dev/kvm` in this container, so a
-   hardware-accelerated emulator is unavailable, and no emulator or system image is installed.
+There **is** now an instrumented suite (`app/src/androidTest`, `make verify-ui-android`), and it is
+carefully scoped to the half of that argument which does not apply. It grades **what the screen
+draws** — brevity and the explanation destination, the counters' honesty, the three states,
+staleness, and a 360dp layout that clips nothing — because that is a claim only a running Android
+runtime can answer, and because the umbrella's frontend conventions say so in as many words: "an
+emulator, not the JVM, for Android". It grades **nothing about collection**: not the permission
+decisions, not the fused provider, not the flush schedule. Those are still the pure unit tests plus
+the operator check below, and the reasoning above is why.
 
-So the pure logic is unit-tested for real, and the device behaviour is an operator check. Adding an
-instrumented suite that only restates its own fixtures would grow the gate while proving nothing —
-the exact trade this repo refuses elsewhere when it forbids `t.Skip` in the Go tests.
+**Eight cases in that suite are `@Ignore`d and belong to another item.** The accessibility sweep
+(contrast, touch targets, spoken names, state carried by colour) and the operable-without-a-pointer
+traversal are carried by `S0074-tracker-android-a11y-operability`: on the emulator the traversal
+never reaches the save control, and the platform sweep stayed green against a screen deliberately
+broken to break it, so its passes were not evidence. They are kept verbatim as the artefacts that
+item inherits. `FRONTEND-CONVENTIONS-RECORD.md` records the deferral clause by clause and
+`make verify-ui-record` fences it — an `@Ignore` with no deferral behind it, or a deferral with no
+`@Ignore` behind it, turns that check red.
+
+The suite needs a booted emulator and **refuses loudly when it cannot have one**, naming the missing
+piece and how to get it (`scripts/android-emulator.sh`). It never skips. Without `/dev/kvm` an
+x86_64 image does not merely run slowly — it segfaults under QEMU's interpreter — so a runner without
+hardware virtualisation turns the job red rather than grading nothing. CI enables KVM explicitly for
+that job.
 
 #### The device check to run before believing C1 works
 
@@ -221,6 +237,38 @@ make android    # ./gradlew assembleDebug lintDebug testDebugUnitTest
 `assembleDebug` proves it builds an APK, `lintDebug` proves it is clean (lint **errors** fail the
 build — `abortOnError = true`), `testDebugUnitTest` runs the JVM unit tests described above.
 
+### The UI gate, which is a separate target on purpose
+
+```bash
+make verify-ui-android    # the instrumented suite, on a BOOTED emulator
+make verify-ui-refusal    # ... and the proof it refuses when there is no emulator
+```
+
+`make check` is unchanged and still means what it always meant. `make verify-ui-android` sits beside
+it because it needs something `make check` does not: a running Android device. It
+
+1. checks the repository explanation documents carry every claim that left the screen,
+2. asserts an SDK, an emulator binary, a system image and an AVD are present — **refusing by name**
+   when any is missing,
+3. boots the AVD headless and blocks until `sys.boot_completed`,
+4. runs `connectedDebugAndroidTest`.
+
+The AVD name and the system image are `TRACKER_AVD` and `TRACKER_SYS_IMAGE` in the root `Makefile`,
+which is the only place they are stated; CI reads them back with `make print-avd` /
+`make print-sys-image` rather than keeping a second copy.
+
+Provision an emulator alongside the SDK below:
+
+```bash
+sdkmanager --install "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
+echo no | avdmanager create avd -n tracker-ui -k "system-images;android-34;google_apis;x86_64" -d pixel_5
+```
+
+**`/dev/kvm` is a prerequisite, not an optimisation.** Without it the x86_64 image does not boot at
+all: QEMU's TCG interpreter segfaults partway through Android 14's start-up. `scripts/android-emulator.sh`
+waits for `sys.boot_completed` and then refuses by name, so an environment without hardware
+virtualisation reports a missing prerequisite rather than a passing suite.
+
 ## Toolchain — one-time, rootless
 
 AGP 8.5 needs **JDK 17**; the build needs an **Android SDK**. Both install without root:
@@ -253,3 +301,8 @@ parallel and subsequent runs hit it warm (it is hundreds of MB).
 files (`gradle/libs.versions.toml`, `app/build.gradle.kts`) and the Gradle wrapper, **never** restated
 in CI. Note the gate carries **both** stacks: the Go server (a real PostGIS via testcontainers,
 Docker required) and this Android client (JDK 17 + Android SDK). Size the runner for both.
+
+A second job, `ui`, provisions the same toolchain plus an emulator, **enables `/dev/kvm` explicitly**,
+and runs the four UI targets. It is separate from `check` because its prerequisites are different, and
+because a browser or an emulator that has gone missing must turn a job red rather than quietly
+grading nothing.

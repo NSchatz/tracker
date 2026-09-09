@@ -143,6 +143,7 @@ class LocationCollectionService : Service() {
             // throw here kills the process before `recordBlocked` runs, so the user is left with a
             // crash loop and no explanation, which is the one outcome worse than not collecting.
             CollectionStatus.recordBlocked(
+                TroubleKind.SERVICE_REFUSED,
                 "Collection could not start: Android refused the location foreground service " +
                     "(${e.javaClass.simpleName}). Check that location permission is granted, then " +
                     "start it again from this screen.",
@@ -157,7 +158,7 @@ class LocationCollectionService : Service() {
             // The fail-safe: refuse to run rather than run and quietly report nowhere. A service
             // showing "sharing your location" while posting to an unset URL is precisely the
             // looks-like-it's-working failure this project treats as worse than an outage.
-            CollectionStatus.recordBlocked(status.reason)
+            CollectionStatus.recordBlocked(TroubleKind.NOT_CONFIGURED, status.reason)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -166,7 +167,7 @@ class LocationCollectionService : Service() {
         // the depth is read from disk rather than assumed to be zero, and a flush is asked for
         // straight away so a backlog left by a killed process starts draining without waiting for
         // the next fix.
-        CollectionStatus.recordQueued(queue.size())
+        CollectionStatus.recordQueued(queue.depth())
         FixUploadWorker.enqueueFlush(this)
         CollectionStatus.running = true
         startLocationUpdates()
@@ -201,7 +202,10 @@ class LocationCollectionService : Service() {
             // The permission was revoked between the UI check and here — a real race, because the
             // user can revoke from Settings while the service runs. Stop rather than sit alive
             // producing nothing.
-            CollectionStatus.recordBlocked("Location permission was revoked, so collection stopped.")
+            CollectionStatus.recordBlocked(
+                TroubleKind.PERMISSION_LOST,
+                "Location permission was revoked, so collection stopped.",
+            )
             logDebug("requestLocationUpdates denied: ${e.message}")
             stopSelf()
         }
@@ -256,7 +260,7 @@ class LocationCollectionService : Service() {
                             "fix(es) were discarded. The server has not been reachable for a long time.",
                     )
                 }
-                CollectionStatus.recordQueued(queue.size())
+                CollectionStatus.recordQueued(queue.depth())
                 FixUploadWorker.enqueueFlush(this)
             }
 

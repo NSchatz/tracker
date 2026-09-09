@@ -36,7 +36,14 @@ LDFLAGS := -s -w
 
 IMAGE ?= tracker:dev
 
-.PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db
+# The user-interface grading routes (S0056). The AVD name and the system image are the only two
+# knobs; like every other tool pin in this repo they live HERE and are not restated in ci.yml.
+TRACKER_AVD ?= tracker-ui
+TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
+ANDROID_UI_TASKS ?= connectedDebugAndroidTest
+
+.PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
+	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o tracker ./cmd/tracker
@@ -121,6 +128,68 @@ check: check-go android
 # pins (the Gradle wrapper and version catalog included), so it sits in the half that runs
 # everywhere rather than in `android`, which needs an SDK.
 check-go: fmt vet build test staticcheck govulncheck pin-check
+
+# --- user-interface grading -----------------------------------------------------
+#
+# tracker ships TWO user interfaces and the umbrella's frontend conventions bind both: the browser
+# map at GET /map, and the Android client's single Compose screen. F2 of those conventions admits
+# exactly ONE grader for a claim about what a person sees — the runtime that draws it — so these
+# four targets drive a real browser engine and a real Android emulator, and refuse loudly rather
+# than skipping when either is missing. That refusal is the deliverable, not a nuisance: a route
+# that goes quiet when its prerequisite is absent reports green while proving nothing, which is the
+# same stance `make android` takes toward a missing SDK and `make test` toward a missing Docker.
+#
+# These are deliberately NOT folded into `make check`. `make check` is the gate a human runs on a
+# laptop; these need a browser engine and a booted emulator, and CI runs all six targets.
+
+# The map's rendered claims, in a real browser engine (AC1-AC11, AC21, AC22), each shown able to go
+# red against a surface mutated to break exactly that claim (AC18).
+verify-ui:
+	go run ./cmd/uiverify web
+
+# The Android screen's rendered claims (AC12, AC15-AC17) on a booted emulator, plus the repository
+# explanation documents the screen's labels moved their paragraphs into. AC13 and AC14 moved to
+# S0074-tracker-android-a11y-operability; FRONTEND-CONVENTIONS-RECORD.md records that and
+# `verify-ui-record` fences it.
+#
+# The boot's exit status is CHECKED rather than piped away. `x=$(cmd | tail -1)` takes tail's status,
+# so a boot that refused on a timeout - the one absence `require` cannot pre-check - would not stop
+# the line, and the refusal message AC19 asks for would be lost behind Gradle's own "no device".
+#
+# The last line is AC18's count, and it is not optional. `gradlew connectedDebugAndroidTest` is green
+# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded twelve claims
+# from a suite whose twelve demonstrations were deleted. `uiverify android` reads the emulator's own
+# JUnit results back and fails unless every claim the record names ran AND carries a passing
+# `<claim>_demonstration` beside it - the same force `Summarise` has on the browser route.
+verify-ui-android:
+	go run ./cmd/uiverify docs
+	@TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" ./scripts/android-emulator.sh require
+	@set -e; \
+	out="$$(mktemp)"; trap 'rm -f "$$out"' EXIT; \
+	TRACKER_AVD='$(TRACKER_AVD)' TRACKER_SYS_IMAGE='$(TRACKER_SYS_IMAGE)' ./scripts/android-emulator.sh boot >"$$out"; \
+	serial="$$(tail -1 "$$out")"; \
+	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
+	echo "instrumented suite on $$serial"; \
+	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
+	go run ./cmd/uiverify android
+
+# Both routes, with their prerequisite removed, must exit non-zero naming what is missing (AC19).
+verify-ui-refusal:
+	go run ./cmd/uiverify refusal
+
+# The committed F1-F11 record, checked against what the two routes actually ran (AC20).
+verify-ui-record:
+	go run ./cmd/uiverify record
+
+verify-ui-all: verify-ui verify-ui-android verify-ui-refusal verify-ui-record
+
+# CI provisions the emulator from these, so that the AVD name and the system image stay pinned HERE
+# and are never restated in ci.yml - the same rule the Go tools and the Android SDK levels follow.
+print-avd:
+	@echo "$(TRACKER_AVD)"
+
+print-sys-image:
+	@echo "$(TRACKER_SYS_IMAGE)"
 
 # --- deployment ---------------------------------------------------------------
 

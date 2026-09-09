@@ -242,8 +242,20 @@ A **viewer** watches the family move in real time over one long-lived connection
   located, and reports connection health as a **separate axis** from device state: a dropped stream
   or an `error` event marks every state *unconfirmed* rather than freezing a green map, and the
   server **re-states the whole family** on the first successful read after an outage, so health can
-  get better again and not only worse. The procedure that confirms what a browser actually renders,
-  and the record of what was seen, are in [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md).
+  get better again and not only worse. What the page says about a device is written for a person
+  rather than for the wire — a device the server holds no position for reads **"no position
+  recorded"**, not a token or a zero — and the words are explained at
+  [`/static/map-explained.html`](internal/server/static/map-explained.html), which the page links to
+  once per region and the server serves.
+
+  **What a browser actually renders is graded by a browser** (`make verify-ui`, below). The map's
+  page is served with a **Content-Security-Policy** admitting its inline style and script by a
+  per-response nonce, naming exactly one third-party host (the OpenStreetMap tile imagery) and no
+  reporting endpoint, alongside `Referrer-Policy: no-referrer` — the map URL carries a live viewer
+  token, so anything that can carry a URL off-origin would leak a read credential.
+  [`MAP-VERIFICATION.md`](MAP-VERIFICATION.md) is the earlier manual procedure and the record of what
+  was once seen by eye; it is **superseded as evidence** for every clause the browser route now
+  grades, and it says so at the top.
 
 Two properties are load-bearing, each pinned by a test:
 
@@ -452,13 +464,74 @@ schema **owner** (it provisions and drops partitions). See [`THREAT-MODEL.md`](T
 ## Development
 
 ```bash
-make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check
+make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check · Android
 make pin-check # the supply-chain pin gate alone - no daemon, no SDK, no network
 make smoke     # brings the real stack up and asserts /healthz answers 200
+
+make verify-ui          # the browser map's rendered claims, in a real browser engine
+make verify-ui-android  # the Android screen's rendered claims, on a booted emulator
+make verify-ui-refusal  # both of the above, with their prerequisite removed, must refuse
+make verify-ui-record   # the F1-F11 record, against what those routes actually ran
 ```
 
 `make check` is what CI runs and what the umbrella's `scripts/verify.sh tracker` runs — one gate, defined
 once, in the `Makefile`.
+
+### The user-interface gate
+
+tracker ships **two** user interfaces — the browser map and the Android screen — and a claim about
+what a person *sees* is graded by the runtime that draws it, never by searching HTML, CSS, Kotlin or
+a compiled resource table. A text search cannot decide what a CSS rule applies to, what won the
+cascade, or what was shown rather than merely built.
+
+So `make verify-ui` drives **Chromium** over the production `/map` and `/static` handlers and reads
+every number back out of the live engine: contrast from the resolved colours in both themes, focus
+indicators from a pixel diff of the rendering, target sizes from laid-out boxes, accessible names
+from the engine's own accessibility tree, network origins and policy violations from the browser's
+own records. `make verify-ui-android` runs an **instrumented** suite on a booted Android emulator and
+reads back what Compose actually laid out and drew.
+
+**No assertion in either route may pass vacuously.** Each one is also re-run against the same surface
+mutated to break exactly the claim it measures — one substitution in the bytes the server served, or
+a debug-only `UiMutation` that is inert in a release build — and the route fails if fewer
+demonstrations ran than there are claims. A check that cannot go red is not evidence.
+
+The two routes count that differently because the demonstrations reach them differently. The browser
+route watches each check go red inside its own process, so `uiverify.Summarise` compares the counts
+directly. On the emulator a claim and its demonstration are two separate instrumented cases, and
+`gradlew connectedDebugAndroidTest` is green whenever the cases that *ran* passed - so the naming
+convention carries the pairing (`X` and `X_demonstration`, which passes only when `X`'s assertion
+failed against the mutated screen) and `make verify-ui-android` finishes by reading the emulator's own
+JUnit results back and refusing unless every claim the record names ran **and** carries a passing
+demonstration beside it. Deleting, renaming or `@Ignore`-ing a demonstration fails the route by name.
+
+**They refuse; they never skip.** No browser engine, no Android SDK, no `/dev/kvm`, no booted device:
+each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
+as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make
+verify-ui-refusal` is the check that keeps that true, and it drives each of those five absences
+separately rather than trusting one refusal to stand for all of them. The clause-by-clause record,
+for both surfaces, is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make
+verify-ui-record` refuses a record naming an assertion that did not actually run.
+
+**Two clauses are deferred rather than answered.** F1 and F10 on the Android screen — the platform
+accessibility sweep in both themes, and operability without a pointer — are carried by
+`S0074-tracker-android-a11y-operability`, with the failing instrumented cases kept in place and
+`@Ignore`d. The record says so per clause, and the deferral is fenced from every side: only those two
+pairs may carry one, only that item may be named, and the deferred set and the suite's `@Ignore`d set
+must match case for case, claims and demonstrations together. Parking a ninth case turns `make
+verify-ui-record` red.
+
+**The paragraphs that used to stand on each surface live in a document instead**, one per surface:
+[`/static/map-explained.html`](internal/server/static/map-explained.html) for the map, which the page
+links to once per region, and [`/static/app-explained.html`](internal/server/static/app-explained.html)
+for the Android screen, which is the repository copy of what the app's own explanation destination
+renders from its string resources; the client has no web view and does not load it. Both are served
+files rather than Markdown, because the map's links have to RESOLVE in a browser and the
+credential-free surface is fixed at the health check, the map shell and its static assets.
+`go run ./cmd/uiverify docs` refuses either document that has lost a claim which left a surface.
+
+These are **not** folded into `make check`: that target is the gate a human runs on a laptop, and it
+does not need a browser or an emulator. CI runs both.
 
 **`make check` needs a reachable Docker daemon.** The tests start a real PostGIS with
 `testcontainers-go`, and **they fail rather than skip if they cannot**. That is deliberate: this
@@ -528,6 +601,7 @@ Resolved **2026-09-08**. Every value below came from the command beside it; noth
 | `actions/setup-go` | `40f1582b2485089dde7abd97c1529aa768e1baff` *(v5)* | `gh api repos/actions/setup-go/commits/v5 --jq .sha` |
 | `actions/setup-java` | `cf277c60eb25467037889841efdb72551f06f6c3` *(v4)* | `gh api repos/actions/setup-java/commits/v4 --jq .sha` |
 | `android-actions/setup-android` | `9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407` *(v3)* | `gh api repos/android-actions/setup-android/commits/v3 --jq .sha` |
+| `actions/upload-artifact`<br>*(the `ui` job's evidence upload)* | `ea165f8d65b6e75b540449e92b4886f43607fa02` *(v4)* | `gh api repos/actions/upload-artifact/git/ref/tags/v4 --jq .object.sha` |
 | `gradle-8.9-bin.zip`<br>*(wrapper distribution, SHA-256 of the archive, not an image digest)* | `d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab` | `curl -s https://services.gradle.org/distributions/gradle-8.9-bin.zip.sha256` |
 
 **Moving a pin is a two-minute job and is meant to be.** Run the command, paste the value into the

@@ -237,6 +237,23 @@ class FixQueue(
         for (file in stale) file.delete()
     }
 
+    /**
+     * The queue depth, or **null when the directory could not be read at all**.
+     *
+     * [size] cannot express that: an unreadable directory and an empty one both come back as `0`,
+     * and `0` on the screen is a claim that nothing is waiting. That is precisely the confusion the
+     * frontend conventions' F3 forbids — a measurement that was not taken must render as "not
+     * recorded", never as a zero a reader will believe. So the UI reads this, and shows the figure
+     * as unavailable rather than inventing one.
+     *
+     * [size] is left exactly as it was, because the collection path's decisions are counted on it.
+     */
+    fun depth(): Int? {
+        if (!ensureDirectory()) return null
+        val names = directory.list { _, name -> name.endsWith(ENTRY_SUFFIX) } ?: return null
+        return names.size
+    }
+
     /** Committed entry names, in oldest-first order. */
     private fun entryNames(): List<String> =
         (directory.list { _, name -> name.endsWith(ENTRY_SUFFIX) } ?: emptyArray())

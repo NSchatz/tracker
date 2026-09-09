@@ -14,6 +14,7 @@ import com.nschatz.tracker.BuildConfig
 import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.ConfigStatus
+import com.nschatz.tracker.collect.TroubleKind
 import com.nschatz.tracker.protocol.FixReporter
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
@@ -67,7 +68,7 @@ class FixUploadWorker(
                 // does, and every path that changes it (the settings screen, starting collection,
                 // enqueueing a fix) calls `enqueueFlush` again. Retrying on a schedule would just
                 // wake the device to re-read the same empty preference.
-                CollectionStatus.recordBlocked(config.reason)
+                CollectionStatus.recordBlocked(TroubleKind.NOT_CONFIGURED, config.reason)
                 return Result.failure()
             }
 
@@ -118,7 +119,7 @@ class FixUploadWorker(
         is FlushOutcome.Deferred -> Result.retry()
 
         is FlushOutcome.CredentialRejected -> {
-            CollectionStatus.recordBlocked(outcome.reason)
+            CollectionStatus.recordBlocked(TroubleKind.CREDENTIAL_REJECTED, outcome.reason)
             // Also a retry, deliberately. The fixes are kept, and a token can be re-issued
             // server-side without the app being touched, so giving up would strand a queue that may
             // become deliverable on its own. The exponential backoff means a permanently wrong token

@@ -132,7 +132,7 @@ func New(database DB, notifier Notifier, windows presentation.Windows, logger *s
 	// still the authenticated stream.
 	r.Get("/v1/stream", getStream(database, windows, logger))
 	r.Get("/map", serveMapPage(logger))
-	r.Handle("/static/*", mapAssets())
+	r.Handle("/static/*", mapAssets(logger))
 
 	return r
 }

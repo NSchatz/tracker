@@ -103,4 +103,44 @@ class ConfigValidationTest {
         val status = ConfigValidation.validate(null, null)
         assertTrue((status as ConfigStatus.Incomplete).reason.contains("server URL", ignoreCase = true))
     }
+
+    /**
+     * Every refusal carries a label the server card can draw, as well as the sentence.
+     *
+     * F8 of the umbrella's frontend conventions keeps prose off the surface: the card renders
+     * `"Not saved: " + summary` and the sentence is read behind its explanation affordance. The
+     * emulator grades what is DRAWN; this grades what the domain hands it, so a branch whose summary
+     * grew into a sentence fails in `make check` rather than waiting for an emulator.
+     */
+    @Test
+    fun everyRefusalCarriesALabelTheCardCanDraw() {
+        val maxWordsOnTheCard = 8
+        val refusals = listOf(
+            ConfigValidation.validate(null, exampleCredential),
+            ConfigValidation.validate("tracker.example.org", exampleCredential),
+            ConfigValidation.validate("http://tracker.example.org", exampleCredential),
+            ConfigValidation.validate("https://", exampleCredential),
+            ConfigValidation.validate("https://tracker.example.org", null),
+        )
+        val seen = mutableSetOf<String>()
+        for (status in refusals) {
+            val incomplete = status as ConfigStatus.Incomplete
+            assertTrue("a refusal carries an empty summary", incomplete.summary.isNotBlank())
+            assertTrue(
+                "the summary and the sentence are the same text, so nothing was shortened for the card",
+                incomplete.summary != incomplete.reason,
+            )
+            val onTheCard = "Not saved: " + incomplete.summary
+            val words = onTheCard.trim().split(Regex("\\s+")).size
+            assertTrue(
+                "the server card would render \"$onTheCard\" ($words words); that is a sentence, not a " +
+                    "label a person reads at a glance",
+                words <= maxWordsOnTheCard,
+            )
+            seen.add(incomplete.summary)
+        }
+        // Five branches, five distinct labels: a card that said the same few words whatever was
+        // wrong would pass the floor and tell the reader nothing.
+        assertEquals("two refusal branches render the same label", refusals.size, seen.size)
+    }
 }
