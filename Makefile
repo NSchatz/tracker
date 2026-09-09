@@ -186,9 +186,11 @@ verify-ui-android:
 	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
 	mkdir -p build/uiverify; \
 	rm -f build/uiverify/android-grading.log; \
-	"$$adb" -s "$$serial" exec-out "cat $$evidence" >build/uiverify/android-grading.log 2>/dev/null || true; \
+	: "adb exec-out MERGES the device's stderr into stdout, so a 'no such file' from the device" ; \
+	: "lands in the log and makes it look non-empty; silence it on the DEVICE side, not here" ; \
+	"$$adb" -s "$$serial" exec-out "cat $$evidence 2>/dev/null" >build/uiverify/android-grading.log 2>/dev/null || true; \
 	if [ ! -s build/uiverify/android-grading.log ]; then \
-		"$$adb" -s "$$serial" exec-out run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log \
+		"$$adb" -s "$$serial" exec-out "run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log 2>/dev/null" \
 			>build/uiverify/android-grading.log 2>/dev/null || true; \
 	fi; \
 	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \

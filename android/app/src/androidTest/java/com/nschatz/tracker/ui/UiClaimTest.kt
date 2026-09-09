@@ -71,6 +71,15 @@ class UiClaimTest {
     @get:Rule
     val compose = createEmptyComposeRule()
 
+    /**
+     * What the last measuring function actually saw, for the demonstration to quote.
+     *
+     * A demonstration that reports only "the check stayed green" says nothing about WHY, and the
+     * grading evidence it would otherwise be read from is pulled off the device after the run - which
+     * is no help when the device wrote none. This travels with the failure itself.
+     */
+    private var lastMeasurement: String = ""
+
     @Before
     fun setUp() {
         UiHarness.resetStatus()
@@ -412,6 +421,8 @@ class UiClaimTest {
         // exists, and it was the only thing the first run reported.
         val texts = run.nodes.filter { it.isRenderedText() && !isInactive(it, run.nodes) }
         val measured = texts.filter { it.contrast != null }.distinctBy { it.name() + it.bounds.toShortString() }
+        lastMeasurement = "${measured.size} texts, ratios " +
+            measured.joinToString(", ") { "${it.name()}=${ratio(it.contrast!!)}" }
         assertTrue(
             "contrast: no rendered text in the $theme theme could be measured at all " +
                 "(${texts.size} text nodes seen, none with a confident foreground and background), " +
@@ -438,6 +449,11 @@ class UiClaimTest {
     private fun everyTargetMeetsTheFloor(theme: String) {
         val run = sweepEveryCard(theme, "target-size", measureContrast = false)
         val controls = largestObservationPerControl(run.nodes)
+        lastMeasurement = "${controls.size} controls, sizes " + controls.joinToString(", ") {
+            "${it.name()}=${dp(it.bounds.width())}x${dp(it.bounds.height())}dp"
+        } + "; every node the sweep saw: " + run.nodes.joinToString(", ") {
+            "${it.name()}[clickable=${it.clickable},visible=${it.visible},${dp(it.bounds.width())}x${dp(it.bounds.height())}dp]"
+        }
         assertTrue(
             "touch target size: the $theme sweep found ${controls.size} controls on a screen that " +
                 "has at least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
@@ -483,6 +499,8 @@ class UiClaimTest {
     private fun everyControlHasASpokenName(theme: String) {
         val run = sweepEveryCard(theme, "spoken-name", measureContrast = false)
         val controls = largestObservationPerControl(run.nodes)
+        lastMeasurement = "${controls.size} controls, names " +
+            controls.joinToString(", ") { "${it.name()}=\"${spokenNameOf(it, run.nodes)}\"" }
         assertTrue(
             "spoken name: the $theme sweep found ${controls.size} controls on a screen that has at " +
                 "least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
@@ -540,6 +558,8 @@ class UiClaimTest {
     private fun noStateByColourAlone(theme: String) {
         compose.waitForIdle()
         val warning = textOf("collection-error")
+        lastMeasurement = "collection-error=\"$warning\" collection-running=\"" +
+            textOf("collection-running") + "\" permission-body=\"" + textOf("permission-body") + "\""
         assertTrue(
             "state carried by colour alone: collection-error renders \"$warning\" in the $theme " +
                 "theme, which names no state in words - a reader who cannot see the error colour is told nothing",
@@ -673,6 +693,7 @@ class UiClaimTest {
 
         val visited = mutableListOf<String>()
         val reached = focusByDirection("action-save", visited)
+        lastMeasurement = "focus visited " + visited.joinToString(" -> ").ifBlank { "(nothing at all)" }
         assertTrue(
             "directional navigation: the save control (action-save) was not reachable - " +
                 "$DIRECTIONAL_PRESSES presses of DPAD_DOWN focused, in order: " +
@@ -719,6 +740,8 @@ class UiClaimTest {
         moveFocusAwayFrom("action-save")
         val unfocused = captureOf("action-save")
         val differing = ringPixelsThatDiffer(focused, unfocused)
+        lastMeasurement = "$differing pixels of the ring band differ; the focused capture is " +
+            "${focused.width}x${focused.height} and the unfocused one ${unfocused.width}x${unfocused.height}"
         assertTrue(
             "focus indicator: focusing the save control (action-save) changed $differing pixels of " +
                 "its outer ${FOCUS_RING_INSET_DP}dp band, and a painted indicator changes at least " +
@@ -1077,15 +1100,21 @@ class UiClaimTest {
      * ring was painted at all, and the focus-indicator demonstration could never go red.
      */
     private fun ringPixelsThatDiffer(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Int {
-        if (a.width != b.width || a.height != b.height) return Int.MAX_VALUE
+        // The two captures are compared over the region they SHARE, and a size mismatch is not
+        // treated as a difference. Returning "differs enormously" for one was an escape hatch that
+        // could pass the claim without a ring ever being painted: the node's bounds are floats and a
+        // capture taken at a different scroll offset can round to a pixel more or less, which is a
+        // fact about rounding rather than about the indicator.
+        val width = kotlin.math.min(a.width, b.width)
+        val height = kotlin.math.min(a.height, b.height)
         // One dp inside the band, so the measurement is strictly of pixels the ring owns. The ripple's
         // focus state layer begins exactly where the ring's inset ends, and at the boundary a
         // half-pixel of it was enough to report an indicator that had not been painted.
         val band = kotlin.math.max(2, ((FOCUS_RING_INSET_DP - 1) * UiHarness.density()).toInt())
         var differing = 0
-        for (y in 0 until a.height) {
-            for (x in 0 until a.width) {
-                val onTheBand = x < band || y < band || x >= a.width - band || y >= a.height - band
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val onTheBand = x < band || y < band || x >= width - band || y >= height - band
                 if (!onTheBand) continue
                 if (colourDistance(a.getPixel(x, y), b.getPixel(x, y)) > RING_COLOUR_TOLERANCE) differing++
             }
@@ -1124,7 +1153,8 @@ class UiClaimTest {
         }
         assertTrue(
             "the check for \"$check\" ($context) stayed green against a surface mutated to break " +
-                "exactly that claim on $view, so its pass is not evidence",
+                "exactly that claim on $view, so its pass is not evidence.\n  What it measured: " +
+                lastMeasurement.ifBlank { "(the measuring code recorded nothing)" },
             failure != null,
         )
         val message = failure!!.message.orEmpty()

@@ -818,11 +818,10 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 Box(
                     modifier = Modifier
                         .size(20.dp)
-                        .focusRing(mutation)
                         .testTag("action-collection")
-                        .clickable(enabled = canCollect, onClick = onCollectionClick),
+                        .clickable(onClick = onCollectionClick),
                     contentAlignment = Alignment.Center,
-                ) { Text(collectionLabel, style = MaterialTheme.typography.bodySmall) }
+                ) { Text(collectionLabel, maxLines = 1, style = MaterialTheme.typography.bodySmall) }
             } else {
                 RingedButton(
                     onClick = onCollectionClick,
