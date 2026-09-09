@@ -279,8 +279,8 @@ func androidRun(root string) (surfaceRun, error) {
 	dir := filepath.Join(root, "android", "app", "build", "outputs", "androidTest-results", "connected")
 	entries, err := os.Stat(dir)
 	if err != nil || !entries.IsDir() {
-		return out, fmt.Errorf("no instrumented-test results under %s: run `make verify-ui-android` before the record check. "+
-			"That route needs a booted Android emulator; it refuses loudly rather than skipping when there is none", dir)
+		return out, fmt.Errorf("no instrumented-test results under %s: the emulator has not reported what it ran, so nothing on the %s can be counted. "+
+			"Run `make verify-ui-android`; that route needs a booted Android emulator and refuses loudly rather than skipping when there is none", dir, AndroidSurface)
 	}
 	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
