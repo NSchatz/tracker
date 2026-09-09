@@ -21,6 +21,21 @@ material = "1.12.0"
 # device — a fully degoogled phone would need a LocationManager path, which is not built here and is
 # noted as a limitation in android/README.md.
 playServicesLocation = "21.3.0"
+# The FCM client: the first-party receive path for a geofence crossing the server pushes (ALERT-2).
+# Before this, the server delivered every crossing to a push backend and nothing in this repo could
+# receive one, so "get an alert when someone arrives" was a server capability and not a product one.
+#
+# Pinned at 24.0.0 because it is the last line that targets compileSdk 34 - this module's pin - so it
+# does not drag the SDK ladder, the Kotlin pin or the Compose compiler with it. That constraint is not
+# optional: the Compose compiler extension MUST track the Kotlin version, and a mismatch is a hard
+# build failure (see the note above).
+#
+# It is added as a LIBRARY ONLY. The Google Services Gradle plugin is deliberately NOT applied, so no
+# per-project google-services.json is needed to build, lint or test, and the gate stays green on a
+# checkout that has never seen a Firebase project. With no project configured the app has no default
+# Firebase app at runtime and therefore no registration token; it reports that it has no usable push
+# configuration and still reads and shows the family's crossings (alert/PushRegistrar).
+firebaseMessaging = "24.0.0"
 junit = "4.13.2"
 # The INSTRUMENTED half of the UI gate (S0056). F2 of the umbrella's frontend conventions admits
 # exactly one Android grader for a claim about what a person sees: an emulator, not the JVM. So
@@ -55,6 +70,10 @@ androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx"
 # frame. The in-app surface itself is Compose Material3.
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
+# ALERT-2's one new dependency. It adds no new PLATFORM requirement: this client already requires
+# Play services for the fused location provider, which is why FCM is the receive path built here and
+# a UnifiedPush distributor is not.
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging", version.ref = "firebaseMessaging" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-core = { group = "androidx.test", name = "core-ktx", version.ref = "androidxTestCore" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }

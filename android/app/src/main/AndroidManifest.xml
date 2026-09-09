@@ -67,6 +67,25 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
+        <!--
+          ALERT-2 - the first-party receive path. exported="false" for the same reason the collection
+          service is: nothing outside this app may drive it. The intent filter is how FCM's own
+          dispatcher finds it, and it is the only route into this service.
+
+          NOTE the absence of a com.google.firebase.messaging.default_notification_* meta-data block.
+          Those configure the fallback notification FCM posts ITSELF when the app is in the
+          background, which would render a message this app never validated - exactly the "fabricate
+          the missing part" behaviour the receive path refuses. Every crossing this app shows has
+          been through TrackerMessagingService and AlertIntake, or it is not shown.
+        -->
+        <service
+            android:name=".alert.TrackerMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

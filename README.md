@@ -31,14 +31,23 @@ leaves a place you have defined.
 > **WorkManager** job constrained to `NetworkType.CONNECTED` drains it into `POST /v1/fixes`
 > oldest-first, retrying indefinitely with jittered exponential backoff. Going offline now *delays*
 > reporting instead of losing it, and a replay after a lost response is absorbed by the server's
-> `(device_id, ts)` dedup, so nothing is stored twice. The device token is stored **in plaintext** until
-> C3, and there is no in-app map until C5. **Much of the client is device behaviour a headless CI
-> cannot prove** — runtime grants, a live GPS stream, screen-off survival, and whether WorkManager
-> actually fires when the radio returns — so the gate covers the provable half (payload, validation,
-> permission state machine, the queue against a real filesystem, and the flush loop against a real
-> local server that enforces the same idempotency contract) and the rest is an **operator check on a
-> real device**, written down in [`android/README.md`](android/README.md) rather than faked with a
-> passing test.
+> `(device_id, ts)` dedup, so nothing is stored twice.
+> As of **ALERT-2** the alert finally **reaches a person**: the client receives a pushed crossing over
+> **FCM** and renders it as a notification naming the device, the Place and the direction, and opening
+> the app shows the family's recent crossings read back from `GET /v1/geofence-events` - so a crossing
+> the push backend dropped is still findable. The push is deliberately **never the record**: FCM stores
+> four collapsible messages per phone and then discards, so the server now counts the surplus as
+> `beyond-collapse-bound`, records **three delivery outcomes and no fourth that asserts delivery**, and
+> the in-app list is the fail-safe. The app holds a **viewer** token alongside its device token to read
+> that list and register its endpoint; both are still **plaintext** until SECRET-3, and there is no
+> in-app map until C5. **Much of the client is device behaviour a headless CI
+> cannot prove** - runtime grants, a live GPS stream, screen-off survival, whether WorkManager
+> actually fires when the radio returns, and whether a real FCM message wakes a real handset - so the
+> gate covers the provable half (payload, validation, permission state machine, the queue against a
+> real filesystem, the flush loop against a real local server that enforces the same idempotency
+> contract, and every branch of the alert surface's parse, merge and status state machine) and the rest
+> is an **operator check on a real device**, written down in
+> [`android/README.md`](android/README.md) rather than faked with a passing test.
 > As of **S0010** every device a viewer reads carries a **server-computed presentation state** —
 > `no-position` | `live` | `recent` | `stale` — on `GET /v1/positions`, on the SSE stream and on the
 > map, and `/v1/positions` now lists **every device in the family** rather than only the ones that
@@ -346,6 +355,35 @@ The properties that matter, each pinned by a test:
 > a real push lands on a real handset is a manual check the deployment owner runs with their own Firebase
 > project — it confirms, it does not gate.
 
+### The alert reaches a person (ALERT-2)
+
+Until this phase the S6 path ended at the outbound send: the server handed a crossing to a push
+backend and nothing in this repo could receive one. Three things closed that.
+
+- **A first-party receive path**, in the Android client, for **FCM**. A crossing arrives as a
+  notification naming the device, the Place and the direction. A push that does not carry a complete
+  crossing renders **nothing** and is counted as a discard - never a notification with an invented
+  part. A deployment configured for UnifiedPush is *told* so by the app rather than left silent; that
+  receive path is not built here.
+- **The in-app crossing list**, read back from `GET /v1/geofence-events`, which now carries
+  `device_name` on each row. It is the **fail-safe for the push, not a duplicate of it**: FCM stores
+  four collapsible messages per device, one per collapse key, and tracker's key is per (device,
+  Place), so a phone off the network past four distinct pairs has lost the rest permanently. An
+  unauthorized read, an unreachable server and a genuinely empty family are three different answers
+  and none of them is shown as the others.
+- **Honest delivery accounting**, described in [`SPEC.md`](SPEC.md): three outcomes per crossing per
+  endpoint (`handed-over`, `beyond-collapse-bound`, `dropped`) and **no fourth that asserts delivery**,
+  because a backend accepting a message is a fact about its queue and not about a person. Read them
+  with `docker compose logs tracker | grep push.delivery.outcome`. Each record names **which phone**
+  it is about, as a digest of the endpoint rather than the routing address itself; `SPEC.md` has the
+  one-line query that maps a digest back to a subscription.
+
+Two `/v1` additions serve this and are **additive only**: `configured_provider` on an accepted
+registration (so an app can tell "registered" from "registered into a deployment that will never
+send"), and an optional `replaces_token` on the registration request (so a rotated FCM registration
+token supersedes its predecessor instead of leaving a second deliverable row that would notify the
+phone twice). Both are in [`SPEC.md`](SPEC.md).
+
 ## Running it
 
 ```bash
@@ -651,9 +689,13 @@ Things that are true today and are not hidden:
   — and the rest is an explicit **operator device check** documented in
   [`android/README.md`](android/README.md). No test in this repo mocks the platform and then reports the
   mock's answer as evidence.
-- **The client's device token is stored in plaintext** `SharedPreferences` until C3 moves it to
-  `EncryptedSharedPreferences` behind an Android Keystore key. `allowBackup="false"` limits the blast
-  radius in the meantime.
+- **BOTH of the client's credentials are stored in plaintext** `SharedPreferences` until SECRET-3
+  moves them behind an Android Keystore key: the device (write) token, and - since ALERT-2 - the
+  **viewer (read) token** the alert surface needs to read the family's crossings and register the
+  phone's push endpoint. `allowBackup="false"` limits the blast radius in the meantime. The viewer
+  token is the wider of the two to lose (it reads the family's whole crossing history) and the app
+  bounds what it does with it: exactly two routes, neither of which returns a coordinate, and it is
+  never logged, rendered or put in a URL.
 - **The client needs Google Play services.** `FusedLocationProviderClient` has no AOSP equivalent and
   there is no `LocationManager` fallback, so a fully degoogled phone cannot run it today.
 - **Push delivery is best-effort, and off by default.** A crossing is delivered to registered phones
@@ -662,6 +704,26 @@ Things that are true today and are not hidden:
   backend is configured, and freshness is still bounded by the last received fix: an offline phone's
   crossings — and their pushes — fire when its buffered fixes arrive. Whether a real push reaches a real
   handset is the owner's manual real-device check (CI proves the pipeline against a mock).
+
+  ALERT-2 **quantifies** that rather than leaving it as a word. FCM stores **four** collapsible
+  messages per device, one per collapse key, and tracker's key is per (device, Place) - so a phone off
+  the network past four distinct device-and-Place pairs loses the rest. The server records that
+  surplus as `beyond-collapse-bound`, records **nothing** as delivered, and the in-app crossing list
+  read back from `GET /v1/geofence-events` is what makes a lost alert still findable. The
+  pending-key accounting is process state: a restart forgets it and then reports `handed-over` where
+  it would have said `beyond-collapse-bound`, which loses toward knowing less and never toward a
+  delivery claim.
+- **The client receives over FCM only, and needs a Firebase project the repo does not carry.** A
+  UnifiedPush deployment will send and this client cannot receive, which the app *says* rather than
+  swallowing. And `google-services.json` is deployment-specific, so it is not committed and the
+  Google Services Gradle plugin is not applied: the gate builds the app with no Firebase project at
+  all, and an app built that way reports it has no usable push configuration instead of failing to
+  start. A deployment that wants push adds both in its own build.
+- **A phone that loses its own record of its previous routing address leaves a stale endpoint.** A
+  rotated FCM registration token is a new address, so the app names the address it replaces and the
+  server removes exactly that one, under the same viewer. A reinstall or a restore onto another
+  handset cannot name it, and nothing acts on a backend's "unregistered" report yet, so the row
+  survives - wasting a send to a dead address, not double-notifying a live phone.
 - **Enter/exit is debounced, so it is deliberately not instant.** A crossing must dwell 90 s before it
   is recorded — the price of not alerting on GPS jitter. And the evaluator advances a (device, Place)'s
   state *forward* in `ts`: a fix arriving out of order and older than that pair's latest recorded

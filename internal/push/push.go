@@ -57,9 +57,28 @@ type Notification struct {
 
 // Delivery is one Notification bound for one Subscription — the unit the dispatcher queues and a
 // Sender sends.
+//
+// Bound carries the collapse-bound classification the ledger made when this crossing was handed
+// over: OutcomeHandedOver, or OutcomeBeyondCollapseBound when the endpoint already had four or more
+// distinct keys pending (A19). It is decided at ENQUEUE, where the pending set is known, and is only
+// ever DOWNGRADED afterwards - a delivery the dispatcher never manages to hand over is recorded
+// `dropped` regardless of what it was classified as. Nothing upgrades it, and in particular a
+// backend accepting the message does not (A5).
+//
+// The zero value is the empty string, which the dispatcher treats as OutcomeHandedOver - the
+// under-claiming default, and what a Delivery built by hand in a test means.
 type Delivery struct {
-	Sub  Subscription
-	Note Notification
+	Sub   Subscription
+	Note  Notification
+	Bound DeliveryOutcome
+}
+
+// boundOrDefault reads the classification off a Delivery, defaulting an unset one to handed-over.
+func (d Delivery) boundOrDefault() DeliveryOutcome {
+	if d.Bound == "" {
+		return OutcomeHandedOver
+	}
+	return d.Bound
 }
 
 // Sender delivers one Delivery to one endpoint, returning an error if the backend refused it. An
@@ -94,6 +113,10 @@ type Dispatcher struct {
 	queue       chan Delivery
 	maxAttempts int
 	backoff     time.Duration
+	// ledger records what became of every delivery, in the three outcomes that exist. It is never
+	// nil - NewDispatcher builds one - so no call site has to nil-check, and accounting cannot be
+	// silently switched off by forgetting an option.
+	ledger *DeliveryLedger
 
 	wg      sync.WaitGroup
 	dropped atomic.Int64 // deliveries refused because the queue was full — observability + tests
@@ -139,6 +162,7 @@ func NewDispatcher(senders map[string]Sender, logger *slog.Logger, opts ...Dispa
 		queue:       make(chan Delivery, DefaultMaxPending),
 		maxAttempts: defaultMaxAttempts,
 		backoff:     defaultRetryBackoff,
+		ledger:      NewDeliveryLedger(logger),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -160,8 +184,34 @@ func (d *Dispatcher) Enqueue(deliveries ...Delivery) {
 			n := d.dropped.Add(1)
 			d.logger.Warn("push queue full — dropping delivery (pending cap reached)",
 				"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey, "dropped_total", n)
+			// Never handed over at all. On the production path Classify HAS already run for this
+			// delivery - NotifyGeofenceEvents classifies every (crossing, endpoint) pair before it
+			// enqueues any of them - so the pending record it made has to be taken back here, or a
+			// key nothing was ever handed over for would keep counting toward the next crossing's
+			// bound. NotHandedOver is a no-op when there was nothing to take back.
+			d.notHandedOver(del)
+			d.ledger.Record(context.Background(), del, OutcomeDropped, "queue full (pending cap reached)")
 		}
 	}
+}
+
+// Ledger exposes the delivery accounting so the registration path can tell it an endpoint has
+// re-presented itself (A20) and so the accounting tests can read the pending counts. It never
+// returns nil.
+func (d *Dispatcher) Ledger() *DeliveryLedger { return d.ledger }
+
+// notHandedOver takes back the pending record a delivery's classification made, on every path that
+// ends in `dropped`. Pending means handed to the backend (Definitions), and none of the drop paths
+// hands anything over, so a key left counting there would report a bound that nothing earned.
+//
+// Only a delivery classified OutcomeHandedOver ever added a key: OutcomeBeyondCollapseBound
+// deliberately adds none. Calling it otherwise is harmless (the ledger no-ops on a key it is not
+// holding), but the guard keeps the intent readable at the two call sites.
+func (d *Dispatcher) notHandedOver(del Delivery) {
+	if del.boundOrDefault() != OutcomeHandedOver {
+		return
+	}
+	d.ledger.NotHandedOver(endpointKey{provider: del.Sub.Provider, token: del.Sub.Token}, del.Note.CollapseKey)
 }
 
 // Dropped reports how many deliveries have been refused because the queue was full. It exists for
@@ -203,12 +253,17 @@ func (d *Dispatcher) deliver(ctx context.Context, del Delivery) {
 		// one stray unifiedpush endpoint on an fcm-only server does not take down the worker.
 		d.logger.Warn("no push sender for provider — dropping delivery",
 			"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey)
+		d.notHandedOver(del)
+		d.ledger.Record(ctx, del, OutcomeDropped, "no sender configured for provider")
 		return
 	}
 
 	for attempt := 1; attempt <= d.maxAttempts; attempt++ {
 		err := sender.Send(ctx, del)
 		if err == nil {
+			// The backend TOOK it. That is hand-over and nothing more: the outcome recorded is the
+			// classification made at enqueue, never an upgrade to a delivery claim (A5).
+			d.ledger.Record(ctx, del, del.boundOrDefault(), "")
 			return
 		}
 		if attempt == d.maxAttempts {
@@ -217,6 +272,8 @@ func (d *Dispatcher) deliver(ctx context.Context, del Delivery) {
 			d.logger.Error("push delivery failed after retries — dropping",
 				"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey,
 				"attempts", attempt, "error", err)
+			d.notHandedOver(del)
+			d.ledger.Record(ctx, del, OutcomeDropped, "retries exhausted")
 			return
 		}
 		d.logger.Warn("push delivery failed — retrying",

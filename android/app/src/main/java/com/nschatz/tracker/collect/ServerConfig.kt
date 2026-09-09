@@ -12,6 +12,43 @@ import java.util.Locale
 data class ServerConfig(val baseUrl: String, val deviceToken: String)
 
 /**
+ * Where to READ from, and with what credential.
+ *
+ * A second, separate credential, because the server's two credentials are separate by construction:
+ * a device token writes its own fixes and a viewer token reads its family, they live in different
+ * tables, and presenting one on the other's routes is a `401`. The alert surface reads the family's
+ * crossings and registers this phone's push endpoint, both of which are viewer routes, so it needs
+ * the viewer token and cannot borrow the device one.
+ *
+ * This is an exposure widening on the phone and it is written down as one: a viewer token reads a
+ * family's whole crossing history. It is bounded by what the app does with it (exactly two routes,
+ * neither returning a coordinate) and by where it is kept, which is no worse than where the device
+ * token is kept today - and no better either, which is the limitation this phase records rather than
+ * pretends away.
+ *
+ * @param baseUrl the server root, no path.
+ * @param viewerToken the viewer (read) bearer token printed once by `tracker add-viewer`.
+ */
+data class ViewerConfig(val baseUrl: String, val viewerToken: String)
+
+/**
+ * The result of reading the viewer configuration: something the alert surface can read with, or the
+ * specific reason it cannot.
+ *
+ * Separate from [ConfigStatus] rather than folded into it, because the two credentials fail
+ * independently and a person has to be told which one is missing. An app that reported one
+ * "incomplete configuration" for a valid device token beside a missing viewer token would send the
+ * operator looking in the wrong place - and, worse, would let a working collection setup be reported
+ * as broken because the alert half was never configured.
+ */
+sealed interface ViewerConfigStatus {
+    data class Configured(val config: ViewerConfig) : ViewerConfigStatus
+
+    /** @param reason a sentence to show the user, naming what to fix. */
+    data class Incomplete(val reason: String) : ViewerConfigStatus
+}
+
+/**
  * The result of reading the client's configuration: either something it can report with, or the
  * specific reason it cannot.
  *
@@ -67,35 +104,12 @@ object ConfigValidation {
         // exception that a genuine secret could later hide behind.
         val trimmedToken = deviceToken?.trim().orEmpty()
 
-        if (url.isEmpty()) {
-            return ConfigStatus.Incomplete(
-                summary = "No server URL set",
-                reason = "No server URL is set. Enter the tracker server address.",
-            )
-        }
-        val lower = url.lowercase(Locale.ROOT)
-        val isHttps = lower.startsWith("https://")
-        val isHttp = lower.startsWith("http://")
-        if (!isHttps && !isHttp) {
-            return ConfigStatus.Incomplete(
-                summary = "Server URL needs https",
-                reason = "The server URL must start with https:// (or http:// for local testing).",
-            )
-        }
-        if (isHttp && !allowPlaintextHttp) {
-            return ConfigStatus.Incomplete(
-                summary = "Plain http refused",
-                reason = "Refusing to send the device token over plaintext http://. Use https://.",
-            )
-        }
-        // "https://" alone is a scheme with no host — a URL object would still build, and every
-        // report would fail with an opaque IOException instead of this sentence.
-        val afterScheme = url.substringAfter("://")
-        if (afterScheme.isEmpty() || afterScheme.startsWith("/")) {
-            return ConfigStatus.Incomplete(
-                summary = "Server URL has no host",
-                reason = "The server URL is missing a host name.",
-            )
+        validateBaseUrl(
+            url,
+            allowPlaintextHttp,
+            "Refusing to send the device token over plaintext http://. Use https://.",
+        )?.let {
+            return ConfigStatus.Incomplete(summary = it.summary, reason = it.reason)
         }
         if (trimmedToken.isEmpty()) {
             return ConfigStatus.Incomplete(
@@ -104,5 +118,96 @@ object ConfigValidation {
             )
         }
         return ConfigStatus.Configured(ServerConfig(baseUrl = url.trimEnd('/'), deviceToken = trimmedToken))
+    }
+
+    /**
+     * Validates the stored server URL and VIEWER token: what the alert surface needs.
+     *
+     * Same URL rules as [validate], for the same reason - a viewer token is a bearer credential too,
+     * and one that reads a family's whole crossing history rather than writing one phone's fixes, so
+     * if anything the plaintext refusal matters more here, not less. The URL check is therefore
+     * shared rather than restated, so the two credentials can never drift into different rules.
+     *
+     * @param allowPlaintextHttp see [validate]. Defaults to false for the same reason.
+     */
+    fun validateViewer(
+        baseUrl: String?,
+        viewerToken: String?,
+        allowPlaintextHttp: Boolean = false,
+    ): ViewerConfigStatus {
+        val url = baseUrl?.trim().orEmpty()
+        val trimmedViewerToken = viewerToken?.trim().orEmpty()
+
+        validateBaseUrl(
+            url,
+            allowPlaintextHttp,
+            "Refusing to send the viewer token over plaintext http://. Use https://.",
+        )?.let {
+            return ViewerConfigStatus.Incomplete(it.reason)
+        }
+        if (trimmedViewerToken.isEmpty()) {
+            return ViewerConfigStatus.Incomplete(
+                "No viewer token is set. Run `tracker add-viewer` on the server and paste the token here.",
+            )
+        }
+        return ViewerConfigStatus.Configured(
+            ViewerConfig(baseUrl = url.trimEnd('/'), viewerToken = trimmedViewerToken),
+        )
+    }
+
+    /**
+     * Why a base URL is unusable: the label the server card draws, and the sentence behind it.
+     *
+     * Both halves are carried here rather than only the sentence, because F8 of the umbrella's
+     * frontend conventions holds the card to a label and [ConfigStatus.Incomplete] takes the two
+     * separately. A shared URL check that returned only the sentence would push the device half back
+     * into restating its own labels, which is the drift this helper exists to prevent.
+     */
+    private data class BaseUrlProblem(val summary: String, val reason: String)
+
+    /**
+     * The URL half of both validations. Returns why it is unusable, or null when it is fine.
+     *
+     * @param plaintextRefusal the sentence to return when the URL is plaintext `http://`, naming the
+     *   credential actually at risk rather than a generic one.
+     *
+     *   It is passed in WHOLE rather than assembled here from a credential name. The rules are what
+     *   this helper exists to share; the sentences stay committed literals at their call sites, so a
+     *   search for what a person is told finds it, and so the artefact in `internal/uiverify` that
+     *   pins each of these sentences is measuring the real string rather than a template.
+     */
+    private fun validateBaseUrl(
+        url: String,
+        allowPlaintextHttp: Boolean,
+        plaintextRefusal: String,
+    ): BaseUrlProblem? {
+        if (url.isEmpty()) {
+            return BaseUrlProblem(
+                summary = "No server URL set",
+                reason = "No server URL is set. Enter the tracker server address.",
+            )
+        }
+        val lower = url.lowercase(Locale.ROOT)
+        val isHttps = lower.startsWith("https://")
+        val isHttp = lower.startsWith("http://")
+        if (!isHttps && !isHttp) {
+            return BaseUrlProblem(
+                summary = "Server URL needs https",
+                reason = "The server URL must start with https:// (or http:// for local testing).",
+            )
+        }
+        if (isHttp && !allowPlaintextHttp) {
+            return BaseUrlProblem(summary = "Plain http refused", reason = plaintextRefusal)
+        }
+        // "https://" alone is a scheme with no host - a URL object would still build, and every
+        // request would fail with an opaque IOException instead of this sentence.
+        val afterScheme = url.substringAfter("://")
+        if (afterScheme.isEmpty() || afterScheme.startsWith("/")) {
+            return BaseUrlProblem(
+                summary = "Server URL has no host",
+                reason = "The server URL is missing a host name.",
+            )
+        }
+        return null
     }
 }

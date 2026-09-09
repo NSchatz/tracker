@@ -140,5 +140,40 @@
     with the time they were last updated. A frozen readout is never presented as a live one, and when
     collection resumes the counters go back to reading as current.
   </p>
+
+  <h2 id="alerts">Alerts, and the crossings list behind them</h2>
+  <p id="alerts_status">
+    The alerts card shows exactly one delivery state, in a few words, and the paragraph for each one
+    is on the screen's own "About alerts" page. The states are: still being checked; no viewer token
+    set; alerts cannot be shown, because notifications are blocked for this app; not registered
+    because the server refused the token, or because it could not be reached; not receivable for one
+    of four reasons - this phone has no push address, this server has no push backend configured,
+    this server uses a backend this app cannot receive from, or this server does not report which
+    backend it uses; and armed. Only the last of those means a crossing will arrive as a
+    notification, and nothing else is ever shown as armed.
+  </p>
+  <p id="crossings_states">
+    The crossings list is read from the server rather than assembled from the notifications that
+    arrived, so a crossing the push backend dropped is still there. "No crossings recorded yet" means
+    the server was asked and answered with nothing. Each "Crossings unread" state means the list
+    could NOT be read - a rejected token, a server that could not be reached, or an answer this app
+    could not parse - and none of those is an empty family log.
+  </p>
+  <p id="alerts_discarded">
+    A push that does not carry a complete crossing - its kind, the device name, the Place name and
+    the direction - renders no notification, and is counted on the card instead. No missing part of
+    it is guessed at, and the count is shown rather than kept quiet, because a discarded push is an
+    alert somebody did not get.
+  </p>
+  <p id="alerts_limitation">
+    The push backend holds only four pending alerts per phone, one per device-and-place pair, and
+    then discards the rest. The list, read back from your server, is the record; the notification is
+    not.
+  </p>
+  <p id="viewer_plaintext">
+    The viewer token is stored unencrypted in the app's private data, exactly as the device token is,
+    until secure storage ships. It reads the whole family's crossings, so treat it as the more
+    sensitive of the two. Cloud backup of the app's data is already switched off.
+  </p>
 </body>
 </html>

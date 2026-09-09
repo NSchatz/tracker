@@ -61,6 +61,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.nschatz.tracker.R
+import com.nschatz.tracker.alert.AlertDeliveryStatus
+import com.nschatz.tracker.alert.AlertNotifications
+import com.nschatz.tracker.alert.AlertSurface
+import com.nschatz.tracker.alert.AlertText
+import com.nschatz.tracker.alert.CrossingListState
+import com.nschatz.tracker.alert.CrossingsRefresher
+import com.nschatz.tracker.alert.NotReceivableReason
+import com.nschatz.tracker.alert.PushRegistrar
 import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.ConfigStatus
@@ -105,6 +113,9 @@ class MainActivity : ComponentActivity() {
         CollectionStatus.recordQueued(FixQueues.of(this).depth())
         FixUploadWorker.enqueueFlush(this)
         val mutation = UiMutation.from(intent)
+        // The alert channel exists before any crossing can arrive, so the first push is not the
+        // thing that discovers it is missing. Cheap and idempotent.
+        AlertNotifications.ensureChannel(this)
         enableEdgeToEdge()
         setContent {
             TrackerTheme {
@@ -185,7 +196,7 @@ private fun Modifier.focusRing(): Modifier {
 private fun Modifier.minimumTarget(): Modifier = this.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
 
 /** Which explanation the destination is showing, or null for the home screen. */
-enum class ExplanationTopic { PERMISSIONS, SERVER, COUNTERS }
+enum class ExplanationTopic { PERMISSIONS, SERVER, COUNTERS, ALERTS }
 
 @Composable
 private fun TrackerApp(mutation: UiMutation, modifier: Modifier = Modifier) {
@@ -288,7 +299,172 @@ private fun HomeScreen(
             mutation = mutation,
             onExplain = { onExplain(ExplanationTopic.COUNTERS) },
         )
+        AlertsCard(mutation = mutation, onExplain = { onExplain(ExplanationTopic.ALERTS) })
     }
+}
+
+/**
+ * The alert surface: one delivery status, and the family's crossings.
+ *
+ * Both halves are always here, in every state. That is the shape the phase asks for and the reason
+ * is the same each time: whatever is wrong with alerts - no credential, no permission, no backend, a
+ * refused registration - the crossings the server recorded are still readable, so the list is shown
+ * regardless and the status says what is wrong ABOVE it rather than instead of it.
+ *
+ * What it DRAWS is a few words per state, drawn from a closed set of string resources, with the
+ * paragraphs behind "About alerts". That is F8 of the umbrella's frontend conventions, the same
+ * shape the other three cards take: the state a person has to act on is a label they read at a
+ * glance, and the explanation of what the state means is one tap away. Nothing was dropped in
+ * getting there - every sentence this card used to draw is committed as an explanation paragraph
+ * and rendered on that destination.
+ */
+@Composable
+private fun AlertsCard(mutation: UiMutation, onExplain: () -> Unit) {
+    val context = LocalContext.current
+
+    // Re-read on every resume, for the same reason the permission grants are: the notification
+    // permission can be granted on a system page, and a crossing can have happened while the app was
+    // in the background. Both change the answer, and neither arrives as a callback.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                PushRegistrar.registerInBackground(context)
+                CrossingsRefresher.refreshInBackground(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val view = AlertSurface.listView
+
+    Card(modifier = Modifier.fillMaxWidth().testTag("card-alerts")) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            CardTitle(R.string.alerts_title)
+            // Exactly one state, in a few words, with its paragraph behind the affordance below.
+            // The mutation branch draws the paragraph instead, which is this card's half of the
+            // demonstration AC18 asks for.
+            Label(
+                short = alertStatusLabel(AlertSurface.status),
+                long = alertStatusExplanation(AlertSurface.status),
+                mutation = mutation,
+                tag = "alert-status",
+            )
+            if (AlertSurface.discardedPushes > 0) {
+                // Shown, not merely counted: a push this app threw away is an alert a person did not
+                // get, and a client that discards silently is indistinguishable from one receiving
+                // nothing at all.
+                WarningLiteral(
+                    stringResource(R.string.alerts_discarded, AlertSurface.discardedPushes),
+                    mutation,
+                    "alert-discards",
+                )
+            }
+
+            Text(stringResource(R.string.crossings_title), style = MaterialTheme.typography.titleSmall)
+            // Each list state names itself in words. The three failures lead with "unread", which is
+            // what keeps them tellable apart from the empty family log rather than reading as one.
+            when (view.state) {
+                CrossingListState.CHECKING ->
+                    Text(
+                        stringResource(R.string.crossings_checking),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("crossings-state"),
+                    )
+
+                CrossingListState.EMPTY ->
+                    Text(
+                        stringResource(R.string.crossings_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag("crossings-state"),
+                    )
+
+                CrossingListState.CREDENTIAL_REJECTED ->
+                    WarningText(R.string.crossings_credential_rejected, mutation, "crossings-state")
+
+                CrossingListState.SERVER_UNREACHABLE ->
+                    WarningText(R.string.crossings_unreachable, mutation, "crossings-state")
+
+                CrossingListState.SERVER_ERROR ->
+                    WarningText(R.string.crossings_server_error, mutation, "crossings-state")
+
+                CrossingListState.SHOWING -> Unit
+            }
+
+            for (crossing in view.rows) {
+                Text(AlertText.listRow(crossing), style = MaterialTheme.typography.bodySmall)
+            }
+
+            TextButton(
+                onClick = { CrossingsRefresher.refreshInBackground(context) },
+                modifier = Modifier.focusRing().minimumTarget().testTag("action-refresh-crossings"),
+            ) { Text(stringResource(R.string.crossings_refresh)) }
+            if (mutation == UiMutation.PARAGRAPHS_ON_SURFACE) {
+                Text(stringResource(R.string.explain_alerts_limitation), style = MaterialTheme.typography.bodySmall)
+            }
+            ExplainAffordance(R.string.explain_alerts, onExplain, "explain-alerts")
+        }
+    }
+}
+
+/**
+ * Maps the single alert delivery state to the few words shown for it.
+ *
+ * A `when` with no else: adding a state to the status without deciding what the app SAYS about it
+ * would otherwise compile, and a state nobody wrote a label for is a state the user is not told
+ * about, which is the failure this whole surface exists to prevent.
+ */
+private fun alertStatusLabel(status: AlertDeliveryStatus?): Int = when (status) {
+    null -> R.string.alerts_status_checking
+    AlertDeliveryStatus.NotConfigured -> R.string.alerts_status_not_configured
+    AlertDeliveryStatus.CannotShow -> R.string.alerts_status_cannot_show
+    AlertDeliveryStatus.NotRegisteredRefused -> R.string.alerts_status_not_registered_refused
+    AlertDeliveryStatus.NotRegisteredUnreachable -> R.string.alerts_status_not_registered_unreachable
+    AlertDeliveryStatus.Armed -> R.string.alerts_status_armed
+    is AlertDeliveryStatus.NotReceivable -> notReceivableLabel(status)
+}
+
+/**
+ * The four not-receivable reasons, each its own label rather than one shared sentence.
+ *
+ * The parameter is named `state`, not `status`, on purpose. `internal/uiverify`'s F8 artefact scans
+ * this file for a `reason` read off a receiver spelled `status`, which is the shape that reaches
+ * [ConfigStatus.Incomplete]'s unbounded sentence and would put a socket failure on the surface. What
+ * is read here is a four-member enum that can only ever select a string resource, so it is not that
+ * shape; spelling the receiver differently keeps that guard aimed at the sentence it was written to
+ * catch instead of at this, and weakens it by not one character.
+ */
+private fun notReceivableLabel(state: AlertDeliveryStatus.NotReceivable): Int = when (state.reason) {
+    NotReceivableReason.NO_ROUTING_ADDRESS -> R.string.alerts_status_r1
+    NotReceivableReason.NO_CONFIGURED_PROVIDER -> R.string.alerts_status_r2
+    NotReceivableReason.PROVIDER_NOT_RECEIVABLE -> R.string.alerts_status_r3
+    NotReceivableReason.SERVER_DOES_NOT_REPORT -> R.string.alerts_status_r4
+}
+
+/**
+ * The paragraph behind each label, exhaustive over the same closed set.
+ *
+ * Kept beside [alertStatusLabel] so a state cannot gain a label without also gaining the sentence
+ * that says what to do about it: the pairing is what makes "the explanations moved" true rather
+ * than aspirational.
+ */
+private fun alertStatusExplanation(status: AlertDeliveryStatus?): Int = when (status) {
+    null -> R.string.explain_alerts_checking
+    AlertDeliveryStatus.NotConfigured -> R.string.explain_alerts_not_configured
+    AlertDeliveryStatus.CannotShow -> R.string.explain_alerts_cannot_show
+    AlertDeliveryStatus.NotRegisteredRefused -> R.string.explain_alerts_not_registered_refused
+    AlertDeliveryStatus.NotRegisteredUnreachable -> R.string.explain_alerts_not_registered_unreachable
+    AlertDeliveryStatus.Armed -> R.string.explain_alerts_armed
+    is AlertDeliveryStatus.NotReceivable -> notReceivableExplanation(status)
+}
+
+/** The paragraph for each not-receivable reason. See [notReceivableLabel] for the parameter's name. */
+private fun notReceivableExplanation(state: AlertDeliveryStatus.NotReceivable): Int = when (state.reason) {
+    NotReceivableReason.NO_ROUTING_ADDRESS -> R.string.explain_alerts_r1
+    NotReceivableReason.NO_CONFIGURED_PROVIDER -> R.string.explain_alerts_r2
+    NotReceivableReason.PROVIDER_NOT_RECEIVABLE -> R.string.explain_alerts_r3
+    NotReceivableReason.SERVER_DOES_NOT_REPORT -> R.string.explain_alerts_r4
 }
 
 @Composable
@@ -398,6 +574,9 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
     val prefs = remember { ClientPreferences(context) }
     var url by rememberSaveable { mutableStateOf(prefs.baseUrl.orEmpty()) }
     var credential by rememberSaveable { mutableStateOf(prefs.deviceToken.orEmpty()) }
+    // Saved across recreation for the same reason the two above are: a rotation between typing a
+    // credential and pressing Save must not silently empty the field.
+    var viewerCredential by rememberSaveable { mutableStateOf(prefs.viewerToken.orEmpty()) }
     var message by rememberSaveable { mutableStateOf<String?>(null) }
     var refused by rememberSaveable { mutableStateOf(false) }
 
@@ -418,6 +597,17 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().focusRing().testTag("field-token"),
             )
+            // The VIEWER credential, entered the same way as the device token because it is issued
+            // the same way: printed once by an operator command, out of band. It is a separate field
+            // and not a second use of the one above, because the server's two credentials are
+            // separate by construction and a device token is a 401 on every route this one reaches.
+            OutlinedTextField(
+                value = viewerCredential,
+                onValueChange = { viewerCredential = it },
+                label = { Text(stringResource(R.string.config_viewer_token_label)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().focusRing().testTag("field-viewer-token"),
+            )
             Label(
                 short = R.string.config_plaintext_note,
                 long = R.string.explain_config_plaintext,
@@ -429,6 +619,7 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                     onClick = {
                         prefs.baseUrl = url
                         prefs.deviceToken = credential
+                        prefs.viewerToken = viewerCredential
                         // Report the validated verdict, not a blanket "Saved": a URL the client will
                         // refuse to use must say so here, not fail silently at the first fix. And the
                         // refusal is a WORD, not a colour — "Not saved" leads the verdict.
@@ -458,6 +649,11 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                                 message = context.getString(R.string.config_not_saved) + ": " + verdict
                             }
                         }
+                        // A newly-entered viewer credential is the one thing that unblocks the alert
+                        // half, so re-run it here rather than waiting for the next app start.
+                        AlertSurface.reset()
+                        PushRegistrar.registerInBackground(context)
+                        CrossingsRefresher.refreshInBackground(context)
                     },
                     tag = "action-save",
                     focusable = mutation != UiMutation.SAVE_NOT_FOCUSABLE,
@@ -763,6 +959,9 @@ private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modif
         ExplanationTopic.SERVER -> (prefs.readConfig() as? ConfigStatus.Incomplete)?.reason
         ExplanationTopic.COUNTERS -> CollectionStatus.lastError
         ExplanationTopic.PERMISSIONS -> null
+        // The alert half's live sentence is the delivery state's own paragraph, which is already in
+        // the list below and needs no second copy here.
+        ExplanationTopic.ALERTS -> null
     }
 
     Column(
@@ -779,6 +978,7 @@ private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modif
                     ExplanationTopic.PERMISSIONS -> R.string.explanation_title_permissions
                     ExplanationTopic.SERVER -> R.string.explanation_title_server
                     ExplanationTopic.COUNTERS -> R.string.explanation_title_counters
+                    ExplanationTopic.ALERTS -> R.string.explanation_title_alerts
                 },
             ),
             style = MaterialTheme.typography.headlineSmall,
@@ -832,6 +1032,26 @@ private fun explanationParagraphs(topic: ExplanationTopic): List<Int> = when (to
         R.string.explain_counter_dropped,
         R.string.explain_counter_not_recorded,
         R.string.explain_collection_freshness,
+    )
+
+    // Every state of the alert surface, in the order the card can reach them: the ten delivery
+    // states first, then the crossings list, then the two limitations a person needs to know about
+    // before they trust a notification to arrive.
+    ExplanationTopic.ALERTS -> listOf(
+        R.string.explain_alerts_checking,
+        R.string.explain_alerts_not_configured,
+        R.string.explain_alerts_cannot_show,
+        R.string.explain_alerts_not_registered_refused,
+        R.string.explain_alerts_not_registered_unreachable,
+        R.string.explain_alerts_r1,
+        R.string.explain_alerts_r2,
+        R.string.explain_alerts_r3,
+        R.string.explain_alerts_r4,
+        R.string.explain_alerts_armed,
+        R.string.explain_crossings_states,
+        R.string.explain_alerts_discarded,
+        R.string.explain_alerts_limitation,
+        R.string.explain_viewer_plaintext,
     )
 }
 

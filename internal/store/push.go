@@ -72,6 +72,38 @@ func RegisterPushSubscription(ctx context.Context, q db.Querier, viewerID, provi
 	return id, nil
 }
 
+// removeSupersededPushSubscriptionSQL deletes ONE endpoint, keyed on its identity AND on the viewer
+// that holds it.
+//
+// The viewer_id predicate is the authorization, not a filter: a registration names the routing
+// address it is replacing, and that address must be one the AUTHENTICATED viewer already registered.
+// Without the predicate the route would remove another viewer's endpoint on request, and the
+// rows-affected count would tell an unauthenticated-ish caller whether a routing address is
+// registered at all. With it, naming somebody else's address deletes nothing and is indistinguishable
+// from naming an address that was never registered.
+const removeSupersededPushSubscriptionSQL = `
+	DELETE FROM push_subscriptions
+	WHERE viewer_id = $1 AND provider = $2::push_provider AND token = $3`
+
+// RemovePushSubscriptionForViewer deletes the calling viewer's endpoint for (provider, token) and
+// reports whether a row actually went. An address that is not registered under this viewer - because
+// it belongs to another viewer, or to nobody - removes nothing and is NOT an error: the caller must
+// answer identically either way (see registerPushSubscription), so "did it exist" never leaks.
+//
+// It is deliberately not a general "delete a subscription" API: there is no route that takes a
+// subscription id, and adding one would be a way to enumerate them. The only removal in the system is
+// the supersede of an address the same viewer is replacing.
+func RemovePushSubscriptionForViewer(ctx context.Context, q db.Querier, viewerID, provider, token string) (bool, error) {
+	if !ValidPushProvider(provider) {
+		return false, fmt.Errorf("%w: %q is not one of %q, %q", ErrInvalidPushProvider, provider, PushProviderFCM, PushProviderUnifiedPush)
+	}
+	tag, err := q.Exec(ctx, removeSupersededPushSubscriptionSQL, viewerID, provider, token)
+	if err != nil {
+		return false, fmt.Errorf("remove superseded push subscription for viewer %s: %w", viewerID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // pushSubscriptionsForFamilySQL is the fan-out read: every push endpoint belonging to a viewer in the
 // family. Scoped by family through the viewer join — a crossing in one family never fans out to
 // another family's phones, the same boundary every read in this package holds. Ordered for a stable,
