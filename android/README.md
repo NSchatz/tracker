@@ -244,18 +244,23 @@ that job.
 The alert half. Steps 1 to 3 need no Firebase project at all and are worth running first, because
 they are the states most deployments will actually be in.
 
+The card draws a LABEL for each state, a few words, and the paragraph explaining it is behind
+**About alerts** on the same screen (F8 of the umbrella's frontend conventions). Both are quoted
+below: read the label on the card, and the sentence one tap away.
+
 1. `tracker add-viewer` on the server; copy the printed **viewer** token and paste it into the new
-   field. With no Firebase project configured in this build, expect the app to say **alerts are not
-   being received: this phone has no usable push configuration** - and to still list the family's
-   crossings underneath. An app that says "armed" here, or that fails to start, is the defect.
+   field. With no Firebase project configured in this build, expect the card to read **Not
+   receivable: no push address** - "this phone has no usable push configuration, so there is no
+   address to register" behind the affordance - and to still list the family's crossings underneath.
+   An app that says **Alerts armed** here, or that fails to start, is the defect.
 2. `tracker add-place`, then walk a phone in and out of it. Within a debounce or two the crossing
    should appear in the in-app list, named with the family's own name for the device. This path does
    not involve push at all, and it is the fail-safe: it must work whether or not alerts do.
 3. Point the app at a server with `TRACKER_PUSH_PROVIDER` unset, and then at one set to
-   `unifiedpush`. Expect two *different* sentences - "this server has no push backend configured" and
-   "this server sends through a push backend this app cannot receive from" - and the crossing list in
-   both. Then paste a wrong viewer token and expect "the server refused this viewer token", not an
-   empty list.
+   `unifiedpush`. Expect two *different* labels - **Not receivable: server sends none** and **Not
+   receivable: backend unsupported** - and the crossing list in both. Then paste a wrong viewer token
+   and expect **Not registered: token refused**, not an empty list. Four states, four labels: a
+   screen that says the same words for two of them is the defect this enumeration exists to catch.
 4. To exercise the push itself you need a Firebase project: add its `google-services.json`, apply the
    `com.google.gms.google-services` plugin **in your own build**, and configure the server with
    `TRACKER_PUSH_PROVIDER=fcm`, `TRACKER_FCM_PROJECT_ID` and `TRACKER_FCM_CREDENTIALS_FILE`. Neither
@@ -263,7 +268,7 @@ they are the states most deployments will actually be in.
 5. With that in place, cross a Place and expect a notification naming the device, the Place and the
    direction, and the same crossing appearing **once** in the in-app list (not twice, once from each
    source).
-6. Deny the notification permission (Android 13+) and cross again. Expect the app to say **alerts
+6. Deny the notification permission (Android 13+) and cross again. Expect the card to read **Alerts
    cannot be shown**, no notification, and the crossing still in the list.
 7. Turn the phone's network off, cross **five or more** distinct device-and-Place pairs, then bring
    it back. Expect some alerts to be missing, and expect
