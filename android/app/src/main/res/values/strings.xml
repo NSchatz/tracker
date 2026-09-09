@@ -71,7 +71,15 @@
     <string name="config_url_label">Server URL</string>
     <string name="config_token_label">Device token</string>
     <string name="config_save">Save</string>
-    <string name="config_saved">Saved</string>
+    <!--
+      The two verdicts a save can produce, and they are deliberately not a prefix of one another.
+      "Saved" is a substring of "Not saved", so a reader skimming the card - or an assertion reading
+      it - could take one for the other; impl-gate finding F1 was exactly that, a check which passed
+      whether the save had happened or been refused. The positive verdict says what was saved and
+      where, which distinguishes it in WORDS rather than by the colour it is painted in (F1 of the
+      umbrella's frontend conventions, WCAG 2.2 success criterion 1.4.1).
+    -->
+    <string name="config_saved">Saved to this device</string>
     <string name="config_not_saved">Not saved</string>
     <string name="config_plaintext_note">Token stored unencrypted</string>
 

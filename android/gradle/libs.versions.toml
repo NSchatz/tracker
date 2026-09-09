@@ -48,7 +48,9 @@ androidxTestUiAutomator = "2.3.0"
 # Google's Accessibility Test Framework: the same checks the platform's own Accessibility Scanner
 # runs (contrast, touch target size, spoken name), applied to the real AccessibilityNodeInfo tree
 # the emulator produced. Compose exposes a full semantics tree through that interface, so this
-# grades what a screen reader would actually be handed.
+# grades what a screen reader would actually be handed. The whole preset is RUN; the suite reads the
+# contrast and touch-target results into claims and reads the speakable-text ones into none, because
+# the spoken-name claim is S0076-tracker-android-spoken-name's.
 accessibilityTestFramework = "4.1.1"
 # ATF's public API returns Guava collections, so the test classpath needs Guava to name them.
 # androidTest-only; it never reaches the shipped APK.

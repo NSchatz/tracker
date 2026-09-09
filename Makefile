@@ -41,6 +41,23 @@ IMAGE ?= tracker:dev
 TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
+# The log tag the instrumented suite writes what it measured under - the contrast ratio, the target
+# size and the own text of every view it swept - and which `verify-ui-android` dumps off the device into
+# build/uiverify/android-grading.log. AC13 requires a FAILING run to name the view, the check and the
+# measured value; this is how a PASSING one is inspectable too, rather than merely quiet, and
+# `uiverify android` REFUSES a run whose evidence is missing or silent, so it cannot go quiet again.
+#
+# It is the device LOG rather than a device FILE because of impl-gate finding F3: every real emulator
+# run pulled back a zero-byte file while this comment and android/README.md both said it carried
+# every number. `UiAutomation.executeShellCommand` runs its argument through
+# `Runtime.getRuntime().exec`, which splits on whitespace and honours no quoting, expands nothing and
+# starts no shell - so the suite's `sh -c '... | base64 -d >> FILE'` never redirected anything. The
+# log needs no quoting, no redirect and no filesystem permission. The tag is stated in one more
+# place, `UiHarness.EVIDENCE_TAG`, because the device end cannot read a Makefile.
+ANDROID_EVIDENCE_TAG ?= TrackerUiGrade
+# How much device log to keep while the suite runs. The sweep writes a line per view per claim per
+# theme, which is a few hundred kilobytes; the default ring buffer would evict the first cases.
+ANDROID_LOG_BUFFER ?= 16M
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
@@ -147,18 +164,23 @@ check-go: fmt vet build test staticcheck govulncheck pin-check
 verify-ui:
 	go run ./cmd/uiverify web
 
-# The Android screen's rendered claims (AC12, AC15-AC17) on a booted emulator, plus the repository
-# explanation documents the screen's labels moved their paragraphs into. AC13 and AC14 moved to
-# S0074-tracker-android-a11y-operability; FRONTEND-CONVENTIONS-RECORD.md records that and
-# `verify-ui-record` fences it.
+# The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
+# explanation documents the screen's labels moved their paragraphs into.
+#
+# The accessibility claims are graded ONE AT A TIME - contrast, touch target size, and no state
+# carried by colour alone - each in both themes and each with its own mutation. A single mutation
+# breaking two claims at once cannot say which check is blind, which is what impl-gate finding F21
+# was. A fourth claim, a non-empty spoken name on every control, is NOT graded on this route: it is
+# S0076-tracker-android-spoken-name's, and the check that used to answer it here read a neighbouring
+# node's label.
 #
 # The boot's exit status is CHECKED rather than piped away. `x=$(cmd | tail -1)` takes tail's status,
 # so a boot that refused on a timeout - the one absence `require` cannot pre-check - would not stop
 # the line, and the refusal message AC19 asks for would be lost behind Gradle's own "no device".
 #
 # The last line is AC18's count, and it is not optional. `gradlew connectedDebugAndroidTest` is green
-# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded twelve claims
-# from a suite whose twelve demonstrations were deleted. `uiverify android` reads the emulator's own
+# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded every claim
+# from a suite whose demonstrations were all deleted. `uiverify android` reads the emulator's own
 # JUnit results back and fails unless every claim the record names ran AND carries a passing
 # `<claim>_demonstration` beside it - the same force `Summarise` has on the browser route.
 verify-ui-android:
@@ -170,7 +192,23 @@ verify-ui-android:
 	serial="$$(tail -1 "$$out")"; \
 	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
-	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
+	adb="$${ANDROID_SDK_ROOT:-$$ANDROID_HOME}/platform-tools/adb"; \
+	: "Room for the whole sweep, and a clean slate, so the evidence dumped below is THIS run's." ; \
+	"$$adb" -s "$$serial" logcat -G $(ANDROID_LOG_BUFFER) >/dev/null 2>&1 || true; \
+	"$$adb" -s "$$serial" logcat -c >/dev/null 2>&1 || true; \
+	status=0; \
+	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
+	mkdir -p build/uiverify; \
+	rm -f build/uiverify/android-grading.log; \
+	: "-v raw prints the message and nothing else, so the file is the suite's own lines; -s TAG:I" ; \
+	: "silences every other tag. The suite writes here through android.util.Log because the" ; \
+	: "instrumentation's shell cannot redirect: executeShellCommand is Runtime.exec, which splits on" ; \
+	: "whitespace and starts no shell, so the file this used to write was never created (finding F3)." ; \
+	"$$adb" -s "$$serial" logcat -d -v raw -s $(ANDROID_EVIDENCE_TAG):I >build/uiverify/android-grading.log 2>/dev/null || true; \
+	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \
+	if [ -s build/uiverify/android-grading.log ]; then cat build/uiverify/android-grading.log; \
+	else echo "(the device wrote no grading evidence this run)"; fi; \
+	exit $$status
 	go run ./cmd/uiverify android
 
 # Both routes, with their prerequisite removed, must exit non-zero naming what is missing (AC19).

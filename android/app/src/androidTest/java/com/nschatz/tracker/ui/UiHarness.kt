@@ -1,15 +1,18 @@
 package com.nschatz.tracker.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Rect
+import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.android.apps.common.testing.accessibility.framework.AccessibilityCheckPreset
 import com.google.android.apps.common.testing.accessibility.framework.AccessibilityCheckResult
-import com.google.android.apps.common.testing.accessibility.framework.AccessibilityHierarchyCheckResult
 import com.google.android.apps.common.testing.accessibility.framework.Parameters
 import com.google.android.apps.common.testing.accessibility.framework.uielement.AccessibilityHierarchyAndroid
 import com.google.android.apps.common.testing.accessibility.framework.utils.contrast.BitmapImage
@@ -17,6 +20,11 @@ import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 
 /**
  * The emulator-side scaffolding for the Android half of the UI gate.
@@ -80,38 +88,277 @@ object UiHarness {
         Thread.sleep(1_500)
     }
 
-    fun takeScreenshot(): Bitmap = instrumentation.uiAutomation.takeScreenshot()
+    /** Pixels per dp on the device as it is configured RIGHT NOW, read off the running display. */
+    fun density(): Float = context.resources.displayMetrics.density
+
+    fun dpOf(px: Int): Float = px / density()
+
+    /**
+     * The screenshot the emulator actually painted, or a refusal naming what could not be obtained.
+     *
+     * AC27: a route that cannot obtain a rendering must say which rendering it could not obtain and
+     * report nothing as passed. `takeScreenshot` returning null is exactly that case, and it is the
+     * one that would otherwise surface as a NullPointerException three frames later.
+     */
+    fun screenshotOrFail(): Bitmap = instrumentation.uiAutomation.takeScreenshot()
+        ?: throw AssertionError(
+            "the emulator returned no screenshot, so no rendered claim can be graded from this run; " +
+                "no clause is reported as passed, skipped or green",
+        )
+
+    /**
+     * The root of the accessibility tree, or a refusal naming what could not be obtained.
+     *
+     * A null root means the activity under test is not the active window - it did not start, it
+     * crashed, or a system dialog is in front of it - and every sweep below would then be measuring
+     * something that is not this screen.
+     */
+    fun activeWindowRootOrFail(): AccessibilityNodeInfo = instrumentation.uiAutomation.rootInActiveWindow
+        ?: throw AssertionError(
+            "no active window: the activity under test did not start, or something else is in front " +
+                "of it, so there is no rendering to grade; no clause is reported as passed, skipped or green",
+        )
 
     fun activeWindowRoot(): AccessibilityNodeInfo? = instrumentation.uiAutomation.rootInActiveWindow
 
+    fun takeScreenshot(): Bitmap = screenshotOrFail()
+
+    // --- the accessibility sweep -----------------------------------------------------------------
+
     /**
-     * Runs Google's Accessibility Test Framework over the tree the platform actually built, with the
-     * emulator's own screenshot supplied so the contrast checks have real pixels to measure.
+     * One sweep of the screen as it is right now: every node the platform published, each measured
+     * for the three things AC13 names, plus every result Google's Accessibility Test Framework
+     * produced over the same tree.
      *
-     * Returns every ERROR. It deliberately does NOT filter by check class: an accessibility harness
-     * that only reports the failures it was written to expect is a harness that goes quiet the first
-     * time a new kind of defect is introduced.
+     * ### Why the sweep measures as well as delegating
+     *
+     * Impl-gate finding F21: the previous sweep asked ATF for ERROR results and reported a clean bill
+     * of health for a screen carrying a 20dp unlabelled control and sub-floor text. It could not be
+     * shown going red, so nothing it ever reported green was evidence. Three separable causes were
+     * found, and all three are answered here rather than papered over:
+     *
+     *  1. **Its anti-vacuity guard counted results that had not run.** `runCheckOnHierarchy` returns a
+     *     result per element per check, and the ones it declined to evaluate come back as `NOT_RUN`.
+     *     Counting those made `resultCount > 0` true on any tree at all, so the guard could never
+     *     fire. [AtfRun.evaluated] now counts only results that actually ran, and the guard that
+     *     matters is the per-claim demonstration rather than a result count.
+     *  2. **ATF cannot report at ERROR what it had to guess.** A hierarchy built from an
+     *     `AccessibilityNodeInfo` tree - the only kind a Compose surface has - carries no text colour
+     *     and no background colour, so the contrast checks fall back to a screenshot heuristic and
+     *     report at WARNING or decline as NOT_RUN. Filtering to ERROR threw every contrast finding
+     *     away. So each claim now carries its OWN measuring code over the same two inputs the
+     *     platform checks use (that node tree and that screenshot), and ATF's ERRORs are added to it
+     *     rather than being all of it.
+     *  3. **The mutation did not always break the claim it named.** Material's `Button` applies
+     *     `minimumInteractiveComponentSize()`, so a `Modifier.size(20.dp)` Button still has a 48dp
+     *     touch target and there was no target-size defect on the glass to find; and one fixed light
+     *     grey measured 1.7:1 on a white card but nearly 9:1 on a dark one, so the dark
+     *     demonstration was mutating nothing. Both are fixed in [UiMutation].
      */
-    fun accessibilityErrors(): AtfRun {
-        val root = activeWindowRoot() ?: return AtfRun(emptyList(), 0, "no active window")
-        val screenshot = takeScreenshot()
+    fun sweep(measureContrast: Boolean): AtfRun {
+        val root = activeWindowRootOrFail()
+        val screenshot = screenshotOrFail()
+        val nodes = mutableListOf<A11yNode>()
+        collectNodes(root, if (measureContrast) screenshot else null, nodes)
+
         val hierarchy = AccessibilityHierarchyAndroid.newBuilder(root, context).build()
         val parameters = Parameters()
         parameters.putScreenCapture(BitmapImage(screenshot))
 
-        var ran = 0
-        val errors = mutableListOf<AccessibilityHierarchyCheckResult>()
+        var evaluated = 0
+        var notRun = 0
+        val findings = mutableListOf<AtfFinding>()
         for (check in AccessibilityCheckPreset.getAccessibilityHierarchyChecksForPreset(AccessibilityCheckPreset.LATEST)) {
-            val results = check.runCheckOnHierarchy(hierarchy, null, parameters)
-            ran += results.size
+            val results = try {
+                check.runCheckOnHierarchy(hierarchy, null, parameters)
+            } catch (failure: RuntimeException) {
+                findings.add(
+                    AtfFinding(
+                        check = check.javaClass.simpleName,
+                        type = "THREW",
+                        where = "(the whole hierarchy)",
+                        message = failure.toString(),
+                    ),
+                )
+                continue
+            }
             for (r in results) {
-                if (r.type == AccessibilityCheckResult.AccessibilityCheckResultType.ERROR) {
-                    errors.add(r)
+                if (r.type == AccessibilityCheckResult.AccessibilityCheckResultType.NOT_RUN) {
+                    notRun++
+                    continue
                 }
+                evaluated++
+                val element = r.element
+                val where = element?.let { "${it.className} ${it.boundsInScreen}" } ?: "(no element)"
+                findings.add(
+                    AtfFinding(
+                        check = check.javaClass.simpleName,
+                        type = r.type.name,
+                        where = where,
+                        message = r.getMessage(Locale.ENGLISH).toString(),
+                    ),
+                )
             }
         }
-        return AtfRun(errors, ran, "")
+        return AtfRun(nodes = nodes, findings = findings, evaluated = evaluated, notRun = notRun)
     }
+
+    private fun collectNodes(node: AccessibilityNodeInfo?, shot: Bitmap?, out: MutableList<A11yNode>) {
+        if (node == null) return
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        val text = node.text?.toString().orEmpty()
+        val description = node.contentDescription?.toString().orEmpty()
+        val hint = try {
+            node.hintText?.toString().orEmpty()
+        } catch (unsupported: NoSuchMethodError) {
+            ""
+        }
+        out.add(
+            A11yNode(
+                id = node.viewIdResourceName ?: "",
+                className = node.className?.toString() ?: "",
+                text = text,
+                description = description,
+                hint = hint,
+                bounds = Rect(bounds),
+                clickable = node.isClickable,
+                focusable = node.isFocusable,
+                editable = node.isEditable,
+                enabled = node.isEnabled,
+                visible = node.isVisibleToUser,
+                childCount = node.childCount,
+                contrast = if (shot != null && text.isNotBlank()) contrastOf(shot, bounds) else null,
+            ),
+        )
+        for (i in 0 until node.childCount) collectNodes(node.getChild(i), shot, out)
+    }
+
+    /**
+     * The contrast ratio between the two colours a crop of the screen is actually made of, or null
+     * when the crop is not a confident text-on-background sample.
+     *
+     * The same shape as the heuristic the platform's own contrast check uses - a histogram over the
+     * element's pixels, the most common colour taken as the background, the colour furthest from it
+     * in luminance taken as the foreground - and it runs here rather than being delegated because
+     * that check can only report a heuristic finding as a WARNING, and a sweep that read ERRORs was
+     * throwing every one of them away (finding F21).
+     *
+     * It returns null rather than a number whenever it is not confident: a crop with no dominant
+     * background, or with no second colour occurring often enough to be a glyph rather than an
+     * anti-aliasing fringe, is not measured at all. A refusal to measure is visible in the evidence
+     * this run writes out; a guessed ratio would not be.
+     */
+    fun contrastOf(shot: Bitmap, bounds: Rect): Double? {
+        val r = Rect(bounds)
+        if (!r.intersect(Rect(0, 0, shot.width, shot.height))) return null
+        if (r.width() < 8 || r.height() < 8) return null
+        val area = r.width() * r.height()
+        if (area < 200) return null
+
+        val pixels = IntArray(r.width() * r.height())
+        shot.getPixels(pixels, 0, r.width(), r.left, r.top, r.width(), r.height())
+        val step = max(1, kotlin.math.sqrt(area / 20_000.0).toInt())
+        val counts = HashMap<Int, Int>()
+        var total = 0
+        var row = 0
+        while (row < r.height()) {
+            var col = 0
+            while (col < r.width()) {
+                val c = pixels[row * r.width() + col] or (0xFF shl 24)
+                counts[c] = (counts[c] ?: 0) + 1
+                total++
+                col += step
+            }
+            row += step
+        }
+        if (total < 64) return null
+
+        var background = 0
+        var backgroundCount = 0
+        for ((colour, n) in counts) {
+            if (n > backgroundCount) {
+                background = colour
+                backgroundCount = n
+            }
+        }
+        // Not a text-on-background sample: no colour dominates, so whatever this crop shows, a
+        // foreground/background split of it would be a guess.
+        if (backgroundCount * 5 < total * 2) return null
+
+        val floor = max(6, total / 1000)
+        val backgroundLuminance = luminance(background)
+        var foreground: Int? = null
+        var furthest = 0.0
+        for ((colour, n) in counts) {
+            if (colour == background || n < floor) continue
+            val distance = abs(luminance(colour) - backgroundLuminance)
+            if (distance > furthest) {
+                furthest = distance
+                foreground = colour
+            }
+        }
+        val fg = foreground ?: return null
+        return contrastRatio(luminance(fg), backgroundLuminance)
+    }
+
+    private fun luminance(colour: Int): Double {
+        fun channel(v: Int): Double {
+            val s = v / 255.0
+            return if (s <= 0.03928) s / 12.92 else ((s + 0.055) / 1.055).pow(2.4)
+        }
+        val r = channel((colour shr 16) and 0xFF)
+        val g = channel((colour shr 8) and 0xFF)
+        val b = channel(colour and 0xFF)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    private fun contrastRatio(a: Double, b: Double): Double =
+        (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+    // --- evidence --------------------------------------------------------------------------------
+
+    /**
+     * Writes one line of grading evidence where `make verify-ui-android` can read it back off the
+     * device.
+     *
+     * AC13 asks a failing run to name the view, the check and the measured value; this is where the
+     * measured values of a PASSING run go, so a green sweep is inspectable rather than merely quiet.
+     * `uiverify android` REFUSES a run whose evidence is missing or silent, so this is a mechanism
+     * with a gate on it rather than an aid that can quietly stop working.
+     *
+     * ### Why it is the device log and not a file
+     *
+     * Impl-gate finding F3: every real emulator run pulled back a ZERO-BYTE evidence file while two
+     * committed documents said it carried every measured number. The cause is one line of platform
+     * behaviour. [shell] goes through `UiAutomation.executeShellCommand`, whose implementation is
+     * `Runtime.getRuntime().exec(command)` - and `Runtime.exec(String)` splits its argument on
+     * WHITESPACE with a `StringTokenizer`. It honours no quoting, expands nothing, and starts no
+     * shell. So `sh -c 'echo ... | base64 -d >> /data/local/tmp/...'` was never a redirect: `sh` was
+     * handed the token `'echo` as its script, failed on the unmatched quote, wrote its complaint to a
+     * stderr nobody read, and exited 0-ish with the file never created. Every other call in this
+     * object is a bare command with no metacharacters, which is exactly why the others worked.
+     *
+     * The device log needs no quoting, no redirect and no filesystem permission: the instrumentation
+     * writes under a tag of its own and `make verify-ui-android` dumps that tag. Long lines are split
+     * because the platform truncates a single log message at about 4kB.
+     */
+    fun evidence(line: String) {
+        for (chunk in line.chunked(EVIDENCE_MAX_CHUNK)) Log.i(EVIDENCE_TAG, chunk)
+    }
+
+    /**
+     * The log tag the evidence is written under, and the one `make verify-ui-android` dumps.
+     *
+     * Stated in one more place, the Makefile's `ANDROID_EVIDENCE_TAG`, because the device end cannot
+     * read a Makefile and the host end cannot read this file.
+     */
+    const val EVIDENCE_TAG = "TrackerUiGrade"
+
+    /** How much of one evidence line fits in a single log message before the platform truncates it. */
+    private const val EVIDENCE_MAX_CHUNK = 3_000
+
+    // --- focus, keyboard and configuration -------------------------------------------------------
 
     /** Puts the process-scoped readout back to a freshly-started state. */
     fun resetStatus() {
@@ -119,25 +366,30 @@ object UiHarness {
     }
 
     /**
-     * Clears the stored server configuration.
-     *
-     * A refused save is one of the states the brevity floor has to bind on, and it is only reachable
-     * while the stored configuration is unusable. `SharedPreferences` outlive a case, so without
-     * this the state a case reaches would depend on which case happened to run before it.
-     */
-    /**
-     * The label of whatever currently holds input focus, as the PLATFORM reports it.
+     * The node that currently holds input focus, as the PLATFORM reports it.
      *
      * This is the ground truth for "operable by directional navigation": it is the same focus an
      * assistive technology reads, and it does not depend on which Compose semantics node happens to
-     * carry the Focused property relative to the one carrying the testTag. The first two emulator
-     * runs failed AC14 on exactly that mismatch.
+     * carry the Focused property relative to the one carrying the testTag.
      */
+    fun focusedNode(): AccessibilityNodeInfo? = activeWindowRoot()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+    /** How the focused control would be named in a failure message: its test tag, else its label. */
+    fun focusedName(): String {
+        val focused = focusedNode() ?: return "(nothing)"
+        val id = focused.viewIdResourceName
+        if (!id.isNullOrBlank()) return id
+        val text = focused.text?.toString() ?: focused.contentDescription?.toString()
+        if (!text.isNullOrBlank()) return text
+        return focused.className?.toString() ?: "(unnamed)"
+    }
+
     fun focusedLabel(): String? {
-        val root = activeWindowRoot() ?: return null
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
+        val focused = focusedNode() ?: return null
         return (focused.text ?: focused.contentDescription)?.toString()
     }
+
+    fun focusedIsEditable(): Boolean = focusedNode()?.isEditable == true
 
     /**
      * Closes the soft keyboard if one is up.
@@ -152,30 +404,136 @@ object UiHarness {
         Thread.sleep(500)
     }
 
+    /**
+     * Takes every input method out of service for the duration of a case.
+     *
+     * A directional traversal is a claim about the SCREEN, and an on-screen keyboard that appears
+     * when focus lands in a text field puts a second window between the keys and the screen. With no
+     * input method enabled the emulator raises none, so what the traversal measures is the screen's
+     * own focus order. Text still goes in: the suite types through Compose's semantics text action,
+     * which is not the IME. [restoreInputMethods] puts the device back.
+     */
+    fun suppressSoftKeyboard() {
+        for (id in shell("ime list -s -a").lines()) {
+            val trimmed = id.trim()
+            if (trimmed.isNotEmpty()) shell("ime disable $trimmed")
+        }
+        Thread.sleep(500)
+    }
+
+    fun restoreInputMethods() {
+        shell("ime reset")
+        Thread.sleep(500)
+    }
+
+    /**
+     * Clears the stored server configuration.
+     *
+     * A refused save is one of the states the brevity floor has to bind on, and it is only reachable
+     * while the stored configuration is unusable. `SharedPreferences` outlive a case, so without
+     * this the state a case reaches would depend on which case happened to run before it.
+     */
     fun clearConfig() {
         val prefs = ClientPreferences(context)
         prefs.baseUrl = ""
         prefs.deviceToken = ""
     }
+
+    /**
+     * Puts the device into the one grant state in which this screen draws EVERY control it can draw.
+     *
+     * AC14 is about "every control reachable and activatable", and on a freshly created emulator two
+     * of the nine this screen declares are simply not operable: with no location grant at all the
+     * start/stop control is DISABLED (`capability` is `NONE`) and the precise-location upgrade is not
+     * drawn (`canUpgradeToPrecise` needs an approximate grant to upgrade FROM). A traversal run in
+     * that state can only ever grade seven of them, which leaves the other two in exactly the
+     * position impl-gate finding F20 found the save control in: off the measured set.
+     *
+     * An APPROXIMATE-only grant is the state that draws all nine. It is granted through the shell
+     * rather than with `GrantPermissionRule` so that nothing about the app's own permission flow is
+     * bypassed or stubbed - the app reads the same `checkSelfPermission` it always reads, and what
+     * changes is the device, which is the thing a person changes too.
+     *
+     * It is never REVOKED. An instrumented test runs inside the app's own process, and revoking a
+     * runtime permission kills that process - which would kill the run. Granting it in setUp for
+     * every case is what makes the state uniform instead of depending on which case ran first.
+     */
+    fun grantApproximateLocation() {
+        val said = shell("pm grant " + context.packageName + " android.permission.ACCESS_COARSE_LOCATION")
+        // Recorded rather than assumed. A grant that did not take shows up two hundred lines later as
+        // "the screen has action-collection disabled", which is a true statement about the screen and
+        // a useless one about the cause; this line says which it was, in the grading evidence.
+        val granted = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        evidence("device: approximate location grant -> granted=$granted " + said.trim())
+    }
+}
+
+/** One node of the tree the platform published, with what this run measured about it. */
+data class A11yNode(
+    val id: String,
+    val className: String,
+    val text: String,
+    val description: String,
+    val hint: String,
+    val bounds: Rect,
+    val clickable: Boolean,
+    val focusable: Boolean,
+    val editable: Boolean,
+    val enabled: Boolean,
+    val visible: Boolean,
+    val childCount: Int,
+    val contrast: Double?,
+) {
+    /** How this node is named in a failure message: its test tag first, because that is findable. */
+    fun name(): String {
+        if (id.isNotBlank()) return id
+        if (text.isNotBlank()) return "\"" + text.take(40) + "\""
+        if (description.isNotBlank()) return "\"" + description.take(40) + "\""
+        return className.substringAfterLast('.') + " " + bounds.toShortString()
+    }
+
+    /** What a screen reader would have to announce for THIS node, before its subtree is consulted. */
+    fun ownSpokenName(): String = listOf(text, description, hint).firstOrNull { it.isNotBlank() }.orEmpty()
+
+    fun isControl(): Boolean = visible && (clickable || editable) && bounds.width() > 0 && bounds.height() > 0
+
+    fun isRenderedText(): Boolean = visible && text.isNotBlank() && bounds.width() > 0 && bounds.height() > 0
+
+    /** Whether [other] sits inside this node's rectangle, which is how a subtree reads geometrically. */
+    fun contains(other: A11yNode): Boolean = bounds.contains(other.bounds)
+}
+
+/** One result the Accessibility Test Framework produced, at whatever severity it produced it. */
+data class AtfFinding(
+    val check: String,
+    val type: String,
+    val where: String,
+    val message: String,
+) {
+    fun describe(): String = "$check [$type] on $where: $message"
 }
 
 /**
- * One accessibility sweep.
+ * One accessibility sweep: what the platform published, what this run measured, and what the
+ * platform's own checks said about the same tree.
  *
- * [resultCount] is what stops a green sweep from being vacuous: a hierarchy that produced no results
- * at all means the checks ran over nothing, which is a failure of the harness rather than a clean
- * bill of health for the screen.
+ * [evaluated] counts only the results that actually RAN. The sweep this replaces counted `NOT_RUN`
+ * results too, which is why its anti-vacuity guard was true on every tree and could never fire -
+ * half of impl-gate finding F21.
  */
 data class AtfRun(
-    val errors: List<AccessibilityHierarchyCheckResult>,
-    val resultCount: Int,
-    val note: String,
+    val nodes: List<A11yNode>,
+    val findings: List<AtfFinding>,
+    val evaluated: Int,
+    val notRun: Int,
 ) {
-    fun describe(): String {
-        if (note.isNotEmpty()) return note
-        return errors.joinToString("\n  ") { r ->
-            val where = r.element?.let { "${it.className} ${it.boundsInScreen}" } ?: "(no element)"
-            "${r.sourceCheckClass.simpleName} on $where: ${r.getMessage(java.util.Locale.ENGLISH)}"
-        }
+    fun errorsFrom(checks: Set<String>): List<AtfFinding> =
+        findings.filter { it.type == "ERROR" && checks.contains(it.check) }
+
+    fun describeFindings(checks: Set<String>): String {
+        val mine = findings.filter { checks.contains(it.check) }
+        if (mine.isEmpty()) return "(the platform checks produced no result of any severity here)"
+        return mine.joinToString("\n    ") { it.describe() }
     }
 }
