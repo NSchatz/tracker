@@ -104,7 +104,11 @@ object ConfigValidation {
         // exception that a genuine secret could later hide behind.
         val trimmedToken = deviceToken?.trim().orEmpty()
 
-        validateBaseUrl(url, allowPlaintextHttp, "device token")?.let {
+        validateBaseUrl(
+            url,
+            allowPlaintextHttp,
+            "Refusing to send the device token over plaintext http://. Use https://.",
+        )?.let {
             return ConfigStatus.Incomplete(summary = it.summary, reason = it.reason)
         }
         if (trimmedToken.isEmpty()) {
@@ -134,7 +138,11 @@ object ConfigValidation {
         val url = baseUrl?.trim().orEmpty()
         val trimmedViewerToken = viewerToken?.trim().orEmpty()
 
-        validateBaseUrl(url, allowPlaintextHttp, "viewer token")?.let {
+        validateBaseUrl(
+            url,
+            allowPlaintextHttp,
+            "Refusing to send the viewer token over plaintext http://. Use https://.",
+        )?.let {
             return ViewerConfigStatus.Incomplete(it.reason)
         }
         if (trimmedViewerToken.isEmpty()) {
@@ -160,13 +168,18 @@ object ConfigValidation {
     /**
      * The URL half of both validations. Returns why it is unusable, or null when it is fine.
      *
-     * @param credentialName what would travel over it, so the plaintext refusal names the credential
-     *   actually at risk rather than a generic one.
+     * @param plaintextRefusal the sentence to return when the URL is plaintext `http://`, naming the
+     *   credential actually at risk rather than a generic one.
+     *
+     *   It is passed in WHOLE rather than assembled here from a credential name. The rules are what
+     *   this helper exists to share; the sentences stay committed literals at their call sites, so a
+     *   search for what a person is told finds it, and so the artefact in `internal/uiverify` that
+     *   pins each of these sentences is measuring the real string rather than a template.
      */
     private fun validateBaseUrl(
         url: String,
         allowPlaintextHttp: Boolean,
-        credentialName: String,
+        plaintextRefusal: String,
     ): BaseUrlProblem? {
         if (url.isEmpty()) {
             return BaseUrlProblem(
@@ -184,10 +197,7 @@ object ConfigValidation {
             )
         }
         if (isHttp && !allowPlaintextHttp) {
-            return BaseUrlProblem(
-                summary = "Plain http refused",
-                reason = "Refusing to send the $credentialName over plaintext http://. Use https://.",
-            )
+            return BaseUrlProblem(summary = "Plain http refused", reason = plaintextRefusal)
         }
         // "https://" alone is a scheme with no host - a URL object would still build, and every
         // request would fail with an opaque IOException instead of this sentence.
