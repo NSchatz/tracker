@@ -146,9 +146,27 @@ func TestEveryAndroidDemonstrationRunsItsClaimAgainstAMutation(t *testing.T) {
 		}
 	}
 
-	// A sweep that matched nothing would pass forever.
-	if claims < 10 {
-		t.Fatalf("found %d instrumented claims in %s; the record names twelve, so this sweep is not "+
-			"reaching the suite it is supposed to be reading", claims, uiClaimTestKt)
+	// A sweep that matched nothing would pass forever, so the floor is what the committed record
+	// accounts for on this surface: the assertions it names PLUS the ones it defers to another item.
+	// A parked case is still audited - it has to be well formed when the item that owns it picks it
+	// up - so it counts here even though it does not run on the emulator. Reading the floor off the
+	// record rather than writing a number down is what stops the two drifting apart.
+	recorded, err := recordedAssertions(theRepoRoot, AndroidSurface)
+	if err != nil {
+		t.Fatalf("reading the committed record: %v", err)
+	}
+	deferred, err := deferredAssertions(theRepoRoot)
+	if err != nil {
+		t.Fatalf("reading the committed record: %v", err)
+	}
+	floor := len(recorded) + len(deferred)
+	if floor == 0 {
+		t.Fatal("the committed record accounts for no assertion at all on the android screen, so this " +
+			"sweep would have no floor to check against")
+	}
+	if claims < floor {
+		t.Fatalf("found %d instrumented claims in %s; the record accounts for %d (%d graded here, %d "+
+			"deferred), so this sweep is not reaching the suite it is supposed to be reading",
+			claims, uiClaimTestKt, floor, len(recorded), len(deferred))
 	}
 }
