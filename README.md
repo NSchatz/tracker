@@ -546,18 +546,27 @@ demonstration beside it. Deleting, renaming or `@Ignore`-ing a demonstration fai
 **They refuse; they never skip.** No browser engine, no Android SDK, no `/dev/kvm`, no booted device:
 each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
 as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make
-verify-ui-refusal` is the check that keeps that true, and it drives each of those five absences
-separately rather than trusting one refusal to stand for all of them. The clause-by-clause record,
-for both surfaces, is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make
+verify-ui-refusal` is the check that keeps that true, and it DRIVES each of the seven absences
+separately — the browser engine and its driver, then the Android SDK, the emulator package, the
+system image, the AVD and a device that never finishes booting — rather than trusting one refusal to
+stand for all of them, and it prints its own count of them. The clause-by-clause record, for both
+surfaces, is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make
 verify-ui-record` refuses a record naming an assertion that did not actually run.
 
-**Two clauses are deferred rather than answered.** F1 and F10 on the Android screen — the platform
-accessibility sweep in both themes, and operability without a pointer — are carried by
-`S0074-tracker-android-a11y-operability`, with the failing instrumented cases kept in place and
-`@Ignore`d. The record says so per clause, and the deferral is fenced from every side: only those two
-pairs may carry one, only that item may be named, and the deferred set and the suite's `@Ignore`d set
-must match case for case, claims and demonstrations together. Parking a ninth case turns `make
-verify-ui-record` red.
+**Every clause is answered on both surfaces, and no clause is answered by an item name.** F1 and F10
+on the Android screen — the platform accessibility sweep in both themes, and operability without a
+pointer — are carried by named assertions in the record, each with its own mutation and each shown
+going red. The route that would let a record cell answer a clause with an item instead of evidence is
+fenced shut rather than merely unused: the list of clause/surface pairs on which that is legal is
+**empty** in `internal/uiverify/record.go`, so there is no cell anyone can write which makes an
+`@Ignore` in the instrumented suite legal, and adding one turns `make verify-ui-record` red. Opening
+that route for a future split is a source change with a name on it.
+
+**One accessibility claim is owned elsewhere and is graded by nothing here.** "Every control has a
+non-empty spoken name" belongs to `S0076-tracker-android-spoken-name`: the check that answered it
+read a name out of whatever node sat inside a control's *bounds*, so a control with no name of its
+own borrowed a neighbour's label. F1 and F10 stay answered by the assertions that remain; what this
+repository does not assert is that a screen reader announces every control on the Android screen.
 
 **The paragraphs that used to stand on each surface live in a document instead**, one per surface:
 [`/static/map-explained.html`](internal/server/static/map-explained.html) for the map, which the page

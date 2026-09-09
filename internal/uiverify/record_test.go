@@ -69,7 +69,7 @@ func (r *fakeRepo) writeGradingEvidence(t *testing.T, edit func(string) string) 
 		b.WriteString(marker + " 12 nodes, platform checks evaluated 40 results and declined 3\n")
 	}
 	for i := 0; i < minimumMeasurementLines+20; i++ {
-		fmt.Fprintf(&b, "  contrast [light] view-%d: 145x48dp contrast=8.20:1 spoken=\"Save\" clickable=true\n", i)
+		fmt.Fprintf(&b, "  contrast [light] view-%d: 145x48dp contrast=8.20:1 own-name=\"Save\" clickable=true\n", i)
 	}
 	body := b.String()
 	if edit != nil {

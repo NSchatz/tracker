@@ -61,12 +61,21 @@ import org.junit.runner.RunWith
  *
  * ### One mutation per claim
  *
- * AC13 makes four claims - contrast, touch target size, a non-empty spoken name, and no state
- * carried by colour alone - and each has a mutation that breaks THAT claim and no other, run in both
- * themes. Impl-gate finding F21 was one mutation breaking two claims at once: the sweep reported
- * nothing, and nothing in the result could say which of the two checks was blind. Each demonstration
- * below therefore reads the failure MESSAGE and requires it to name the mutated view and this
- * claim's own check, which is what makes it a guard rather than a formality.
+ * AC13 makes three claims - contrast, touch target size, and no state carried by colour alone - and
+ * each has a mutation that breaks THAT claim and no other, run in both themes. Impl-gate finding F21
+ * was one mutation breaking two claims at once: the sweep reported nothing, and nothing in the result
+ * could say which of the two checks was blind. Each demonstration below therefore reads the failure
+ * MESSAGE and requires it to name the mutated view and this claim's own check, which is what makes it
+ * a guard rather than a formality.
+ *
+ * ### The spoken-name claim is not graded here
+ *
+ * AC13's fourth claim - that every control has a non-empty spoken name - is carried by
+ * `S0076-tracker-android-spoken-name` and is measured by nothing in this file. The check that used to
+ * stand here read a name out of whatever node happened to sit inside a control's BOUNDS, so a control
+ * with no name of its own borrowed a neighbour's label and the claim was measuring the wrong thing.
+ * Its assertion, its mutation and its record rows are gone rather than left passing: a check that
+ * measures the wrong thing is not weaker evidence, it is evidence for a different claim.
  */
 @RunWith(AndroidJUnit4::class)
 class UiClaimTest {
@@ -278,11 +287,14 @@ class UiClaimTest {
 
     // --- AC13: the platform accessibility checks, one claim at a time ---------------------------
     //
-    // Four claims, each graded in BOTH themes, each with its own demonstration against a screen
-    // mutated to break THAT claim and no other. Sixteen cases where S0056 had six, and the reason is
+    // Three claims, each graded in BOTH themes, each with its own demonstration against a screen
+    // mutated to break THAT claim and no other. Twelve cases where S0056 had six, and the reason is
     // impl-gate finding F21: one mutation broke two claims at once, the sweep reported nothing, and
     // there was no way to tell which of the two checks was blind. A demonstration that cannot say
     // which claim stayed green is not a guard, it is a formality.
+    //
+    // The fourth claim AC13 once made - a non-empty spoken name - is S0076's, and nothing below
+    // grades it.
 
     @Test
     fun AC13_contrast_light() {
@@ -341,34 +353,6 @@ class UiClaimTest {
     }
 
     @Test
-    fun AC13_spoken_name_light() {
-        UiHarness.setNightMode(false)
-        UiHarness.launch()
-        everyControlHasASpokenName("light")
-    }
-
-    @Test
-    fun AC13_spoken_name_light_demonstration() {
-        UiHarness.setNightMode(false)
-        UiHarness.launch(UiMutation.CONTROL_WITHOUT_A_NAME)
-        assertFailsNaming("action-collection", "spoken name", "light") { everyControlHasASpokenName("light") }
-    }
-
-    @Test
-    fun AC13_spoken_name_dark() {
-        UiHarness.setNightMode(true)
-        UiHarness.launch()
-        everyControlHasASpokenName("dark")
-    }
-
-    @Test
-    fun AC13_spoken_name_dark_demonstration() {
-        UiHarness.setNightMode(true)
-        UiHarness.launch(UiMutation.CONTROL_WITHOUT_A_NAME)
-        assertFailsNaming("action-collection", "spoken name", "dark") { everyControlHasASpokenName("dark") }
-    }
-
-    @Test
     fun AC13_no_state_by_colour_alone_light() {
         UiHarness.setNightMode(false)
         aDegradedStateIsOnTheScreen()
@@ -407,7 +391,7 @@ class UiClaimTest {
         )
     }
 
-    // --- the four measuring functions ------------------------------------------------------------
+    // --- the three measuring functions -----------------------------------------------------------
 
     /**
      * Every rendered text measures at or above the WCAG 2.2 AA floor against the background it is
@@ -516,49 +500,6 @@ class UiClaimTest {
         return biggest.values.toList()
     }
 
-    /** Every control and every text field has something a screen reader can announce. */
-    private fun everyControlHasASpokenName(theme: String) {
-        val run = sweepEveryCard(theme, "spoken-name", measureContrast = false)
-        val controls = largestObservationPerControl(run.nodes)
-        lastMeasurement = "${controls.size} controls, names " +
-            controls.joinToString(", ") { "${it.name()}=\"${spokenNameOf(it, run.nodes)}\"" }
-        assertTrue(
-            "spoken name: the $theme sweep found ${controls.size} controls on a screen that has at " +
-                "least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
-            controls.size >= MINIMUM_CONTROLS,
-        )
-        val offenders = controls.filter { spokenNameOf(it, run.nodes).isBlank() }.map {
-            "spoken name: ${it.name()} is a control a person can operate and a screen reader would " +
-                "announce it with nothing at all in the $theme theme (no text, no content " +
-                "description, no hint, and nothing inside it either; it is a " +
-                "${it.className.substringAfterLast('.')} at ${it.bounds.toShortString()})"
-        }
-        val platform = run.errorsFrom(SPOKEN_NAME_CHECKS).map { "spoken name: " + it.describe() }
-        assertTrue(
-            (offenders + platform).joinToString("\n  ") +
-                "\n  [${controls.size} controls measured; each one's name is in the grading evidence]",
-            offenders.isEmpty() && platform.isEmpty(),
-        )
-    }
-
-    /**
-     * What a screen reader would announce for a control: its own text, or anything inside it.
-     *
-     * Compose publishes a control and the label drawn inside it as separate nodes rather than one
-     * merged node, so a control with a perfectly good label has no text OF ITS OWN. Reading only the
-     * control's own text reported every control on the screen as unnamed, which is a defect in the
-     * reading and not in the screen; requiring the control to be a leaf found no controls at all.
-     * Containment is how a subtree reads geometrically, and it is what a person hears.
-     */
-    private fun spokenNameOf(control: A11yNode, nodes: List<A11yNode>): String {
-        val own = control.ownSpokenName()
-        if (own.isNotBlank()) return own
-        return nodes.filter { it !== control && control.contains(it) }
-            .map { it.ownSpokenName() }
-            .firstOrNull { it.isNotBlank() }
-            .orEmpty()
-    }
-
     /**
      * Whether a node is, or sits inside, a control the screen has disabled.
      *
@@ -652,11 +593,16 @@ class UiClaimTest {
             "AC13 $claim [$theme]: ${nodes.size} nodes, platform checks evaluated $evaluated results " +
                 "and declined $notRun",
         )
+        // `own-name` is the node's OWN text, description or hint and nothing inferred: it is
+        // observation, not a graded claim, and it is deliberately not the "what would a screen
+        // reader announce here" answer, which needs the merged semantics S0076 owns. Attributing a
+        // neighbour's label to a control is the mistake that took the spoken-name claim off this
+        // route, and evidence repeating it would be evidence that is wrong.
         for (node in nodes.filter { it.isRenderedText() || it.isControl() }) {
             UiHarness.evidence(
                 "  $claim [$theme] ${node.name()}: ${dp(node.bounds.width())}x${dp(node.bounds.height())}dp " +
                     "contrast=" + (node.contrast?.let { ratio(it) } ?: "not measured") +
-                    " spoken=\"${spokenNameOf(node, nodes)}\" clickable=${node.clickable}" +
+                    " own-name=\"${node.ownSpokenName()}\" clickable=${node.clickable}" +
                     " editable=${node.editable} enabled=${node.enabled}" +
                     " inactive=${isInactive(node, nodes)} children=${node.childCount}",
             )
@@ -1575,10 +1521,15 @@ class UiClaimTest {
          */
         const val MINIMUM_RING_PIXELS = 100
 
-        /** The platform checks that answer each of the three claims AC13 delegates. */
+        /**
+         * The platform checks that answer the two claims AC13 delegates to the framework.
+         *
+         * The speakable-text checks are absent on purpose: nothing here grades a spoken name, so
+         * folding their results into another claim's failure message would let that claim go red for
+         * a reason its own demonstration cannot produce.
+         */
         val CONTRAST_CHECKS = setOf("TextContrastCheck", "ImageContrastCheck")
         val TARGET_CHECKS = setOf("TouchTargetSizeCheck")
-        val SPOKEN_NAME_CHECKS = setOf("SpeakableTextPresentCheck", "EditableContentDescCheck")
 
         /**
          * A sentence of the length the domain layer really produces, for driving the states that

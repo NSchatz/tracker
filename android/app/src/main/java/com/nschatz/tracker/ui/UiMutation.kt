@@ -14,9 +14,13 @@ import com.nschatz.tracker.BuildConfig
  *
  * **One mutation per claim.** A mutation that breaks two claims at once cannot say which check is
  * blind: a sweep that reports nothing has to be diagnosed one defect at a time, and a green run
- * against a doubly-broken surface names neither. So the four claims the accessibility sweep makes -
- * contrast, touch target size, a non-empty spoken name, and no state carried by colour alone - have
- * four separate mutations, and the two halves of operability without a pointer have two more.
+ * against a doubly-broken surface names neither. So the three claims the accessibility sweep makes -
+ * contrast, touch target size, and no state carried by colour alone - have three separate mutations,
+ * and the three SHALLs of operability without a pointer have three more.
+ *
+ * There is no mutation for a control left without a speakable name, and that is not an omission: the
+ * spoken-name claim is `S0076-tracker-android-spoken-name`'s and nothing on this route grades it. A
+ * mutation with no claim behind it is a seam widened for nothing.
  *
  * On Android there is no equivalent of rewriting the served bytes, so the mutation is a switch the
  * app itself honours - and it is honoured **only in a debug build**. [select] reads the debug flag
@@ -60,14 +64,6 @@ enum class UiMutation {
      *    no defect. Success criterion 2.5.8 is about the target, not about the paint.
      */
     TARGET_BELOW_FLOOR,
-
-    /**
-     * Leave ONE control with no speakable name, and change nothing else.
-     *
-     * The start/stop control with its label removed: same size, same colours, nothing for a screen
-     * reader to announce.
-     */
-    CONTROL_WITHOUT_A_NAME,
 
     /** Drop the word that carries a warning, leaving only its colour. */
     WARNING_BY_COLOUR_ONLY,

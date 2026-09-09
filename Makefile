@@ -41,8 +41,8 @@ IMAGE ?= tracker:dev
 TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
-# The log tag the instrumented suite writes what it measured under - the contrast ratio, target size
-# and spoken name of every view it swept - and which `verify-ui-android` dumps off the device into
+# The log tag the instrumented suite writes what it measured under - the contrast ratio, the target
+# size and the own text of every view it swept - and which `verify-ui-android` dumps off the device into
 # build/uiverify/android-grading.log. AC13 requires a FAILING run to name the view, the check and the
 # measured value; this is how a PASSING one is inspectable too, rather than merely quiet, and
 # `uiverify android` REFUSES a run whose evidence is missing or silent, so it cannot go quiet again.
@@ -167,18 +167,20 @@ verify-ui:
 # The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
 # explanation documents the screen's labels moved their paragraphs into.
 #
-# The accessibility claims are graded ONE AT A TIME - contrast, touch target size, a non-empty
-# spoken name, and no state carried by colour alone - each in both themes and each with its own
-# mutation. A single mutation breaking two claims at once cannot say which check is blind, which is
-# what impl-gate finding F21 was.
+# The accessibility claims are graded ONE AT A TIME - contrast, touch target size, and no state
+# carried by colour alone - each in both themes and each with its own mutation. A single mutation
+# breaking two claims at once cannot say which check is blind, which is what impl-gate finding F21
+# was. A fourth claim, a non-empty spoken name on every control, is NOT graded on this route: it is
+# S0076-tracker-android-spoken-name's, and the check that used to answer it here read a neighbouring
+# node's label.
 #
 # The boot's exit status is CHECKED rather than piped away. `x=$(cmd | tail -1)` takes tail's status,
 # so a boot that refused on a timeout - the one absence `require` cannot pre-check - would not stop
 # the line, and the refusal message AC19 asks for would be lost behind Gradle's own "no device".
 #
 # The last line is AC18's count, and it is not optional. `gradlew connectedDebugAndroidTest` is green
-# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded twelve claims
-# from a suite whose twelve demonstrations were deleted. `uiverify android` reads the emulator's own
+# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded every claim
+# from a suite whose demonstrations were all deleted. `uiverify android` reads the emulator's own
 # JUnit results back and fails unless every claim the record names ran AND carries a passing
 # `<claim>_demonstration` beside it - the same force `Summarise` has on the browser route.
 verify-ui-android:

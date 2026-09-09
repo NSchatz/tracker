@@ -83,6 +83,16 @@ its impl gate parked on two findings that are properties of that surface alone.
 The record's F1 and F10 android rows now name the assertions that graded them, one per claim per
 theme, each with its own mutation.
 
+**One accessibility claim is not on those rows, and it is not deferred either.** A fourth claim -
+that every control carries a non-empty spoken name - was graded here by a check that read a name out
+of whatever node happened to sit inside a control's BOUNDS, so a control with no name of its own
+borrowed a neighbour's label and the check reported a name for a control that had none. It measured
+the wrong thing, which is not a weaker version of the right thing, and the claim it was answering is
+`S0076-tracker-android-spoken-name`'s: the assertion, its mutation and its two rows here are gone
+rather than left passing. F1 and F10 stay ANSWERED on this surface by the assertions above, which is
+the difference between a clause carried by less evidence and a clause carried by none; what a reader
+must not conclude from these rows is that a screen reader has been shown to announce every control.
+
 **The deferral route is fenced shut.** `uiverify record` refuses a deferral on EVERY clause/surface
 pair - the split list in `internal/uiverify/record.go` is empty, so there is no cell anyone can write
 in this file that answers a clause with an item name instead of evidence. It also compares the
@@ -97,7 +107,7 @@ a source change with a name on it.
 | clause | surface | assertion | exemption |
 |---|---|---|---|
 | F1 | browser map | AC1-keyboard, AC1-names, AC1-colour-free, AC2-contrast-light, AC2-contrast-dark, AC3-focus, AC4-target-size | - |
-| F1 | android screen | AC13_contrast_light, AC13_contrast_dark, AC13_target_size_light, AC13_target_size_dark, AC13_spoken_name_light, AC13_spoken_name_dark, AC13_no_state_by_colour_alone_light, AC13_no_state_by_colour_alone_dark, AC14_operable_without_a_pointer, AC14_focus_indicator_is_visible | - |
+| F1 | android screen | AC13_contrast_light, AC13_contrast_dark, AC13_target_size_light, AC13_target_size_dark, AC13_no_state_by_colour_alone_light, AC13_no_state_by_colour_alone_dark, AC14_operable_without_a_pointer, AC14_focus_indicator_is_visible | - |
 | F2 | browser map | AC1-keyboard, AC21-policy | - |
 | F2 | android screen | AC12_nothing_clipped_at_360dp, AC13_contrast_light | - |
 | F3 | browser map | AC5-absence | - |
@@ -115,7 +125,7 @@ a source change with a name on it.
 | F9 | browser map | AC11-reflow | - |
 | F9 | android screen | AC12_nothing_clipped_at_360dp | - |
 | F10 | browser map | AC2-contrast-light, AC2-contrast-dark, AC3-theme | - |
-| F10 | android screen | AC13_contrast_light, AC13_contrast_dark, AC13_target_size_light, AC13_target_size_dark, AC13_spoken_name_light, AC13_spoken_name_dark, AC13_no_state_by_colour_alone_light, AC13_no_state_by_colour_alone_dark | - |
+| F10 | android screen | AC13_contrast_light, AC13_contrast_dark, AC13_target_size_light, AC13_target_size_dark, AC13_no_state_by_colour_alone_light, AC13_no_state_by_colour_alone_dark | - |
 | F11 | browser map | AC21-policy, AC22-egress | - |
 | F11 | android screen | - | The Android client renders no browser surface: no WebView, no Custom Tab, no embedded HTML and no androidx.browser dependency. There is no document load for a policy to govern and no browser to report a violation against. `make verify-ui-record` scans the client for a web view and FAILS this exemption the moment one appears. |
 
@@ -145,9 +155,9 @@ and `#panel` at each operating-system preference. It looks for no class and asks
 
 **F10, android screen.** The client's colour scheme is authored per theme rather than derived from
 the wallpaper - dynamic colour (API 31+) made this screen's contrast a property of whatever picture
-the user had set, which no check can grade. Each of the four accessibility claims is therefore graded
-twice, with the DEVICE put into light and then dark mode (`cmd uimode night`) rather than a flag the
-test set on itself, and each has a demonstration in each theme. The contrast mutation is chosen per
+the user had set, which no check can grade. Each of the three accessibility claims is therefore
+graded twice, with the DEVICE put into light and then dark mode (`cmd uimode night`) rather than a
+flag the test set on itself, and each has a demonstration in each theme. The contrast mutation is chosen per
 theme for the same reason the claim is: a grey that measures 1.7:1 on a white card measures nearly
 9:1 on a dark one, so a theme-blind mutation would leave the dark demonstration green while looking
 broken - which is half of why F21's demonstration could not be shown failing.

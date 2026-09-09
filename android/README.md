@@ -207,15 +207,24 @@ clauses. The fence stays and is now shut on every pair: an `@Ignore` with no def
 deferral of any kind at all, turns `make verify-ui-record` red.
 
 **The accessibility sweep grades ONE claim at a time, in both themes, and measures rather than only
-delegating.** Contrast, touch target size, a non-empty spoken name and no-state-by-colour-alone are
-four claims with four separate mutations, because a mutation that breaks two at once cannot say which
-check went blind — which is what happened the first time this was tried. Google's Accessibility Test
-Framework still runs over the tree, and its ERRORs are failures; but the ratio, the target size and
-the spoken name are also computed here from the same two inputs the platform checks read (the
+delegating.** Contrast, touch target size and no-state-by-colour-alone are three claims with three
+separate mutations, because a mutation that breaks two at once cannot say which check went blind —
+which is what happened the first time this was tried. Google's Accessibility Test Framework still
+runs over the tree, and its ERRORs are failures; but the ratio and the target size are also computed
+here from the same two inputs the platform checks read (the
 `AccessibilityNodeInfo` tree the emulator published and the screenshot it painted), because a
 hierarchy built from node infos carries no text or background colour, so those checks can only report
 a screenshot heuristic — at WARNING, never at ERROR. Filtering their results to ERROR is how a sweep
-came back clean over text at 1.7:1. It sweeps **every card in the home column** — each scrolled into
+came back clean over text at 1.7:1.
+
+**A fourth claim used to stand here and does not any more.** "Every control has a non-empty spoken
+name" is carried by `S0076-tracker-android-spoken-name`, and this suite grades nothing about it. The
+check that answered it read a name out of whatever node sat inside a control's *bounds*, so a control
+with no name of its own borrowed a neighbour's label and the check reported a name for a control that
+had none — it measured the wrong thing, and a mutation it could be shown failing against does not
+make that right. Its assertion and its `CONTROL_WITHOUT_A_NAME` mutation are gone rather than left
+passing. The grading evidence still records each node's `own-name` — its *own* text, description or
+hint and nothing inferred — as an observation and not a graded claim. It sweeps **every card in the home column** — each scrolled into
 view in turn, because the platform's checks only ever see the window as it is right now, and a card
 the sweep does not scroll to is a region the accessibility claims cannot go red for. Every number the
 sweep measured is written to

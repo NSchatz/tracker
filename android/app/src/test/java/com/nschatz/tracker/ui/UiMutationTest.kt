@@ -9,9 +9,10 @@ import java.io.File
  * AC28: the mutation seam never ships.
  *
  * The seam is a debug-only switch that deliberately breaks the screen so the instrumented suite can
- * be shown going red. Widening it - which this item does, from one mutation to six - widens the one
- * genuinely irreversible-shaped risk the item carries: a seam that leaked into a release build would
- * ship an app that is broken on purpose, and no re-run undoes an app that is already on a phone.
+ * be shown going red. Widening it - which this item does, taking the three mutations behind AC13 and
+ * AC14 to six - widens the one genuinely irreversible-shaped risk the item carries: a seam that
+ * leaked into a release build would ship an app that is broken on purpose, and no re-run undoes an
+ * app that is already on a phone.
  *
  * So it is pinned two ways here, and this is the one claim in the item that is legitimately graded
  * off a device, because it is about what a BUILD contains rather than about what a screen shows:
@@ -35,7 +36,14 @@ class UiMutationTest {
                 UiMutation.select(debug = false, name = mutation.name),
             )
         }
-        for (name in listOf(null, "", "  ", "none", "NONE ", "ACCESSIBILITY_DEFECT", "../CONTRAST_BELOW_FLOOR")) {
+        // The two RETIRED names are in this list on purpose: ACCESSIBILITY_DEFECT was the one
+        // mutation the sweep had before it was split per claim, and CONTROL_WITHOUT_A_NAME went with
+        // the spoken-name claim to S0076. A name this enum no longer declares must answer NONE, not
+        // resolve to whatever sits nearest it.
+        for (name in listOf(
+            null, "", "  ", "none", "NONE ",
+            "ACCESSIBILITY_DEFECT", "CONTROL_WITHOUT_A_NAME", "../CONTRAST_BELOW_FLOOR",
+        )) {
             assertEquals(
                 "a release build answered ${name.orEmpty()} with something other than NONE",
                 UiMutation.NONE,
@@ -52,7 +60,10 @@ class UiMutationTest {
         // An unknown, misspelt or partially matching name is NONE rather than an error and rather
         // than a near miss: the seam either names a mutation this enum declares, or the screen is
         // the real one.
-        for (name in listOf(null, "", "contrast_below_floor", "CONTRAST", "CONTRAST_BELOW_FLOOR ")) {
+        for (name in listOf(
+            null, "", "contrast_below_floor", "CONTRAST", "CONTRAST_BELOW_FLOOR ",
+            "CONTROL_WITHOUT_A_NAME",
+        )) {
             assertEquals(
                 "a debug build resolved ${name.orEmpty()} to a mutation",
                 UiMutation.NONE,

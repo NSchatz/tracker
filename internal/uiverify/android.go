@@ -26,7 +26,9 @@ import (
 //   - and the demonstration count must not fall below the claim count.
 //
 // Without this, deleting, renaming or @Ignore-ing every `*_demonstration` case leaves the whole
-// Android route green with no evidence that any of its twelve assertions can fail at all.
+// Android route green with no evidence that any of its assertions can fail at all. The count is not
+// written down here: it is however many assertions the committed record names, so a clause that
+// leaves this surface for another item takes its own number with it.
 func CheckAndroidRun(w io.Writer, root string) error {
 	expected, err := recordedAssertions(root, AndroidSurface)
 	if err != nil {
@@ -100,6 +102,10 @@ const EvidenceLog = "build/uiverify/android-grading.log"
 // evidenceMarkers are the lines the committed documents PROMISE this file carries: one summary per
 // claim AC13 makes, in each of the two themes, plus one per AC14 claim.
 //
+// There is no spoken-name marker because there is no spoken-name claim on this route: it went to
+// S0076-tracker-android-spoken-name with the check that measured it wrongly, and a marker for a claim
+// nothing grades would be this gate demanding evidence of a measurement that is not taken.
+//
 // android/README.md says "every number the sweep measured is written to build/uiverify/
 // android-grading.log and printed by make verify-ui-android", and the Makefile's ANDROID_EVIDENCE_TAG
 // comment says the same. Those sentences are checked here rather than trusted, because they were
@@ -116,8 +122,6 @@ var evidenceMarkers = []string{
 	"AC13 contrast [dark]:",
 	"AC13 target-size [light]:",
 	"AC13 target-size [dark]:",
-	"AC13 spoken-name [light]:",
-	"AC13 spoken-name [dark]:",
 	"AC13 no-state-by-colour-alone [light]:",
 	"AC13 no-state-by-colour-alone [dark]:",
 	"AC14 operable without a pointer:",
