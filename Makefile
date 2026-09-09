@@ -126,12 +126,19 @@ verify-ui:
 
 # The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
 # explanation documents the screen's labels moved their paragraphs into.
+#
+# The last line is AC18's count, and it is not optional. `gradlew connectedDebugAndroidTest` is green
+# whenever the cases that RAN passed, so on its own it cannot tell a suite that graded twelve claims
+# from a suite whose twelve demonstrations were deleted. `uiverify android` reads the emulator's own
+# JUnit results back and fails unless every claim the record names ran AND carries a passing
+# `<claim>_demonstration` beside it - the same force `Summarise` has on the browser route.
 verify-ui-android:
 	go run ./cmd/uiverify docs
 	@TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" ./scripts/android-emulator.sh require
 	@serial="$$(TRACKER_AVD='$(TRACKER_AVD)' TRACKER_SYS_IMAGE='$(TRACKER_SYS_IMAGE)' ./scripts/android-emulator.sh boot | tail -1)"; \
 	echo "instrumented suite on $$serial"; \
 	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
+	go run ./cmd/uiverify android
 
 # Both routes, with their prerequisite removed, must exit non-zero naming what is missing (AC19).
 verify-ui-refusal:

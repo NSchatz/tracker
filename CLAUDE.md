@@ -44,7 +44,10 @@ Two rules go with it, and both are enforced:
 - **Every assertion must be shown able to FAIL.** Each check is re-run against the same surface
   mutated to break exactly the claim it measures (a substitution in the served bytes; a debug-only
   `UiMutation` for the app), and the route fails if fewer demonstrations ran than there are claims.
-  If you add a rendered claim, add its mutation in the same change.
+  If you add a rendered claim, add its mutation in the same change. On the Android side that pairing
+  is the NAME: an instrumented claim `X` is evidence only while a case `X_demonstration` passes
+  beside it, and both `make verify-ui-android` and `make verify-ui-record` refuse by name when one
+  goes missing. Do not rename half a pair.
 - **These routes refuse; they never skip.** No engine, no SDK, no `/dev/kvm`, no booted device: exit
   non-zero naming the prerequisite. Same stance as the PostGIS tests. `make verify-ui-refusal` is
   what keeps that from rotting.

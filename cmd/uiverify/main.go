@@ -5,7 +5,8 @@
 //	make verify-ui          uiverify web      the map's rendered claims, in a real browser engine
 //	make verify-ui-refusal  uiverify refusal  both routes refuse loudly with the engine removed
 //	make verify-ui-record   uiverify record   the F1-F11 record against what actually ran
-//	make verify-ui-android  uiverify docs     + the instrumented suite on an emulator
+//	make verify-ui-android  uiverify docs     + the instrumented suite on an emulator, then
+//	                        uiverify android  the emulator's claim/demonstration count (AC18)
 //
 // The one thing it will never do is report a clause green without having rendered it. A missing
 // browser engine exits non-zero naming the engine and how to get it, exactly as `make android` does
@@ -40,6 +41,8 @@ func main() {
 		err = uiverify.CheckRecord(os.Stdout, repoRoot())
 	case "docs":
 		err = uiverify.CheckDocuments(os.Stdout, repoRoot())
+	case "android":
+		err = uiverify.CheckAndroidRun(os.Stdout, repoRoot())
 	default:
 		usage()
 		os.Exit(2)
@@ -52,7 +55,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: uiverify {web|refusal|record|docs}")
+	fmt.Fprintln(os.Stderr, "usage: uiverify {web|refusal|record|docs|android}")
 }
 
 // repoRoot is where the record and the documents live. The make targets run from the repository

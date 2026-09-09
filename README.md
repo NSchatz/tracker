@@ -495,6 +495,15 @@ mutated to break exactly the claim it measures — one substitution in the bytes
 a debug-only `UiMutation` that is inert in a release build — and the route fails if fewer
 demonstrations ran than there are claims. A check that cannot go red is not evidence.
 
+The two routes count that differently because the demonstrations reach them differently. The browser
+route watches each check go red inside its own process, so `uiverify.Summarise` compares the counts
+directly. On the emulator a claim and its demonstration are two separate instrumented cases, and
+`gradlew connectedDebugAndroidTest` is green whenever the cases that *ran* passed - so the naming
+convention carries the pairing (`X` and `X_demonstration`, which passes only when `X`'s assertion
+failed against the mutated screen) and `make verify-ui-android` finishes by reading the emulator's own
+JUnit results back and refusing unless every claim the record names ran **and** carries a passing
+demonstration beside it. Deleting, renaming or `@Ignore`-ing a demonstration fails the route by name.
+
 **They refuse; they never skip.** No browser engine, no Android SDK, no `/dev/kvm`, no booted device:
 each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
 as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make

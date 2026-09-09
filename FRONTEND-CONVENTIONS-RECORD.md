@@ -44,6 +44,21 @@ same surface mutated to break exactly the claim it measures (the served bytes, f
 debug-only `UiMutation`, inert in a release build, for the app), and the route fails if fewer
 demonstrations ran than there are claims. A check that cannot go red is not evidence.
 
+That count is enforced in three places, and the third exists because the first two cannot see the
+emulator's demonstrations:
+
+- the browser route compares them in-process (`uiverify.Summarise`);
+- `make verify-ui-android` finishes with `uiverify android`, which reads the emulator's own JUnit
+  results back and refuses unless every assertion this table names on the Android screen ran **and**
+  a case named `<assertion>_demonstration` passed beside it;
+- `make verify-ui-record` applies the same rule to every assertion in the table, on both surfaces, so
+  a row here can never cite a check that was only ever seen passing.
+
+`gradlew connectedDebugAndroidTest` on its own is green whenever the cases that *ran* passed, so
+without that second bullet a suite whose twelve demonstrations had been deleted, renamed or
+`@Ignore`d would report the whole Android surface green with no evidence that any of its assertions
+can fail at all.
+
 ## The record
 
 | clause | surface | assertion | exemption |

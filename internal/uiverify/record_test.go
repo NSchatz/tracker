@@ -2,9 +2,10 @@
 //
 // AC20 asks the record to REFUSE four things: a clause/surface pair that is missing, a pair carrying
 // both an assertion and an exemption, a pair naming an assertion that did not run, and the F11
-// Android exemption once the client renders a web view. A check that could not detect those would be
-// a check whose green means nothing, so each refusal is driven here against a synthesised repository
-// and asserted to fire.
+// Android exemption once the client renders a web view. AC18 asks both grading routes to refuse a
+// fifth: an assertion that ran but was never shown going red. A check that could not detect those
+// would be a check whose green means nothing, so each refusal is driven here against a synthesised
+// repository and asserted to fire.
 //
 // This is not a rendered claim and deliberately does not pretend to be one: it grades the RECORD,
 // which is a file, and files are graded by reading them. The rendered claims the record points at
@@ -24,20 +25,42 @@ type fakeRepo struct {
 	root string
 }
 
+// theRepoRoot is where the REAL committed record and explanation documents live, relative to this
+// package.
+const theRepoRoot = "../.."
+
+// claimsInTheCommittedRecord is the set of assertions the shipped record names on one surface. The
+// fixtures are derived from it rather than from a hand-copied list, so a claim added to the record
+// without a fixture cannot drift past these tests unnoticed.
+func claimsInTheCommittedRecord(t *testing.T, surface string) []string {
+	t.Helper()
+	names, err := recordedAssertions(theRepoRoot, surface)
+	if err != nil {
+		t.Fatalf("reading the committed record: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatalf("the committed record names no assertion on the %s", surface)
+	}
+	return names
+}
+
 func newFakeRepo(t *testing.T) *fakeRepo {
 	t.Helper()
 	r := &fakeRepo{root: t.TempDir()}
-	r.writeAndroidResults(t, "AC12_labels_stay_short", "AC12_each_card_opens_its_explanation",
-		"AC12_nothing_clipped_at_360dp", "AC13_platform_checks_pass_light", "AC13_platform_checks_pass_dark",
-		"AC13_no_state_by_colour_alone", "AC14_operable_without_a_pointer", "AC15_counters_state_their_set",
-		"AC15_never_measured_reads_not_recorded", "AC16_unreadable_queue_costs_only_itself",
-		"AC16_three_states_are_distinct", "AC17_stopped_reads_last_known")
-	r.writeWebRun(t, "AC1-keyboard", "AC1-names", "AC1-colour-free", "AC2-contrast-light",
-		"AC2-contrast-dark", "AC3-focus", "AC3-theme", "AC4-target-size", "AC5-absence", "AC6-aggregates",
-		"AC7-one-bad-event", "AC8-stale", "AC9-three-states", "AC10-explanation", "AC11-reflow",
-		"AC21-policy", "AC22-egress")
+	r.writeAndroidResults(t, withDemonstrations(claimsInTheCommittedRecord(t, AndroidSurface))...)
+	r.writeWebRun(t, claimsInTheCommittedRecord(t, "browser map")...)
 	r.writeAndroidSource(t, "package com.nschatz.tracker\n\nclass Nothing\n")
 	return r
+}
+
+// withDemonstrations is what a green instrumented run reports: every claim, and beside each one the
+// case that showed it going red.
+func withDemonstrations(claims []string) []string {
+	out := make([]string, 0, len(claims)*2)
+	for _, c := range claims {
+		out = append(out, c, c+DemonstrationSuffix)
+	}
+	return out
 }
 
 func (r *fakeRepo) writeWebRun(t *testing.T, ids ...string) {
@@ -187,6 +210,138 @@ func TestAnAssertionThatDidNotRunIsRefused(t *testing.T) {
 		err := CheckRecord(io.Discard, repo.root)
 		if err == nil {
 			t.Fatal("a FAILED instrumented case was counted as having run")
+		}
+	})
+}
+
+// AC18 on BOTH surfaces, which is the hole impl-gate finding F1 named: an assertion may not be
+// recorded as evidence unless the route also showed it going red. Before this, deleting, renaming or
+// @Ignore-ing every `*_demonstration` case left the whole Android route green.
+func TestAnAssertionThatWasNeverShownGoingRedIsRefused(t *testing.T) {
+	t.Parallel()
+
+	t.Run("android: not one demonstration ran", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeAndroidResults(t, claimsInTheCommittedRecord(t, AndroidSurface)...) // claims only
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the record was accepted with twelve Android claims and no demonstration at all")
+		}
+		if !strings.Contains(err.Error(), "demonstration") {
+			t.Fatalf("the refusal does not say a demonstration is missing: %v", err)
+		}
+	})
+
+	t.Run("android: exactly one demonstration is missing, and it is named", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		var names []string
+		for _, c := range claimsInTheCommittedRecord(t, AndroidSurface) {
+			names = append(names, c)
+			if c != "AC17_stopped_reads_last_known" {
+				names = append(names, c+DemonstrationSuffix)
+			}
+		}
+		repo.writeAndroidResults(t, names...)
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the record was accepted with one Android claim that was never shown going red")
+		}
+		if !strings.Contains(err.Error(), "AC17_stopped_reads_last_known") {
+			t.Fatalf("the refusal does not name the claim with no demonstration: %v", err)
+		}
+	})
+
+	t.Run("android: a FAILED demonstration does not count", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		dir := filepath.Join(repo.root, "android", "app", "build", "outputs", "androidTest-results", "connected")
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0"?><testsuite>`)
+		for _, c := range claimsInTheCommittedRecord(t, AndroidSurface) {
+			b.WriteString(`<testcase name="` + c + `"/>`)
+			b.WriteString(`<testcase name="` + c + DemonstrationSuffix + `">` +
+				`<failure message="the mutated screen did not make the assertion fail"/></testcase>`)
+		}
+		b.WriteString(`</testsuite>`)
+		if err := os.WriteFile(filepath.Join(dir, "results.xml"), []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckRecord(io.Discard, repo.root); err == nil {
+			t.Fatal("a FAILED demonstration was counted as evidence that the claim can go red")
+		}
+	})
+
+	t.Run("browser: an assertion that ran but was not demonstrated", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		var results []Result
+		for _, id := range claimsInTheCommittedRecord(t, "browser map") {
+			results = append(results, Result{ID: id, Passed: true, Demonstrated: id != "AC8-stale"})
+		}
+		if err := RecordRun(repo.root, "web", results); err != nil {
+			t.Fatal(err)
+		}
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the record was accepted with a browser assertion that was never shown going red")
+		}
+		if !strings.Contains(err.Error(), "AC8-stale") {
+			t.Fatalf("the refusal does not name the undemonstrated assertion: %v", err)
+		}
+	})
+}
+
+// The same count, at the ROUTE rather than at the record: AC18 says "WHEN either grading route runs
+// ... SHALL fail", so `make verify-ui-android` must refuse on its own, without waiting for
+// `make verify-ui-record` to be run afterwards.
+func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a green run passes", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		if err := CheckAndroidRun(io.Discard, repo.root); err != nil {
+			t.Fatalf("a run reporting every claim and every demonstration was refused: %v", err)
+		}
+	})
+
+	t.Run("no demonstrations at all", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeAndroidResults(t, claimsInTheCommittedRecord(t, AndroidSurface)...)
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with twelve claims and no demonstration")
+		}
+		if !strings.Contains(err.Error(), "never shown going red") {
+			t.Fatalf("the refusal does not say the claims were never shown going red: %v", err)
+		}
+	})
+
+	t.Run("a claim the record names did not run", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeAndroidResults(t, "AC12_labels_stay_short", "AC12_labels_stay_short"+DemonstrationSuffix)
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green having run one of the twelve claims")
+		}
+		if !strings.Contains(err.Error(), "AC17_stopped_reads_last_known") {
+			t.Fatalf("the refusal does not name the claim that did not run: %v", err)
+		}
+	})
+
+	t.Run("no results at all", func(t *testing.T) {
+		repo := &fakeRepo{root: t.TempDir()}
+		repo.writeRecord(t, nil)
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with no instrumented results at all")
+		}
+		if !strings.Contains(err.Error(), "verify-ui-android") {
+			t.Fatalf("the refusal does not say the route had not run: %v", err)
 		}
 	})
 }

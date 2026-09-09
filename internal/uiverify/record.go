@@ -27,6 +27,20 @@ const runsDir = "build/uiverify"
 // Surfaces are the two user interfaces tracker ships. Every clause is answered on both.
 var Surfaces = []string{"browser map", "android screen"}
 
+// AndroidSurface is the record's name for the emulator-graded surface.
+const AndroidSurface = "android screen"
+
+// DemonstrationSuffix pairs an instrumented claim with the case that shows it going red.
+//
+// AC18 wants "the same measuring code shown going red against a surface mutated to break exactly one
+// claim". On the browser surface that pairing is a struct field ([Check].Mutation) and the count is
+// enforced in [Summarise]. On the Android surface the two halves are separate JUnit cases, so the
+// NAME is the pairing: `X` is the claim and `X_demonstration` is the same assertion re-run against a
+// mutated screen, passing only when the assertion failed there. That convention is load-bearing, not
+// decorative - [CheckAndroidRun] and [CheckRecord] both refuse a claim with no passing demonstration
+// beside it.
+const DemonstrationSuffix = "_demonstration"
+
 // Clauses are the frontend conventions, F1 through F11.
 var Clauses = []string{"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11"}
 
@@ -72,6 +86,9 @@ type recordRow struct {
 
 var rowPattern = regexp.MustCompile(`^\|\s*(F\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*$`)
 
+// joinRecordPath locates the committed record beneath a repository root.
+func joinRecordPath(root string) string { return filepath.Join(root, RecordFile) }
+
 // ParseRecord reads the committed record.
 func ParseRecord(path string) ([]recordRow, error) {
 	body, err := os.ReadFile(path)
@@ -103,8 +120,13 @@ func ParseRecord(path string) ([]recordRow, error) {
 // CheckRecord is AC20. It refuses a record that is incomplete, doubly mapped, or claiming an
 // assertion that did not run in the last recorded invocation of its route — and it refuses the F11
 // Android exemption the moment the app gains a web view.
+//
+// It also carries AC18's no-vacuous-pass count into the record, on BOTH surfaces: an assertion the
+// record names must not only have RUN, it must have been shown going red. Without that, a suite that
+// lost every demonstration would still be reported green here, and a check that was never shown
+// going red is not evidence.
 func CheckRecord(w io.Writer, root string) error {
-	path := filepath.Join(root, RecordFile)
+	path := joinRecordPath(root)
 	rows, err := ParseRecord(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", RecordFile, err)
@@ -115,8 +137,9 @@ func CheckRecord(w io.Writer, root string) error {
 	if err != nil {
 		return err
 	}
-	for surface, ids := range ran {
-		fmt.Fprintf(w, "ran:     %s -> %d assertions\n", surface, len(ids))
+	for _, surface := range Surfaces {
+		run := ran[surface]
+		fmt.Fprintf(w, "ran:     %s -> %d assertions, %d demonstrated\n", surface, len(run.Ran), len(run.Demonstrated))
 	}
 
 	byPair := map[string]recordRow{}
@@ -144,11 +167,18 @@ func CheckRecord(w io.Writer, root string) error {
 			case len(row.Assertions) > 0 && row.Exemption != "":
 				problems = append(problems, fmt.Sprintf("%s on the %s (line %d) carries BOTH an assertion and an exemption", clause, surface, row.Line))
 			}
+			run := ran[surface]
 			for _, a := range row.Assertions {
-				if !ran[surface][a] {
+				if !run.Ran[a] {
 					problems = append(problems, fmt.Sprintf(
 						"%s on the %s (line %d) names the assertion %q, which did not run in the last recorded invocation of that route",
 						clause, surface, row.Line, a))
+					continue
+				}
+				if !run.Demonstrated[a] {
+					problems = append(problems, fmt.Sprintf(
+						"%s on the %s (line %d) names the assertion %q, which ran but carries no demonstration in the last recorded invocation of that route (AC18): a check that was never shown going red is not evidence%s",
+						clause, surface, row.Line, a, demonstrationHint(surface, a)))
 				}
 			}
 		}
@@ -172,12 +202,33 @@ func CheckRecord(w io.Writer, root string) error {
 	return nil
 }
 
+// demonstrationHint says, in the route's own vocabulary, what a missing demonstration would look
+// like, so the refusal names something the reader can go and find.
+func demonstrationHint(surface, assertion string) string {
+	if surface == AndroidSurface {
+		return fmt.Sprintf(" (the instrumented suite reported no passing case named %q)", assertion+DemonstrationSuffix)
+	}
+	return ""
+}
+
+// surfaceRun is what the last recorded invocation of one grading route actually did on one surface:
+// which assertions ran green, and which of those were also shown going RED against a surface mutated
+// to break exactly that claim.
+type surfaceRun struct {
+	Ran          map[string]bool
+	Demonstrated map[string]bool
+}
+
+func newSurfaceRun() surfaceRun {
+	return surfaceRun{Ran: map[string]bool{}, Demonstrated: map[string]bool{}}
+}
+
 // assertionsThatRan reads what each route last did: the browser route's own run record, and the
 // instrumented suite's JUnit results, which are the emulator's own report of what executed.
-func assertionsThatRan(root string) (map[string]map[string]bool, error) {
-	out := map[string]map[string]bool{
-		"browser map":    {},
-		"android screen": {},
+func assertionsThatRan(root string) (map[string]surfaceRun, error) {
+	out := map[string]surfaceRun{
+		"browser map":  newSurfaceRun(),
+		AndroidSurface: newSurfaceRun(),
 	}
 
 	webPath := filepath.Join(root, runsDir, "last-run-web.json")
@@ -190,14 +241,17 @@ func assertionsThatRan(root string) (map[string]map[string]bool, error) {
 		return nil, fmt.Errorf("parsing %s: %w", webPath, err)
 	}
 	for _, id := range rec.Ran {
-		out["browser map"][id] = true
+		out["browser map"].Ran[id] = true
+	}
+	for _, id := range rec.Demonstrated {
+		out["browser map"].Demonstrated[id] = true
 	}
 
-	androidIDs, err := androidTestsThatRan(root)
+	android, err := androidRun(root)
 	if err != nil {
 		return nil, err
 	}
-	out["android screen"] = androidIDs
+	out[AndroidSurface] = android
 	return out, nil
 }
 
@@ -213,11 +267,15 @@ type junitSuite struct {
 	} `xml:"testcase"`
 }
 
-// androidTestsThatRan reads the connected-test results the emulator produced. A skipped or failed
-// case does not count as having run: F2's whole point is that a clause is proved by the runtime that
-// drew it, and a case the emulator skipped drew nothing.
-func androidTestsThatRan(root string) (map[string]bool, error) {
-	out := map[string]bool{}
+// androidRun reads the connected-test results the emulator produced and splits them into the
+// rendered claims that ran green and the demonstrations that ran green.
+//
+// A skipped or failed case counts as neither: F2's whole point is that a clause is proved by the
+// runtime that drew it, and a case the emulator skipped drew nothing. A demonstration case passes
+// exactly when the claim's assertion FAILED against the mutated screen, so a green
+// `X_demonstration` is the emulator's own report that `X` can go red.
+func androidRun(root string) (surfaceRun, error) {
+	out := newSurfaceRun()
 	dir := filepath.Join(root, "android", "app", "build", "outputs", "androidTest-results", "connected")
 	entries, err := os.Stat(dir)
 	if err != nil || !entries.IsDir() {
@@ -243,7 +301,11 @@ func androidTestsThatRan(root string) (map[string]bool, error) {
 			if tc.Failure != nil || tc.Skipped != nil {
 				continue
 			}
-			out[tc.Name] = true
+			if claim, ok := strings.CutSuffix(tc.Name, DemonstrationSuffix); ok {
+				out.Demonstrated[claim] = true
+				continue
+			}
+			out.Ran[tc.Name] = true
 		}
 		return nil
 	})
