@@ -13,6 +13,7 @@ import com.google.android.apps.common.testing.accessibility.framework.Accessibil
 import com.google.android.apps.common.testing.accessibility.framework.Parameters
 import com.google.android.apps.common.testing.accessibility.framework.uielement.AccessibilityHierarchyAndroid
 import com.google.android.apps.common.testing.accessibility.framework.utils.contrast.BitmapImage
+import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
@@ -115,6 +116,19 @@ object UiHarness {
     /** Puts the process-scoped readout back to a freshly-started state. */
     fun resetStatus() {
         CollectionStatus.clearForTest()
+    }
+
+    /**
+     * Clears the stored server configuration.
+     *
+     * A refused save is one of the states the brevity floor has to bind on, and it is only reachable
+     * while the stored configuration is unusable. `SharedPreferences` outlive a case, so without
+     * this the state a case reaches would depend on which case happened to run before it.
+     */
+    fun clearConfig() {
+        val prefs = ClientPreferences(context)
+        prefs.baseUrl = ""
+        prefs.deviceToken = ""
     }
 }
 

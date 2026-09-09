@@ -24,8 +24,15 @@ data class ServerConfig(val baseUrl: String, val deviceToken: String)
 sealed interface ConfigStatus {
     data class Configured(val config: ServerConfig) : ConfigStatus
 
-    /** @param reason a sentence to show the user, naming what to fix. */
-    data class Incomplete(val reason: String) : ConfigStatus
+    /**
+     * @param summary a few words for the SCREEN, naming what is wrong. The server card renders
+     *   `"Not saved: " + summary`, so this is held to the same brevity floor every other label on
+     *   that surface is (F8 of the umbrella's frontend conventions).
+     * @param reason the sentence naming what to fix, for the explanation destination and the log.
+     *   It is deliberately NOT what the card draws: a paragraph on a phone is a paragraph nobody
+     *   reads, and it is one tap away behind "About server settings".
+     */
+    data class Incomplete(val summary: String, val reason: String) : ConfigStatus
 }
 
 /**
@@ -61,28 +68,39 @@ object ConfigValidation {
         val trimmedToken = deviceToken?.trim().orEmpty()
 
         if (url.isEmpty()) {
-            return ConfigStatus.Incomplete("No server URL is set. Enter the tracker server address.")
+            return ConfigStatus.Incomplete(
+                summary = "No server URL set",
+                reason = "No server URL is set. Enter the tracker server address.",
+            )
         }
         val lower = url.lowercase(Locale.ROOT)
         val isHttps = lower.startsWith("https://")
         val isHttp = lower.startsWith("http://")
         if (!isHttps && !isHttp) {
-            return ConfigStatus.Incomplete("The server URL must start with https:// (or http:// for local testing).")
+            return ConfigStatus.Incomplete(
+                summary = "Server URL needs https",
+                reason = "The server URL must start with https:// (or http:// for local testing).",
+            )
         }
         if (isHttp && !allowPlaintextHttp) {
             return ConfigStatus.Incomplete(
-                "Refusing to send the device token over plaintext http://. Use https://.",
+                summary = "Plain http refused",
+                reason = "Refusing to send the device token over plaintext http://. Use https://.",
             )
         }
         // "https://" alone is a scheme with no host — a URL object would still build, and every
         // report would fail with an opaque IOException instead of this sentence.
         val afterScheme = url.substringAfter("://")
         if (afterScheme.isEmpty() || afterScheme.startsWith("/")) {
-            return ConfigStatus.Incomplete("The server URL is missing a host name.")
+            return ConfigStatus.Incomplete(
+                summary = "Server URL has no host",
+                reason = "The server URL is missing a host name.",
+            )
         }
         if (trimmedToken.isEmpty()) {
             return ConfigStatus.Incomplete(
-                "No device token is set. Run `tracker enroll` on the server and paste the token here.",
+                summary = "No device token set",
+                reason = "No device token is set. Run `tracker enroll` on the server and paste the token here.",
             )
         }
         return ConfigStatus.Configured(ServerConfig(baseUrl = url.trimEnd('/'), deviceToken = trimmedToken))

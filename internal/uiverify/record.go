@@ -368,6 +368,11 @@ var documentedStrings = []string{
 	"warning_approximate",
 	"warning_notifications_blocked",
 	"config_plaintext_note",
+	// The verdict and the trouble are the two texts the domain layer supplies. Their SENTENCES
+	// left the home tree for the explanation destination when impl-gate finding F8 was closed;
+	// these are the sections that have to carry them.
+	"config_verdict_note",
+	"collection_trouble",
 	"collection_limitation",
 	"counter_delivered",
 	"counter_queued",

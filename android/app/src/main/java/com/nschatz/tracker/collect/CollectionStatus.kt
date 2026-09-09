@@ -7,6 +7,36 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /**
+ * What KIND of trouble the readout is reporting, in a vocabulary the screen can name in a few words.
+ *
+ * [CollectionStatus.lastError] is a SENTENCE, and its sentences are unbounded: a socket failure, an
+ * HTTP body or a platform exception contributes whatever words it has, and no amount of editing the
+ * literals in this package bounds an `IOException.message`. F8 of the umbrella's frontend
+ * conventions keeps prose off a phone surface, so the two are separated at the source: the screen
+ * renders a label chosen from this closed set, and the sentence is read on the explanation
+ * destination that the collection card's one affordance opens.
+ *
+ * A closed set is the point. The screen maps it with an exhaustive `when`, so a kind added here
+ * without a label is a compile error rather than a paragraph that reaches the surface unnoticed.
+ */
+enum class TroubleKind {
+    /** No server URL or no device token, so there is nowhere to report to. */
+    NOT_CONFIGURED,
+
+    /** A location permission was revoked out from under a running collection. */
+    PERMISSION_LOST,
+
+    /** Android refused to let the location foreground service start. */
+    SERVICE_REFUSED,
+
+    /** A fix was measured and could not be delivered, or was lost. */
+    DELIVERY_FAILED,
+
+    /** The server refused the device token. */
+    CREDENTIAL_REJECTED,
+}
+
+/**
  * What the collection service is doing right now, observable by the UI.
  *
  * A process-scoped singleton rather than a bound-service connection: the screen needs a handful of
@@ -120,12 +150,30 @@ object CollectionStatus {
         runStartedAtMillis = null
         countersAsOfMillis = null
         lastFixAtMillis = 0L
-        lastError = null
+        setTrouble(null, null)
     }
 
-    /** The last failure, in the words the server or the network used. Null once something works. */
+    /**
+     * The last failure, in the words the server or the network used. Null once something works.
+     *
+     * This is the DETAIL, and it is not drawn on the home screen: see [TroubleKind]. It is read on
+     * the explanation destination, and it is what the debug log carries.
+     */
     var lastError: String? by mutableStateOf(null)
         internal set
+
+    /** Which [TroubleKind] [lastError] belongs to, or null when nothing is wrong. */
+    var lastTrouble: TroubleKind? by mutableStateOf(null)
+        internal set
+
+    /**
+     * Sets the two halves of a trouble together, so a sentence can never outlive the label that
+     * names it on the surface (or arrive without one).
+     */
+    private fun setTrouble(kind: TroubleKind?, detail: String?) {
+        lastTrouble = kind
+        lastError = detail
+    }
 
     // The mutators are @Synchronized because they are genuinely called from more than one thread:
     // `recordFlush` runs on the WorkManager worker's thread, while `recordQueued`, `recordDropped`
@@ -151,7 +199,7 @@ object CollectionStatus {
         runStartedAtMillis = now
         countersAsOfMillis = now
         lastFixAtMillis = 0L
-        lastError = null
+        setTrouble(null, null)
     }
 
     /**
@@ -191,6 +239,7 @@ object CollectionStatus {
         queued: Int,
         reason: String?,
         now: Long = System.currentTimeMillis(),
+        kind: TroubleKind = TroubleKind.DELIVERY_FAILED,
     ) {
         this.delivered = (this.delivered ?: 0) + delivered
         this.dropped = (this.dropped ?: 0) + discarded
@@ -199,25 +248,34 @@ object CollectionStatus {
         this.countersAsOfMillis = now
         if (this.runStartedAtMillis == null) this.runStartedAtMillis = now
         when {
-            reason != null -> lastError = reason
-            delivered > 0 && discarded == 0 -> lastError = null
+            reason != null -> setTrouble(kind, reason)
+            delivered > 0 && discarded == 0 -> setTrouble(null, null)
         }
     }
 
     @Synchronized
-    internal fun recordDropped(reason: String, now: Long = System.currentTimeMillis()) {
+    internal fun recordDropped(
+        reason: String,
+        now: Long = System.currentTimeMillis(),
+        kind: TroubleKind = TroubleKind.DELIVERY_FAILED,
+    ) {
         dropped = (dropped ?: 0) + 1
         countersAsOfMillis = now
-        lastError = reason
+        setTrouble(kind, reason)
     }
 
     /** Records [count] fixes lost at once — evicted from a full queue, say. */
     @Synchronized
-    internal fun recordDroppedBatch(count: Int, reason: String, now: Long = System.currentTimeMillis()) {
+    internal fun recordDroppedBatch(
+        count: Int,
+        reason: String,
+        now: Long = System.currentTimeMillis(),
+        kind: TroubleKind = TroubleKind.DELIVERY_FAILED,
+    ) {
         if (count <= 0) return
         dropped = (dropped ?: 0) + count
         countersAsOfMillis = now
-        lastError = reason
+        setTrouble(kind, reason)
     }
 
     /**
@@ -227,9 +285,13 @@ object CollectionStatus {
      * then lost" — it is the number that says the trail has a hole in it. A missing server URL or a
      * revoked permission means no fix was ever collected, so counting it as a drop would inflate
      * the one number whose whole job is to be trustworthy about data loss.
+     *
+     * @param kind what the screen names in a few words. Required rather than defaulted: the caller
+     *   is the only one that knows, and a wrong label here is a wrong word on the surface.
+     * @param reason the sentence, for the explanation destination and the log.
      */
     @Synchronized
-    internal fun recordBlocked(reason: String) {
-        lastError = reason
+    internal fun recordBlocked(kind: TroubleKind, reason: String) {
+        setTrouble(kind, reason)
     }
 }

@@ -1,9 +1,11 @@
 package com.nschatz.tracker.ui
 
 import android.view.KeyEvent
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -12,6 +14,7 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.nschatz.tracker.collect.CollectionStatus
+import com.nschatz.tracker.collect.TroubleKind
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -52,12 +55,14 @@ class UiClaimTest {
     @Before
     fun setUp() {
         UiHarness.resetStatus()
+        UiHarness.clearConfig()
         UiHarness.setNightMode(false)
     }
 
     @After
     fun tearDown() {
         UiHarness.resetStatus()
+        UiHarness.clearConfig()
         UiHarness.resetDisplayProfile()
         UiHarness.setNightMode(false)
     }
@@ -68,12 +73,55 @@ class UiClaimTest {
     fun AC12_labels_stay_short() {
         UiHarness.launch()
         labelsStayShort()
+        everyStateStaysShort()
     }
 
     @Test
     fun AC12_labels_stay_short_demonstration() {
         UiHarness.launch(UiMutation.PARAGRAPHS_ON_SURFACE)
         assertFails("a paragraph on the surface was not caught by the brevity assertion") { labelsStayShort() }
+
+        // And the half a launch-state measurement cannot reach: a paragraph drawn only once the
+        // screen has been driven into a degraded state.
+        UiHarness.launch(UiMutation.PROSE_IN_A_DEGRADED_STATE)
+        assertFails("a paragraph drawn only in a degraded state was not caught") { everyStateStaysShort() }
+    }
+
+    /**
+     * The floor, applied to every state the screen can be in rather than only to the one it opens
+     * in.
+     *
+     * The two texts the home tree draws from the domain layer - the refused-save verdict and the
+     * collection warning - are not on the screen at launch, so a floor that measured only the launch
+     * state could never see them however long they grew. This drives the screen INTO each of those
+     * states and measures there, and it iterates the trouble vocabulary rather than a hand-written
+     * list so that a kind added later is measured without anyone remembering to add it.
+     */
+    private fun everyStateStaysShort() {
+        // A save the client refuses, reached the way a person reaches it: press Save with nothing
+        // entered. setUp cleared the stored configuration, so this is the refusal every time.
+        compose.onNodeWithTag("action-save").performClick()
+        compose.waitForIdle()
+        val verdict = textOf("config-verdict")
+        assertTrue(
+            "pressing Save with no configuration rendered \"$verdict\"; the refused-save state was " +
+                "never entered, so measuring it would prove nothing",
+            verdict.contains("Not saved", ignoreCase = true),
+        )
+        labelsStayShort()
+
+        for (kind in TroubleKind.entries) {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                CollectionStatus.recordBlocked(kind, A_SENTENCE_THE_DOMAIN_PRODUCES)
+            }
+            compose.waitForIdle()
+            assertTrue(
+                "the collection card renders nothing for $kind, so the floor would be measuring a " +
+                    "state that is not on the screen",
+                textOf("collection-error").isNotBlank(),
+            )
+            labelsStayShort()
+        }
     }
 
     private fun labelsStayShort() {
@@ -213,14 +261,20 @@ class UiClaimTest {
 
     @Test
     fun AC13_no_state_by_colour_alone() {
-        CollectionStatus.recordBlocked("Location permission was revoked, so collection stopped.")
+        CollectionStatus.recordBlocked(
+            TroubleKind.PERMISSION_LOST,
+            "Location permission was revoked, so collection stopped.",
+        )
         UiHarness.launch()
         noStateByColourAlone()
     }
 
     @Test
     fun AC13_no_state_by_colour_alone_demonstration() {
-        CollectionStatus.recordBlocked("Location permission was revoked, so collection stopped.")
+        CollectionStatus.recordBlocked(
+            TroubleKind.PERMISSION_LOST,
+            "Location permission was revoked, so collection stopped.",
+        )
         UiHarness.launch(UiMutation.WARNING_BY_COLOUR_ONLY)
         assertFails("a warning carried only by its colour was not caught") { noStateByColourAlone() }
     }
@@ -234,11 +288,31 @@ class UiClaimTest {
                 "see the error colour is told nothing",
             text.contains("Warning", ignoreCase = true),
         )
-        // The running/stopped state is a word, and a refused save says so in words as well.
+        // The running/stopped state is a word.
         val running = textOf("collection-running")
         assertTrue(
             "the running state renders \"$running\", which is not a word a reader can act on",
             running.equals("Running", true) || running.equals("Stopped", true),
+        )
+
+        // AC13 enumerates FOUR states, not two: "permission step, running or stopped, a warning, a
+        // refused save". The permission step names itself in words above its button, so a reader
+        // who cannot see which control is emphasised is still told which step they are on.
+        val step = textOf("permission-body")
+        assertTrue(
+            "the permission step renders \"$step\", which names no step in words - only the card's " +
+                "colour would say which step a reader is on",
+            step.isNotBlank(),
+        )
+
+        // And the fourth: a refused save leads with the refusal as a WORD rather than carrying it
+        // in the error colour alone. setUp cleared the stored configuration, so Save refuses.
+        compose.onNodeWithTag("action-save").performClick()
+        compose.waitForIdle()
+        val verdict = textOf("config-verdict")
+        assertTrue(
+            "a refused save renders \"$verdict\", which carries the refusal in its colour alone",
+            verdict.contains("Not saved", ignoreCase = true),
         )
     }
 
@@ -266,17 +340,13 @@ class UiClaimTest {
         compose.onNodeWithTag("field-token").performTextReplacement("a-device-token")
         compose.waitForIdle()
 
-        val before = UiHarness.takeScreenshot()
         val reached = focusByDirection("action-save")
         assertTrue("the save control was not reachable by directional navigation", reached)
 
-        // A focus indicator is a RENDERED thing: the same control, focused, must paint differently.
-        val after = UiHarness.takeScreenshot()
-        assertTrue(
-            "focusing the save control changed not one rendered pixel, so no focus indicator is painted",
-            pixelsDiffer(before, after),
-        )
+        // How the focused control paints, captured while it holds focus.
+        val focused = captureOf("action-save")
 
+        // Activated from the keyboard, to the same effect a touch has, while it still holds focus.
         sendKey(KeyEvent.KEYCODE_DPAD_CENTER)
         compose.waitForIdle()
         Thread.sleep(500)
@@ -285,6 +355,21 @@ class UiClaimTest {
         assertTrue(
             "saving from the keyboard produced \"$verdict\"; it must have the same effect a touch has",
             verdict.contains("Saved", ignoreCase = true) || verdict.contains("Not saved", ignoreCase = true),
+        )
+
+        // A focus indicator is a RENDERED thing, and it is measured ON THE CONTROL.
+        //
+        // Diffing two FULL-SCREEN shots taken either side of the traversal graded the wrong thing:
+        // the traversal moves focus through several controls and scrolls the column, so the display
+        // differs whatever this control paints and the assertion passed on the scrolling alone.
+        // captureToImage clips to the node, and each shot is of the node WHEREVER IT THEN IS, so
+        // neither scrolling nor the verdict line appearing can contribute a differing pixel.
+        moveFocusAwayFrom("action-save")
+        val unfocused = captureOf("action-save")
+        assertTrue(
+            "focusing the save control changed not one pixel OF THAT CONTROL, so it paints no focus " +
+                "indicator - whatever else on the screen moved",
+            pixelsDiffer(focused, unfocused),
         )
     }
 
@@ -558,12 +643,35 @@ class UiClaimTest {
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         for (i in 0 until 30) {
             compose.waitForIdle()
-            val focused = compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()
-                .any { it.config.getOrNull(SemanticsProperties.Focused) == true }
-            if (focused) return true
+            if (isFocused(tag)) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         }
         return false
+    }
+
+    private fun isFocused(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()
+            .any { it.config.getOrNull(SemanticsProperties.Focused) == true }
+
+    /** The pixels of one control, wherever it currently sits, rather than of the whole display. */
+    private fun captureOf(tag: String): android.graphics.Bitmap =
+        compose.onNodeWithTag(tag).captureToImage().asAndroidBitmap()
+
+    /**
+     * Moves focus off [tag] without leaving the screen, and proves it moved.
+     *
+     * DOWN is tried first because the next control below is a button, while the one above is a text
+     * field whose focus raises the soft keyboard and resizes the window. UP is the fallback for a
+     * control that is the last focusable in its column. A traversal that failed to move focus would
+     * otherwise give two identical captures and report a missing focus indicator that is there.
+     */
+    private fun moveFocusAwayFrom(tag: String) {
+        for (code in listOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP)) {
+            sendKey(code)
+            compose.waitForIdle()
+            if (!isFocused(tag)) return
+        }
+        throw AssertionError("focus could not be moved off $tag, so its unfocused paint cannot be read")
     }
 
     private fun sendKey(code: Int) {
@@ -610,6 +718,18 @@ class UiClaimTest {
          * this screen ships passes.
          */
         const val MAX_LABEL_WORDS = 8
+
+        /**
+         * A sentence of the length the domain layer really produces, for driving the states that
+         * carry one.
+         *
+         * It is committed here at full length on purpose: the point of the sweep is that a sentence
+         * this long reaching the screen has to FAIL, so a short fixture would prove nothing.
+         */
+        const val A_SENTENCE_THE_DOMAIN_PRODUCES =
+            "Collection could not start: Android refused the location foreground service " +
+                "(ForegroundServiceStartNotAllowedException). Check that location permission is " +
+                "granted, then start it again from this screen."
     }
 }
 

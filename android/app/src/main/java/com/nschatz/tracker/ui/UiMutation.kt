@@ -54,6 +54,16 @@ enum class UiMutation {
 
     /** Lay the screen out wider than the display, so its content is pushed off and clipped. */
     OVERFLOWING_LAYOUT,
+
+    /**
+     * Draw the domain's whole SENTENCE where the surface should draw the few words that name it -
+     * the refused-save verdict and the collection warning both.
+     *
+     * This reproduces impl-gate finding F8 behind a debug-only switch, so the brevity assertion can
+     * be shown going red against a state that is not on the screen at launch. A brevity floor that
+     * only ever measures the screen as it looks when it opens is exactly the hole F8 named.
+     */
+    PROSE_IN_A_DEGRADED_STATE,
     ;
 
     companion object {

@@ -64,6 +64,7 @@ import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.ConfigStatus
 import com.nschatz.tracker.collect.LocationCollectionService
+import com.nschatz.tracker.collect.TroubleKind
 import com.nschatz.tracker.permission.CollectionCapability
 import com.nschatz.tracker.permission.LocationGrants
 import com.nschatz.tracker.permission.LocationPermissionFlow
@@ -429,7 +430,13 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                         prefs.deviceToken = credential
                         // Report the validated verdict, not a blanket "Saved": a URL the client will
                         // refuse to use must say so here, not fail silently at the first fix. And the
-                        // refusal is a WORD, not a colour — "Not saved" leads the sentence.
+                        // refusal is a WORD, not a colour — "Not saved" leads the verdict.
+                        //
+                        // What the card draws is the SUMMARY, a few words. The sentence is behind
+                        // "About server settings", which is what F8 asks for and what
+                        // explain_config_verdict has always promised. The mutation branch draws the
+                        // sentence instead, so the brevity assertion can be shown going red against
+                        // a state that is not on the screen when it opens.
                         when (val status = prefs.readConfig()) {
                             is ConfigStatus.Configured -> {
                                 // A usable configuration is the one thing that unblocks a queue parked
@@ -442,7 +449,12 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
 
                             is ConfigStatus.Incomplete -> {
                                 refused = true
-                                message = context.getString(R.string.config_not_saved) + ": " + status.reason
+                                val verdict = if (mutation == UiMutation.PROSE_IN_A_DEGRADED_STATE) {
+                                    status.reason
+                                } else {
+                                    status.summary
+                                }
+                                message = context.getString(R.string.config_not_saved) + ": " + verdict
                             }
                         }
                     },
@@ -554,7 +566,17 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 }
             }
 
-            CollectionStatus.lastError?.let { WarningLiteral(it, mutation, "collection-error") }
+            // The trouble is named in a few WORDS drawn from a closed set; the sentence behind it -
+            // which may be a socket failure or a platform exception, and so has no bound this
+            // package can impose - is read behind "About these counters". The mutation branch draws
+            // the sentence, which is the F8 defect reproduced so the floor can be shown catching it.
+            CollectionStatus.lastTrouble?.let { kind ->
+                if (mutation == UiMutation.PROSE_IN_A_DEGRADED_STATE) {
+                    WarningLiteral(CollectionStatus.lastError.orEmpty(), mutation, "collection-error")
+                } else {
+                    WarningText(troubleLabel(kind), mutation, "collection-error")
+                }
+            }
             if (mutation == UiMutation.PARAGRAPHS_ON_SURFACE) {
                 Text(stringResource(R.string.explain_collection_limitation), style = MaterialTheme.typography.bodySmall)
             }
@@ -563,6 +585,21 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
             }
         }
     }
+}
+
+/**
+ * The few words the collection card draws for a trouble.
+ *
+ * Exhaustive over [TroubleKind] and returning a string resource, which is the structural half of
+ * F8: the surface CANNOT draw a domain sentence here without changing this signature, and a kind
+ * added without a label fails to compile rather than arriving on the screen as a paragraph.
+ */
+private fun troubleLabel(kind: TroubleKind): Int = when (kind) {
+    TroubleKind.NOT_CONFIGURED -> R.string.trouble_not_configured
+    TroubleKind.PERMISSION_LOST -> R.string.trouble_permission_lost
+    TroubleKind.SERVICE_REFUSED -> R.string.trouble_service_refused
+    TroubleKind.DELIVERY_FAILED -> R.string.trouble_delivery_failed
+    TroubleKind.CREDENTIAL_REJECTED -> R.string.trouble_credential_rejected
 }
 
 private fun cardStateLabel(state: CollectionCardState, mutation: UiMutation): Int {
@@ -697,6 +734,19 @@ private fun RingedButton(
 
 @Composable
 private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val prefs = remember { ClientPreferences(context) }
+
+    // The sentence the home screen deliberately does not draw, read at the moment this destination
+    // opens. The server verdict is re-derived from what is stored rather than carried down from the
+    // card, because Save writes before it validates: the same input produces the same verdict, and
+    // there is no second copy of it to drift.
+    val detail: String? = when (topic) {
+        ExplanationTopic.SERVER -> (prefs.readConfig() as? ConfigStatus.Incomplete)?.reason
+        ExplanationTopic.COUNTERS -> CollectionStatus.lastError
+        ExplanationTopic.PERMISSIONS -> null
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -716,6 +766,13 @@ private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modif
             style = MaterialTheme.typography.headlineSmall,
             modifier = Modifier.testTag("explanation-title"),
         )
+        detail?.let {
+            Text(
+                text = stringResource(R.string.explanation_detail_heading) + ": " + it,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag("explanation-detail"),
+            )
+        }
         for (res in explanationParagraphs(topic)) {
             Text(stringResource(res), style = MaterialTheme.typography.bodyMedium)
         }
@@ -750,6 +807,7 @@ private fun explanationParagraphs(topic: ExplanationTopic): List<Int> = when (to
     )
 
     ExplanationTopic.COUNTERS -> listOf(
+        R.string.explain_collection_trouble,
         R.string.explain_collection_limitation,
         R.string.explain_counter_delivered,
         R.string.explain_counter_queued,

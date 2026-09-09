@@ -79,12 +79,21 @@
   </p>
   <p id="config_verdict_note">
     Save reports the verdict of validating what you typed, never a blanket "Saved". A URL the app
-    will refuse to use says so here rather than failing silently at the first fix. A release build
-    also refuses plain <code>http://</code>, so a shipped app cannot send a bearer credential in the
-    clear.
+    will refuse to use says so on the card in a few words - "Not saved: No device token set" - and
+    the full sentence naming what to fix is shown at the top of the in-app explanation this page
+    mirrors. A release build also refuses plain <code>http://</code>, so a shipped app cannot send a
+    bearer credential in the clear.
   </p>
 
   <h2 id="counters">The counters, and the set each is counted over</h2>
+  <p id="collection_trouble">
+    When something stops collection or delivery, the card names the KIND of trouble in a few words -
+    server settings incomplete, location permission lost, Android refused collection, reporting
+    failed, device token rejected - and the sentence describing exactly what happened is shown at the
+    top of the in-app explanation. The sentence is kept off the card because it is not ours to keep
+    short: a network failure or an Android exception supplies its own wording, and a paragraph on a
+    phone card is a paragraph nobody reads.
+  </p>
   <p id="collection_limitation">
     Fixes are saved on this phone until the server confirms them, so going offline delays reporting
     instead of losing it. "dropped" means a fix the server permanently refused, one older than 90

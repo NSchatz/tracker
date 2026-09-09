@@ -1,4 +1,4 @@
-// Regression artefact for S0056 impl-gate finding F8 (refuter, impl ordinal 2).
+// Regression artefact for S0056 impl-gate finding F8.
 //
 // AC12 of work/specs/S0056-tracker-frontend-conventions/spec.md:
 //
@@ -8,32 +8,41 @@
 //	 enough to read at a glance, with the explanatory paragraphs that stand there today reachable
 //	 instead through exactly one affordance per card [...]"
 //
-// The static strings were shortened and their paragraphs moved to the explanation destination. Two
-// DYNAMIC texts were not: the server card's validated verdict (`config-verdict`) and the collection
-// card's warning (`collection-error`) render whatever sentence the domain layer produced, verbatim,
-// on the home tree. Those sentences are 7 to 24 words before the composable's own prefix is added,
-// which is up to three times the floor the instrumented suite itself enforces
-// (UiClaimTest.MAX_LABEL_WORDS).
+// # The finding, and why this file was re-derived rather than deleted
 //
-// The Android brevity assertion cannot see it: AC12_labels_stay_short launches the screen and
-// measures it, and neither of those two states is on the screen at launch. The browser half of this
-// same diff closed the equivalent hole in the other direction, widening chromeTexts() from
-// "[data-region] subtrees" to the whole body precisely because "a floor that only looked inside
-// [data-region] could be dodged by moving a paragraph one element out" (audit.go). The Android floor
-// is still dodged by a state the suite never renders.
+// The refuter's artefact (impl ordinal 2) pinned nine sentences the domain layer produced and the
+// home tree rendered verbatim - the server card's validated verdict and the collection card's
+// warning - and measured them against the floor the instrumented suite declares. It also pinned the
+// two render CALL SITES that put them there, and instructed a later reader, in its own words, that
+// if one of them moved "the fixture must be re-derived rather than trusted".
 //
-// WHAT THIS TEST IS AND IS NOT. It measures the length of committed string literals and the presence
-// of the call sites that put them on the home tree. Both are facts about the source, not about a
-// rendering, so no browser or emulator is needed to decide them and F2's "grade a rendered claim
-// with the runtime that draws it" is not in tension: the rendered claim here would be graded by an
-// instrumented case that presses Save with no token, which this container has no emulator to run.
-// The test fixes the literals verbatim and fails loudly if one has been edited, so it can never pass
-// by drifting away from what it measures.
+// It moved. Both texts now come from bounded sources: the verdict from ConfigStatus.Incomplete's
+// short `summary` and the warning from an exhaustive `when` over TroubleKind returning a string
+// resource. So this file is re-derived onto the fixed render path, and it is aimed at the property
+// rather than at nine sentences, which is what makes it survive the next paragraph somebody adds.
 //
-// It is a REFUTER artefact: it documents the defect. Fixing it is upstream's job, and the fix is not
-// "delete this file". Either the surface stops rendering unbounded prose (a short verdict word, with
-// the sentence behind the card's existing "About server settings" affordance), or the brevity
-// assertion is extended to render those states so the floor actually binds on them.
+// It is STRICTLY STRONGER than the artefact it replaces. That one enumerated nine literals and went
+// green the moment any of them was edited; this one asserts:
+//
+//  1. the home tree draws the verdict from `summary` and the warning from `troubleLabel`, and
+//     reaches the SENTENCE for either only inside the debug-only mutation branch that exists to
+//     show the brevity assertion going red;
+//  2. every bounded source it can draw - each Incomplete summary, each trouble label - is under the
+//     suite's own floor once the composable's prefix is added;
+//  3. every TroubleKind constant HAS a label, so the closed set cannot grow a member that falls
+//     through to prose;
+//  4. the sentences are still committed and still reachable on the explanation destination, so they
+//     were moved rather than dropped, which is what AC12 asks for;
+//  5. AC12_labels_stay_short now DRIVES the refused-save and blocked-collection states before it
+//     measures - the half impl verdict 2 called "the one that keeps it closed", and the exact
+//     inverse of what the artefact asserted while the defect stood.
+//
+// WHAT THIS TEST IS AND IS NOT. It measures committed source: string lengths, the shape of a render
+// path, the membership of an enum. Those are facts about the source, not about a rendering, so no
+// browser or emulator is needed to decide them and F2's "grade a rendered claim with the runtime
+// that draws it" is not in tension. The RENDERED claim is AC12_labels_stay_short on a booted
+// emulator, and assertion 5 above is this file making sure that claim actually looks at the states
+// in question. This file is the guard rail; the emulator is the grader.
 package uiverify
 
 import (
@@ -53,93 +62,42 @@ func androidSrc(parts ...string) string {
 var (
 	serverConfigKt = androidSrc("main", "java", "com", "nschatz", "tracker", "collect", "ServerConfig.kt")
 	collectionSvc  = androidSrc("main", "java", "com", "nschatz", "tracker", "collect", "LocationCollectionService.kt")
+	statusKt       = androidSrc("main", "java", "com", "nschatz", "tracker", "collect", "CollectionStatus.kt")
 	mainActivityKt = androidSrc("main", "java", "com", "nschatz", "tracker", "ui", "MainActivity.kt")
 	stringsXML     = androidSrc("main", "res", "values", "strings.xml")
 	uiClaimTestKt  = androidSrc("androidTest", "java", "com", "nschatz", "tracker", "ui", "UiClaimTest.kt")
 )
 
-// onScreenText is one sentence the home tree renders verbatim, with the prefix the composable puts
-// in front of it and the source fragments the sentence is assembled from.
-type onScreenText struct {
-	Tag       string            // the Compose testTag it is drawn into
-	Prefix    string            // what MainActivity concatenates ahead of it
-	File      string            // where the sentence is committed
-	Fragments []string          // the literal, in the pieces the source spells it in
-	Fills     map[string]string // Kotlin interpolations, with one real value each
-}
-
-// rendered is the sentence a person reads: the composable's prefix, the literal, and each Kotlin
-// interpolation replaced by a value the running app actually produces there.
-func (o onScreenText) rendered() string {
-	text := o.Prefix + strings.Join(o.Fragments, "")
-	for placeholder, value := range o.Fills {
-		text = strings.ReplaceAll(text, placeholder, value)
-	}
-	return text
-}
-
-// theSentencesTheHomeTreeRenders are the unbounded texts this screen puts on the home tree.
+// theSentencesTheDomainStillProduces are the unbounded texts the domain layer produces.
 //
-// `Prefix` is what the composable adds: ServerConfigCard writes `config_not_saved` + ": " + reason
-// into `config-verdict`, and WarningLiteral writes `warning_prefix` + ": " + text into
-// `collection-error`. Both prefixes are read out of strings.xml below rather than assumed.
-var theSentencesTheHomeTreeRenders = []onScreenText{
-	{
-		Tag:       "collection-error",
-		File:      collectionSvc,
-		Fragments: []string{"Location permission was revoked, so collection stopped."},
-	},
-	{
-		Tag:  "collection-error",
-		File: collectionSvc,
-		Fragments: []string{
-			"Collection could not start: Android refused the location foreground service ",
-			"(" + interpolatedExceptionName + "). Check that location permission is granted, then ",
-			"start it again from this screen.",
-		},
-		// The one interpolation, filled with a class Android really throws there.
-		Fills: map[string]string{interpolatedExceptionName: "ForegroundServiceStartNotAllowedException"},
-	},
-	{
-		Tag:       "collection-error",
-		File:      serverConfigKt,
-		Fragments: []string{"No server URL is set. Enter the tracker server address."},
-	},
-	{
-		Tag:       "collection-error",
-		File:      serverConfigKt,
-		Fragments: []string{"The server URL must start with https:// (or http:// for local testing)."},
-	},
-	{
-		Tag:       "collection-error",
-		File:      serverConfigKt,
-		Fragments: []string{"Refusing to send the device token over plaintext http://. Use https://."},
-	},
-	{
-		Tag:       "collection-error",
-		File:      serverConfigKt,
-		Fragments: []string{"The server URL is missing a host name."},
-	},
-	{
-		Tag:       "collection-error",
-		File:      serverConfigKt,
-		Fragments: []string{"No device token is set. Run `tracker enroll` on the server and paste the token here."},
-	},
-	{
-		Tag:       "config-verdict",
-		File:      serverConfigKt,
-		Fragments: []string{"No device token is set. Run `tracker enroll` on the server and paste the token here."},
-	},
-	{
-		Tag:       "config-verdict",
-		File:      serverConfigKt,
-		Fragments: []string{"The server URL must start with https:// (or http:// for local testing)."},
-	},
+// They are the refuter's fixture, kept verbatim and re-purposed: each one must STILL be committed
+// where it was, because AC12 moves the explanations rather than deleting them, and none of them may
+// be what the surface draws.
+var theSentencesTheDomainStillProduces = []struct {
+	File      string
+	Fragments []string
+}{
+	{collectionSvc, []string{"Location permission was revoked, so collection stopped."}},
+	{collectionSvc, []string{
+		"Collection could not start: Android refused the location foreground service ",
+		"(" + interpolatedExceptionName + "). Check that location permission is granted, then ",
+		"start it again from this screen.",
+	}},
+	{serverConfigKt, []string{"No server URL is set. Enter the tracker server address."}},
+	{serverConfigKt, []string{"The server URL must start with https:// (or http:// for local testing)."}},
+	{serverConfigKt, []string{"Refusing to send the device token over plaintext http://. Use https://."}},
+	{serverConfigKt, []string{"The server URL is missing a host name."}},
+	{serverConfigKt, []string{"No device token is set. Run `tracker enroll` on the server and paste the token here."}},
 }
 
 // interpolatedExceptionName is spelled out of its pieces so this file carries no Kotlin template
 // that a Go tool would mistake for one of its own.
 const interpolatedExceptionName = "$" + "{e.javaClass.simpleName}"
+
+// theMutationThatPutsProseBack is the debug-only switch that reproduces F8 on purpose, so the
+// brevity assertion can be shown going red against a state that is not on the screen at launch. It
+// is the ONLY place either sentence may reach the home tree.
+const theMutationThatPutsProseBack = "UiMutation.PROSE_IN_A_DEGRADED_STATE"
 
 func TestRegressS0056F8TheAndroidHomeTreeRendersParagraphs(t *testing.T) {
 	read := func(p string) string {
@@ -163,81 +121,177 @@ func TestRegressS0056F8TheAndroidHomeTreeRendersParagraphs(t *testing.T) {
 
 	// 2. The prefixes the two composables add, read out of the resources.
 	res := read(stringsXML)
-	prefixOf := func(name string) string {
+	stringNamed := func(name string) string {
 		p := regexp.MustCompile(`<string name="` + name + `">([^<]*)</string>`).FindStringSubmatch(res)
 		if p == nil {
-			t.Fatalf("%s no longer declares %q, so the rendered prefix cannot be established", stringsXML, name)
+			t.Fatalf("%s no longer declares %q, so the rendered text cannot be established", stringsXML, name)
 		}
-		return p[1] + ": "
+		return p[1]
 	}
-	notSaved := prefixOf("config_not_saved")
-	warning := prefixOf("warning_prefix")
+	notSaved := stringNamed("config_not_saved") + ": "
+	warning := stringNamed("warning_prefix") + ": "
 
-	// 3. The call sites that put these sentences on the HOME tree. If any of them has moved, this
-	//    test is measuring something the screen no longer does and must say so rather than fail.
 	activity := read(mainActivityKt)
+
+	// 3. The home tree draws BOUNDED sources.
+	//
+	//    These are the call sites the fix put in place of the two that rendered a sentence. If one
+	//    of them moves, this test is measuring something the screen no longer does and says so
+	//    rather than passing.
 	for _, site := range []string{
 		`.testTag("home")`,
 		`ServerConfigCard(mutation = mutation`,
 		`CollectionCard(`,
-		`context.getString(R.string.config_not_saved) + ": " + status.reason`,
 		`.testTag("config-verdict")`,
-		`CollectionStatus.lastError?.let { WarningLiteral(it, mutation, "collection-error") }`,
+		// The verdict is the SHORT summary, and "Not saved" still leads it.
+		`context.getString(R.string.config_not_saved) + ": " + verdict`,
+		`status.summary`,
+		// The warning is a string resource chosen by an exhaustive `when` over the closed set.
+		`WarningText(troubleLabel(kind), mutation, "collection-error")`,
+		`private fun troubleLabel(kind: TroubleKind): Int = when (kind)`,
 		`stringResource(R.string.warning_prefix) + ": "`,
 	} {
 		if !strings.Contains(activity, site) {
-			t.Fatalf("%s no longer contains %q; the render path this test measures has moved, so the "+
-				"fixture must be re-derived rather than trusted", mainActivityKt, site)
+			t.Fatalf("%s no longer contains %q; the bounded render path this test measures has moved, "+
+				"so the fixture must be re-derived rather than trusted", mainActivityKt, site)
 		}
 	}
 
-	// 4. AC12's own assertion never renders either state, which is why the floor does not bind on
-	//    them. The claim case launches the screen and measures it; it presses nothing and records no
-	//    error.
-	body := sliceBetween(t, claims, "fun AC12_labels_stay_short()", "@Test")
-	for _, absent := range []string{"action-save", "recordBlocked", "config-verdict", "collection-error"} {
-		if strings.Contains(body, absent) {
-			t.Fatalf("AC12_labels_stay_short now mentions %q, so it may render the states this test says "+
-				"it cannot see; re-derive the finding", absent)
+	// 4. ... and reaches a SENTENCE only inside the mutation branch that exists to break the claim.
+	//    This is the assertion that keeps prose off the surface no matter what is added later: a
+	//    future edit that renders `status.reason` or `CollectionStatus.lastError` on the home tree
+	//    fails HERE, without needing anyone to have listed the new sentence.
+	onlyUnderTheMutationGuard(t, activity, `status.reason`)
+	onlyUnderTheMutationGuard(t, activity, `CollectionStatus.lastError.orEmpty()`)
+
+	// 5. Every bounded source the surface can draw is under the floor, prefix included.
+	summaries := regexp.MustCompile(`summary = "([^"]*)"`).FindAllStringSubmatch(read(serverConfigKt), -1)
+	if len(summaries) < 5 {
+		t.Fatalf("%s declares %d refusal summaries; ConfigValidation has five refusal branches, so a "+
+			"smaller number means this test is measuring only some of what the card can draw",
+			serverConfigKt, len(summaries))
+	}
+	troubles := regexp.MustCompile(`<string name="(trouble_[a-z_]+)">([^<]*)</string>`).FindAllStringSubmatch(res, -1)
+	if len(troubles) == 0 {
+		t.Fatalf("%s declares no trouble_* label, so the collection card has nothing bounded to draw", stringsXML)
+	}
+
+	var offenders []string
+	measure := func(prefix, text, where string) {
+		if n := len(strings.Fields(prefix + text)); n > floor {
+			offenders = append(offenders, fmt.Sprintf("%q renders %d words (floor %d)  [%s]", prefix+text, n, floor, where))
+		}
+	}
+	for _, s := range summaries {
+		measure(notSaved, s[1], serverConfigKt)
+	}
+	for _, s := range troubles {
+		measure(warning, s[2], stringsXML)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("AC12 (spec.md): %d texts the Android home tree draws are paragraphs, not labels:\n  %s",
+			len(offenders), strings.Join(offenders, "\n  "))
+	}
+
+	// 6. The closed set is closed. Every TroubleKind has a label, so no member of it can fall
+	//    through to whatever sentence happened to be recorded with it.
+	kinds := regexp.MustCompile(`(?m)^\s{4}([A-Z][A-Z_]+),`).FindAllStringSubmatch(
+		sliceBetween(t, read(statusKt), "enum class TroubleKind {", "\n}"), -1)
+	if len(kinds) == 0 {
+		t.Fatalf("%s declares no TroubleKind constants, so the surface's closed vocabulary is empty", statusKt)
+	}
+	declared := map[string]bool{}
+	for _, s := range troubles {
+		declared[s[1]] = true
+	}
+	for _, k := range kinds {
+		label := "trouble_" + strings.ToLower(k[1])
+		if !declared[label] {
+			t.Fatalf("TroubleKind.%s has no %q in %s, so the collection card has no few-word label for it",
+				k[1], label, stringsXML)
+		}
+		if !strings.Contains(activity, "TroubleKind."+k[1]+" -> R.string."+label) {
+			t.Fatalf("troubleLabel in %s does not map TroubleKind.%s to R.string.%s", mainActivityKt, k[1], label)
 		}
 	}
 
-	// 5. Every sentence is committed where this test says it is. A literal that has been edited
-	//    fails HERE, loudly, instead of quietly dropping out of the measurement.
-	for _, s := range theSentencesTheHomeTreeRenders {
+	// 7. The sentences MOVED; they were not dropped. Each is still committed where it was, and the
+	//    explanation destination renders whichever one is live.
+	for _, s := range theSentencesTheDomainStillProduces {
 		src := read(s.File)
 		for _, frag := range s.Fragments {
 			if !strings.Contains(src, frag) {
-				t.Fatalf("%s no longer contains the literal %q; re-derive this fixture", s.File, frag)
+				t.Fatalf("%s no longer contains the literal %q; AC12 moves an explanation behind the "+
+					"card's affordance, it does not delete it", s.File, frag)
 			}
 		}
 	}
-
-	// 6. The measurement AC12 asks for, applied the way UiClaimTest applies it.
-	var offenders []string
-	for _, s := range theSentencesTheHomeTreeRenders {
-		prefix := warning
-		if s.Tag == "config-verdict" {
-			prefix = notSaved
-		}
-		s.Prefix = prefix
-		text := s.rendered()
-		if n := len(strings.Fields(text)); n > floor {
-			offenders = append(offenders, fmt.Sprintf("%s renders %d words (floor %d): %q  [%s]", s.Tag, n, floor, text, s.File))
+	explanation := sliceBetween(t, activity, "private fun ExplanationScreen(", "private fun explanationParagraphs")
+	for _, needed := range []string{
+		`ConfigStatus.Incomplete)?.reason`,
+		`CollectionStatus.lastError`,
+		`.testTag("explanation-detail")`,
+	} {
+		if !strings.Contains(explanation, needed) {
+			t.Fatalf("ExplanationScreen in %s does not contain %q, so the sentence the home tree stopped "+
+				"drawing is reachable nowhere", mainActivityKt, needed)
 		}
 	}
 
-	if len(offenders) > 0 {
-		t.Fatalf("AC12 (spec.md): %d texts drawn on the Android home tree are paragraphs, not labels.\n"+
-			"Every one is a warning or a status line the screen draws on itself, and the instrumented\n"+
-			"floor of %d words never sees any of them because AC12_labels_stay_short only ever measures\n"+
-			"the screen as it looks at launch:\n  %s",
-			len(offenders), floor, strings.Join(offenders, "\n  "))
+	// 8. And the half that keeps it closed: the RENDERED floor now binds on the states the screen
+	//    can be driven into, not only on the one it opens in. This is the exact inverse of what the
+	//    refuter's artefact asserted while the defect stood.
+	body := sliceBetween(t, claims, "fun AC12_labels_stay_short()", "@Test")
+	if !strings.Contains(body, "everyStateStaysShort()") {
+		t.Fatalf("AC12_labels_stay_short in %s measures only the screen as it looks at launch; the "+
+			"refused-save and blocked-collection states are not on it then, so the floor cannot see them",
+			uiClaimTestKt)
+	}
+	sweep := sliceBetween(t, claims, "private fun everyStateStaysShort()", "private fun labelsStayShort")
+	for _, needed := range []string{
+		`onNodeWithTag("action-save").performClick()`, // it enters the refused-save state
+		`textOf("config-verdict")`,                    // ... and proves it got there
+		`TroubleKind.entries`,                         // it sweeps the whole closed set
+		`CollectionStatus.recordBlocked(kind`,         // ... driving each one onto the screen
+		`textOf("collection-error")`,                  // ... and proves each one drew
+		`labelsStayShort()`,                           // ... measuring at every stop
+	} {
+		if !strings.Contains(sweep, needed) {
+			t.Fatalf("everyStateStaysShort in %s does not contain %q, so it does not actually drive and "+
+				"measure the states F8 named", uiClaimTestKt, needed)
+		}
+	}
+}
+
+// onlyUnderTheMutationGuard fails unless every occurrence of needle sits inside the debug-only
+// branch that reproduces F8 on purpose.
+//
+// The window is generous: what it rules out is a render path that reaches a domain sentence with no
+// mutation named anywhere near it, which is the shape the finding had.
+func onlyUnderTheMutationGuard(t *testing.T, body, needle string) {
+	t.Helper()
+	const window = 300
+	for at := 0; ; {
+		i := strings.Index(body[at:], needle)
+		if i < 0 {
+			return
+		}
+		i += at
+		from := i - window
+		if from < 0 {
+			from = 0
+		}
+		if !strings.Contains(body[from:i], theMutationThatPutsProseBack) {
+			t.Fatalf("%s reaches the domain sentence %q without %s guarding it; that sentence is "+
+				"unbounded (a socket failure or a platform exception writes it) and AC12 keeps it off "+
+				"the surface", mainActivityKt, needle, theMutationThatPutsProseBack)
+		}
+		at = i + len(needle)
 	}
 }
 
 // sliceBetween returns the text from the first occurrence of start up to the next occurrence of end
-// after it, so one Kotlin test body can be inspected on its own.
+// after it, so one Kotlin declaration can be inspected on its own.
 func sliceBetween(t *testing.T, body, start, end string) string {
 	t.Helper()
 	i := strings.Index(body, start)

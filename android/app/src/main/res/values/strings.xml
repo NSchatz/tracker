@@ -55,6 +55,17 @@
     <string name="warning_notifications_blocked">Notifications blocked</string>
     <string name="action_upgrade_precise">Use precise location</string>
 
+    <!-- The collection card's trouble, named in a few words. One per TroubleKind, and the screen's
+         `when` over that enum is exhaustive, so a kind with no label here is a compile error rather
+         than a sentence that reaches the surface. The sentence itself - which may be a socket
+         failure or a platform exception, and so is unbounded by construction - is read on the
+         explanation destination behind "About these counters". -->
+    <string name="trouble_not_configured">Server settings incomplete</string>
+    <string name="trouble_permission_lost">Location permission lost</string>
+    <string name="trouble_service_refused">Android refused collection</string>
+    <string name="trouble_delivery_failed">Reporting failed</string>
+    <string name="trouble_credential_rejected">Device token rejected</string>
+
     <!-- Server configuration -->
     <string name="config_title">Server</string>
     <string name="config_url_label">Server URL</string>
@@ -99,6 +110,8 @@
     <string name="explanation_title_permissions">About permissions</string>
     <string name="explanation_title_server">About server settings</string>
     <string name="explanation_title_counters">About these counters</string>
+    <!-- Heading for the live sentence the home screen deliberately does not draw. -->
+    <string name="explanation_detail_heading">What happened just now</string>
 
     <!-- ==========================================================================================
          THE EXPLANATIONS. Rendered only on the explanation destination, never on the home screen.
@@ -115,12 +128,13 @@
     <string name="explain_warning_notifications_blocked">Notifications are blocked, so the ongoing “sharing your location” notice will not be visible. Collection still runs.</string>
 
     <string name="explain_config_plaintext">The device token is stored unencrypted in this app\'s private data on the phone until secure storage ships (roadmap C3). On a non-rooted phone with a lock screen no other app can read it, but anyone with root, an unlocked bootloader or a full-device backup can. Cloud backup of the app\'s data is already switched off.</string>
-    <string name="explain_config_verdict">Save reports the verdict of validating what you typed, never a blanket “Saved”. A URL the app will refuse to use says so here rather than failing silently at the first fix. A release build also refuses plain http, so a shipped app cannot send a bearer credential in the clear.</string>
+    <string name="explain_config_verdict">Save reports the verdict of validating what you typed, never a blanket “Saved”. A URL the app will refuse to use says so on the card in a few words, and the full sentence naming what to fix is shown at the top of this page. A release build also refuses plain http, so a shipped app cannot send a bearer credential in the clear.</string>
 
     <string name="explain_collection_limitation">Fixes are saved on this phone until the server confirms them, so going offline delays reporting instead of losing it. “dropped” means a fix the server permanently refused, one older than 90 days, or one discarded because the offline queue filled up.</string>
     <string name="explain_counter_delivered">Delivered counts fixes the server accepted during THIS run of the app, from the moment collection started. It is not a lifetime total and it is not restored from disk: after a restart the honest answer is “not recorded”, not a stale number. It counts an idempotent replay the server already had as delivered, so it can over-count a fix that was sent twice.</string>
     <string name="explain_counter_queued">Queued counts fixes currently sitting in the on-disk queue, read from the queue itself rather than counted in memory — which is why it survives a restart when the other two do not. A non-zero value is normal, not an error: it is what the queue looks like while the phone is offline, and it is the number that says nothing has been lost.</string>
     <string name="explain_counter_dropped">Dropped counts fixes measured during this run that will never reach the server. It is shown as prominently as Delivered on purpose: an app that only ever displays its successes is how silent fix loss stays silent.</string>
     <string name="explain_counter_not_recorded">A counter that has never been measured reads “not recorded”, never 0 and never a dash. A measured zero still reads 0, because “we checked and it is none” and “we never checked” are different facts and a reader deciding whether their family\'s trail has a hole in it needs to be able to tell them apart. If the queue directory cannot be read at all, the queued figure alone reads “unavailable” and everything else on the screen keeps working.</string>
+    <string name="explain_collection_trouble">When something stops collection or delivery, the card names the KIND of trouble in a few words - server settings incomplete, location permission lost, Android refused collection, reporting failed, device token rejected - and the sentence describing exactly what happened is shown at the top of this page. The sentence is kept off the card because it is not ours to keep short: a network failure or an Android exception supplies its own wording, and a paragraph on a phone card is a paragraph nobody reads.</string>
     <string name="explain_collection_freshness">While collection is running and a fix has arrived within the reporting interval, the counters are labelled as current. When collection is stopped, has been killed by the system, or has produced no fix for longer than that interval, the same counters are labelled “last known” with the time they were last updated. A frozen readout is never presented as a live one, and when collection resumes the counters go back to reading as current.</string>
 </resources>
