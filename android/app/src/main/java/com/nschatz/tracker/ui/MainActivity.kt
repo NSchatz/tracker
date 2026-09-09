@@ -828,7 +828,8 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 },
                 modifier = Modifier.testTag("collection-running"),
             )
-            val collectionLabel = stringResource(if (running) R.string.collection_stop else R.string.collection_start)
+            val collectionLabel =
+                stringResource(if (running) R.string.collection_stop else R.string.collection_start)
             val onCollectionClick: () -> Unit = {
                 if (running) LocationCollectionService.stop(context)
                 else LocationCollectionService.start(context)
