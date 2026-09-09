@@ -68,6 +68,16 @@ func CheckAndroidRun(w io.Writer, root string) error {
 			AndroidSurface, len(run.Ran), len(run.Demonstrated)))
 	}
 
+	// AC18 binds the ROUTE ("WHEN either grading route runs"), so the fence around a parked case is
+	// applied here too and not only by `make verify-ui-record` afterwards. Without it, @Ignore-ing a
+	// case AND striking its name from the record would leave this route green having quietly graded
+	// one clause fewer.
+	deferred, derr := deferredAssertions(root)
+	if derr != nil {
+		return derr
+	}
+	problems = append(problems, parkedSuiteProblems(root, deferred)...)
+
 	fmt.Fprintf(w, "\n%s: %d/%d clause assertions ran, %d/%d demonstrated able to fail\n",
 		AndroidSurface, len(run.Ran), len(expected), len(run.Demonstrated), len(run.Ran))
 

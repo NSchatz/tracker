@@ -44,6 +44,29 @@ const DemonstrationSuffix = "_demonstration"
 // Clauses are the frontend conventions, F1 through F11.
 var Clauses = []string{"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11"}
 
+// deferralPrefix opens a record cell that answers a clause with the item that owns it rather than
+// with an assertion or an exemption. The cell reads:
+//
+//	deferred to <item-id>: <assertion>, <assertion>, ...
+const deferralPrefix = "deferred to "
+
+// splitPairs are the ONLY clause/surface pairs a deferral may appear on, and the item that carries
+// each. They are the two rows S0056's clause map marks "SPLIT to S0074" after that item was narrowed
+// on 2026-09-09; every other pair must still name an assertion that ran or an exemption saying the
+// clause cannot apply.
+//
+// This is a hard-coded ceiling on purpose. A deferral is the one disposition that answers a clause
+// with neither evidence nor a reason it needs none, so it must not be reachable by editing the
+// record alone: widening this map is a source change with a name on it and a diff a reviewer sees.
+var splitPairs = map[string]string{
+	"F1|" + AndroidSurface:  "S0074-tracker-android-a11y-operability",
+	"F10|" + AndroidSurface: "S0074-tracker-android-a11y-operability",
+}
+
+// parkedSuite is the instrumented suite whose @Ignore'd cases must match the record's deferrals.
+var parkedSuite = filepath.Join(
+	"android", "app", "src", "androidTest", "java", "com", "nschatz", "tracker", "ui", "UiClaimTest.kt")
+
 // RunRecord is what one invocation of a grading route did.
 type RunRecord struct {
 	Surface      string    `json:"surface"`
@@ -81,6 +104,8 @@ type recordRow struct {
 	Surface    string
 	Assertions []string
 	Exemption  string
+	DeferredTo string   // the item that owns this clause, when the row is a deferral
+	Deferred   []string // the assertions that moved with it
 	Line       int
 }
 
@@ -102,24 +127,48 @@ func ParseRecord(path string) ([]recordRow, error) {
 			continue
 		}
 		row := recordRow{Clause: m[1], Surface: strings.ToLower(strings.TrimSpace(m[2])), Line: i + 1}
-		for _, a := range strings.Split(m[3], ",") {
-			a = strings.TrimSpace(strings.Trim(a, "`"))
-			if a != "" && a != "-" {
-				row.Assertions = append(row.Assertions, a)
-			}
-		}
-		ex := strings.TrimSpace(m[4])
-		if ex != "-" && ex != "" {
+		if ex := strings.TrimSpace(m[4]); ex != "-" && ex != "" {
 			row.Exemption = ex
 		}
+		// A deferral answers the clause with the item that owns it. The exemption column above is
+		// still read, so a row carrying both is visible to the caller rather than swallowed here.
+		if rest, isDeferral := strings.CutPrefix(strings.TrimSpace(m[3]), deferralPrefix); isDeferral {
+			item, names, _ := strings.Cut(rest, ":")
+			row.DeferredTo = strings.TrimSpace(item)
+			row.Deferred = splitNames(names)
+			rows = append(rows, row)
+			continue
+		}
+		row.Assertions = splitNames(m[3])
 		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
+// splitNames reads a comma-separated cell of assertion names.
+func splitNames(cell string) []string {
+	var out []string
+	for _, a := range strings.Split(cell, ",") {
+		a = strings.TrimSpace(strings.Trim(strings.TrimSpace(a), "`"))
+		if a != "" && a != "-" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // CheckRecord is AC20. It refuses a record that is incomplete, doubly mapped, or claiming an
 // assertion that did not run in the last recorded invocation of its route — and it refuses the F11
 // Android exemption the moment the app gains a web view.
+//
+// A third disposition sits beside the assertion and the exemption: a DEFERRAL, naming the item that
+// carries a clause this one no longer grades. It exists because S0056 was narrowed rather than
+// looped when its impl gate parked, and F1 and F10 on the android screen went with the two criteria
+// that parked it. It is the weakest of the three - it answers a clause with neither evidence nor a
+// reason none is needed - so [deferralProblems] and [parkedSuiteProblems] fence it on every side:
+// only the pairs in [splitPairs], only the item named there, never beside another disposition, never
+// for an assertion the last run reports passing, and always matching the suite's own @Ignore'd set
+// case for case.
 //
 // It also carries AC18's no-vacuous-pass count into the record, on BOTH surfaces: an assertion the
 // record names must not only have RUN, it must have been shown going red. Without that, a suite that
@@ -143,6 +192,7 @@ func CheckRecord(w io.Writer, root string) error {
 	}
 
 	byPair := map[string]recordRow{}
+	deferred := map[string]bool{}
 	var problems []string
 	for _, row := range rows {
 		key := row.Clause + "|" + row.Surface
@@ -161,13 +211,20 @@ func CheckRecord(w io.Writer, root string) error {
 				problems = append(problems, fmt.Sprintf("%s on the %s is not in the record at all", clause, surface))
 				continue
 			}
+			run := ran[surface]
+			if row.DeferredTo != "" {
+				problems = append(problems, deferralProblems(key, row, run)...)
+				for _, a := range row.Deferred {
+					deferred[a] = true
+				}
+				continue
+			}
 			switch {
 			case len(row.Assertions) == 0 && row.Exemption == "":
-				problems = append(problems, fmt.Sprintf("%s on the %s (line %d) names neither an assertion nor an exemption", clause, surface, row.Line))
+				problems = append(problems, fmt.Sprintf("%s on the %s (line %d) names neither an assertion, an exemption nor a deferral", clause, surface, row.Line))
 			case len(row.Assertions) > 0 && row.Exemption != "":
 				problems = append(problems, fmt.Sprintf("%s on the %s (line %d) carries BOTH an assertion and an exemption", clause, surface, row.Line))
 			}
-			run := ran[surface]
 			for _, a := range row.Assertions {
 				if !run.Ran[a] {
 					problems = append(problems, fmt.Sprintf(
@@ -184,6 +241,10 @@ func CheckRecord(w io.Writer, root string) error {
 		}
 	}
 
+	// A deferral is only as honest as the suite behind it: the cases it names must actually be
+	// parked, and nothing else may be.
+	problems = append(problems, parkedSuiteProblems(root, deferred)...)
+
 	// The one exemption in the whole record lapses the moment its reason stops being true.
 	if row, ok := byPair["F11|android screen"]; ok && row.Exemption != "" {
 		if found, where, err := androidRendersAWebView(root); err != nil {
@@ -198,8 +259,185 @@ func CheckRecord(w io.Writer, root string) error {
 		sort.Strings(problems)
 		return fmt.Errorf("the F1-F11 record does not hold:\n  - %s", strings.Join(problems, "\n  - "))
 	}
-	fmt.Fprintf(w, "\nrecord:  %d clause/surface pairs, each mapped exactly once, every assertion ran\n", len(Clauses)*len(Surfaces))
+	fmt.Fprintf(w, "\nrecord:  %d clause/surface pairs, each mapped exactly once, every assertion ran; %d deferred to another item\n",
+		len(Clauses)*len(Surfaces), len(splitPairs))
 	return nil
+}
+
+// deferredAssertions is the set of assertions the record hands to another item, read back for the
+// route checks that have to know which cases are legitimately not running.
+func deferredAssertions(root string) (map[string]bool, error) {
+	rows, err := ParseRecord(joinRecordPath(root))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", RecordFile, err)
+	}
+	out := map[string]bool{}
+	for _, row := range rows {
+		if row.DeferredTo == "" {
+			continue
+		}
+		if _, allowed := splitPairs[row.Clause+"|"+row.Surface]; !allowed {
+			continue // an illegal deferral defers nothing; CheckRecord names it
+		}
+		for _, a := range row.Deferred {
+			out[a] = true
+		}
+	}
+	return out, nil
+}
+
+// deferralProblems is the fence around the one disposition that answers a clause with neither
+// evidence nor a reason it needs none.
+//
+// A record cell alone must not be able to make a clause stop being graded, so a deferral is legal
+// only on a pair [splitPairs] names, only to the item it names there, only alongside no other
+// disposition, and only for assertions the last run did NOT report passing - a clause cannot be both
+// deferred and answered.
+func deferralProblems(key string, row recordRow, run surfaceRun) []string {
+	var problems []string
+	where := fmt.Sprintf("%s on the %s (line %d)", row.Clause, row.Surface, row.Line)
+
+	owner, allowed := splitPairs[key]
+	switch {
+	case !allowed:
+		problems = append(problems, fmt.Sprintf(
+			"%s is recorded as deferred to %q, but a deferral is only legal on the clause/surface pairs the narrowed spec marks SPLIT (%s); every other pair must name an assertion that ran or an exemption saying the clause cannot apply",
+			where, row.DeferredTo, strings.Join(sortedKeys(splitPairs), ", ")))
+	case row.DeferredTo != owner:
+		problems = append(problems, fmt.Sprintf(
+			"%s is deferred to %q, but this pair is carried by %q; a deferral naming the wrong item points a reader at work nobody is doing",
+			where, row.DeferredTo, owner))
+	}
+	if row.Exemption != "" {
+		problems = append(problems, fmt.Sprintf(
+			"%s carries BOTH a deferral and an exemption; a clause is answered once", where))
+	}
+	if len(row.Assertions) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"%s carries BOTH a deferral and an assertion; a clause is answered once", where))
+	}
+	if len(row.Deferred) == 0 {
+		problems = append(problems, fmt.Sprintf(
+			"%s is deferred but names no assertion that moved with it, so nothing pins what the other item owes", where))
+	}
+	for _, a := range row.Deferred {
+		if run.Ran[a] {
+			problems = append(problems, fmt.Sprintf(
+				"%s defers the assertion %q, and the last recorded invocation of that route reports it PASSING; a clause that is graded is not deferred",
+				where, a))
+		}
+	}
+	return problems
+}
+
+// ignoreDirective finds an @Ignore and the reason it carries; funDeclaration finds the case it sits
+// on. Between them they read the parked set out of the instrumented suite.
+var (
+	ignoreDirective = regexp.MustCompile(`@Ignore\s*\(`)
+	funDeclaration  = regexp.MustCompile(`^\s*fun\s+([A-Za-z0-9_]+)\s*\(`)
+)
+
+// parkedSuiteProblems compares the record's deferrals against the instrumented suite's @Ignore'd
+// cases, in both directions.
+//
+// This reads Kotlin SOURCE and that is deliberate: it grades no rendered property (F2's rule), it
+// answers "which cases did this suite decline to run", which is a fact about the suite and has no
+// runtime equivalent - a case that never ran leaves nothing behind on the emulator to inspect. It is
+// the same distinction the Android demonstration audit rests on.
+//
+// The two directions matter equally. A case @Ignore'd with no deferral behind it is the vacuous pass
+// AC18 forbids, dressed as housekeeping. A deferral with no ignored case behind it is a clause
+// written off while its assertion is still running - or, worse, still red.
+func parkedSuiteProblems(root string, deferred map[string]bool) []string {
+	path := filepath.Join(root, parkedSuite)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return []string{fmt.Sprintf(
+			"could not read the instrumented suite at %s to check the record's deferrals against what it actually parks: %v", parkedSuite, err)}
+	}
+
+	ignored := map[string]string{} // case name -> the reason it carries
+	lines := strings.Split(string(body), "\n")
+	for i, line := range lines {
+		if !ignoreDirective.MatchString(line) {
+			continue
+		}
+		// The reason may be wrapped across lines, and the case it applies to is the next `fun`.
+		var reason strings.Builder
+		name := ""
+		for j := i; j < len(lines) && j < i+24; j++ {
+			if m := funDeclaration.FindStringSubmatch(lines[j]); m != nil && j > i {
+				name = m[1]
+				break
+			}
+			reason.WriteString(lines[j])
+			reason.WriteString(" ")
+		}
+		if name == "" {
+			return []string{fmt.Sprintf("%s:%d carries an @Ignore that sits on no test case", parkedSuite, i+1)}
+		}
+		ignored[name] = reason.String()
+	}
+
+	var problems []string
+	ignoredClaims := map[string]bool{}
+	for name, reason := range ignored {
+		claim := strings.TrimSuffix(name, DemonstrationSuffix)
+		ignoredClaims[claim] = true
+
+		// Every parked case names the item that owns it. Without this an @Ignore is an anonymous
+		// hole; with it, the reason and the record have to agree on a name.
+		named := false
+		for _, owner := range splitPairs {
+			if strings.Contains(reason, owner) {
+				named = true
+				break
+			}
+		}
+		if !named {
+			problems = append(problems, fmt.Sprintf(
+				"%s @Ignore's %q without naming the item that owns it; a parked case with no owner is a hole nobody is accountable for",
+				parkedSuite, name))
+		}
+
+		// A claim and its demonstration are ignored together or not at all: ignoring only the
+		// demonstration leaves a claim that ran and was never shown going red, which is precisely
+		// the vacuous pass the route exists to refuse.
+		partner := claim
+		if name == claim {
+			partner = claim + DemonstrationSuffix
+		}
+		if _, both := ignored[partner]; !both {
+			problems = append(problems, fmt.Sprintf(
+				"%s @Ignore's %q but not %q; a claim and its demonstration are parked together, or the surviving half is not evidence (AC18)",
+				parkedSuite, name, partner))
+		}
+	}
+
+	for claim := range ignoredClaims {
+		if !deferred[claim] {
+			problems = append(problems, fmt.Sprintf(
+				"%s @Ignore's %q, and no row of %s defers it; a case may only stop running once the record says which item owns the clause it carried",
+				parkedSuite, claim, RecordFile))
+		}
+	}
+	for claim := range deferred {
+		if !ignoredClaims[claim] {
+			problems = append(problems, fmt.Sprintf(
+				"%s defers the assertion %q, and %s does not @Ignore it; a clause written off while its assertion is still in the suite is a record that does not describe the repository",
+				RecordFile, claim, parkedSuite))
+		}
+	}
+	return problems
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // demonstrationHint says, in the route's own vocabulary, what a missing demonstration would look

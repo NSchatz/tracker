@@ -147,8 +147,14 @@ check-go: fmt vet build test staticcheck govulncheck pin-check
 verify-ui:
 	go run ./cmd/uiverify web
 
-# The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
-# explanation documents the screen's labels moved their paragraphs into.
+# The Android screen's rendered claims (AC12, AC15-AC17) on a booted emulator, plus the repository
+# explanation documents the screen's labels moved their paragraphs into. AC13 and AC14 moved to
+# S0074-tracker-android-a11y-operability; FRONTEND-CONVENTIONS-RECORD.md records that and
+# `verify-ui-record` fences it.
+#
+# The boot's exit status is CHECKED rather than piped away. `x=$(cmd | tail -1)` takes tail's status,
+# so a boot that refused on a timeout - the one absence `require` cannot pre-check - would not stop
+# the line, and the refusal message AC19 asks for would be lost behind Gradle's own "no device".
 #
 # The last line is AC18's count, and it is not optional. `gradlew connectedDebugAndroidTest` is green
 # whenever the cases that RAN passed, so on its own it cannot tell a suite that graded twelve claims
@@ -158,7 +164,11 @@ verify-ui:
 verify-ui-android:
 	go run ./cmd/uiverify docs
 	@TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" ./scripts/android-emulator.sh require
-	@serial="$$(TRACKER_AVD='$(TRACKER_AVD)' TRACKER_SYS_IMAGE='$(TRACKER_SYS_IMAGE)' ./scripts/android-emulator.sh boot | tail -1)"; \
+	@set -e; \
+	out="$$(mktemp)"; trap 'rm -f "$$out"' EXIT; \
+	TRACKER_AVD='$(TRACKER_AVD)' TRACKER_SYS_IMAGE='$(TRACKER_SYS_IMAGE)' ./scripts/android-emulator.sh boot >"$$out"; \
+	serial="$$(tail -1 "$$out")"; \
+	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
 	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
 	go run ./cmd/uiverify android

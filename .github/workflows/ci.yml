@@ -135,12 +135,21 @@ jobs:
 
       # Both routes, with their prerequisite removed, must exit non-zero naming what is missing.
       # This is the check that keeps the two above from ever degrading into a silent skip.
+      #
+      # `if: success() || failure()` because a step that only ever runs after a green emulator route
+      # is a step that never runs on the day it matters: while the route above was red these two
+      # reported `skipped` on every run of the branch, so AC24's "execute ... the refusal check and
+      # the record check" was not being met by a workflow that looked as though it did. A cancelled
+      # run still skips them.
       - name: make verify-ui-refusal (the refusal paths still bite)
+        if: success() || failure()
         run: make verify-ui-refusal
 
       # The committed F1-F11 record, checked against what the two routes ACTUALLY ran above. It runs
-      # last for that reason: it refuses a record naming an assertion nobody executed.
+      # last for that reason: it refuses a record naming an assertion nobody executed - which is
+      # exactly the answer worth having after a route went red.
       - name: make verify-ui-record (the clause record)
+        if: success() || failure()
         run: make verify-ui-record
 
       - name: upload the UI grading evidence

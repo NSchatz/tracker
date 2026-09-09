@@ -32,25 +32,31 @@ import (
 	"testing"
 )
 
-// theTwelveAndroidClaims are exactly the assertion names FRONTEND-CONVENTIONS-RECORD.md maps the
-// eleven clauses to on the android screen.
-var theTwelveAndroidClaims = []string{
-	"AC12_labels_stay_short",
-	"AC12_each_card_opens_its_explanation",
-	"AC12_nothing_clipped_at_360dp",
-	"AC13_platform_checks_pass_light",
-	"AC13_platform_checks_pass_dark",
-	"AC13_no_state_by_colour_alone",
-	"AC14_operable_without_a_pointer",
-	"AC15_counters_state_their_set",
-	"AC15_never_measured_reads_not_recorded",
-	"AC16_unreadable_queue_costs_only_itself",
-	"AC16_three_states_are_distinct",
-	"AC17_stopped_reads_last_known",
+// theAndroidClaims are exactly the assertion names FRONTEND-CONVENTIONS-RECORD.md maps the eleven
+// clauses to on the android screen.
+//
+// It is READ FROM THE RECORD rather than hand-copied. The list was twelve names when this artefact
+// was written; the item was later narrowed and two clauses moved to another repository item, and a
+// hand-copied list would then have been testing a set the repository no longer has. The defect this
+// case pins is "the route counts no demonstrations", which is a property of the count and not of any
+// particular twelve names, so the fixture follows the record and the assertion below stays exactly
+// as strong.
+func theAndroidClaims(t *testing.T) []string {
+	t.Helper()
+	names, err := recordedAssertions(filepath.Join("..", ".."), AndroidSurface)
+	if err != nil {
+		t.Fatalf("reading the committed record: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("the committed record names no assertion on the android screen, so this case would " +
+			"drive the check against an empty set and could not fail for the reason it exists to catch")
+	}
+	return names
 }
 
 func TestRegressS0056F1AndroidRouteCountsNoDemonstrations(t *testing.T) {
 	root := t.TempDir()
+	claims := theAndroidClaims(t)
 
 	// The committed record, verbatim.
 	real, err := os.ReadFile(filepath.Join("..", "..", RecordFile))
@@ -58,6 +64,20 @@ func TestRegressS0056F1AndroidRouteCountsNoDemonstrations(t *testing.T) {
 		t.Fatalf("reading the committed record: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, RecordFile), real, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The instrumented suite, verbatim: the record defers two clauses to another item and the check
+	// compares those deferrals against the suite's own @Ignore'd cases, so a root without the suite
+	// would refuse for a reason unrelated to the count this case pins.
+	suite, err := os.ReadFile(filepath.Join("..", "..", parkedSuite))
+	if err != nil {
+		t.Fatalf("reading the committed instrumented suite: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, parkedSuite)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, parkedSuite), suite, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,16 +101,16 @@ func TestRegressS0056F1AndroidRouteCountsNoDemonstrations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The emulator's own report of what it ran: the twelve rendered claims, ALL PASSING, and not
-	// one demonstration. This is what a suite whose *_demonstration cases had been deleted,
+	// The emulator's own report of what it ran: every rendered claim the record names, ALL PASSING,
+	// and not one demonstration. This is what a suite whose *_demonstration cases had been deleted,
 	// renamed or @Ignore'd would produce, and `gradlew connectedDebugAndroidTest` is green on it.
 	resultsDir := filepath.Join(root, "android", "app", "build", "outputs", "androidTest-results", "connected")
 	if err := os.MkdirAll(resultsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><testsuite name="UiClaimTest" tests="12" failures="0" skipped="0">`)
-	for _, name := range theTwelveAndroidClaims {
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><testsuite name="UiClaimTest" failures="0" skipped="0">`)
+	for _, name := range claims {
 		b.WriteString(`<testcase name="` + name + `" classname="com.nschatz.tracker.ui.UiClaimTest"/>`)
 	}
 	b.WriteString(`</testsuite>`)
@@ -116,7 +136,7 @@ func TestRegressS0056F1AndroidRouteCountsNoDemonstrations(t *testing.T) {
 			"which counts, and FRONTEND-CONVENTIONS-RECORD.md names only the twelve claim cases, so "+
 			"CheckRecord never looks for a demonstration at all. A suite that lost every "+
 			"*_demonstration case still reports green.",
-			len(theTwelveAndroidClaims))
+			len(claims))
 	}
 	if !strings.Contains(err.Error(), "demonstration") {
 		t.Fatalf("the record check refused, but for a reason unrelated to the missing demonstrations, "+

@@ -12,7 +12,7 @@
 #   stop      kill the emulator this script started
 set -uo pipefail
 
-CRITERION="${CRITERION:-AC12-AC17 (Android rendered claims, F1/F2)}"
+CRITERION="${CRITERION:-AC12, AC15-AC17 (Android rendered claims, F2/F3/F4/F5/F6/F7/F8/F9)}"
 AVD_NAME="${TRACKER_AVD:-tracker-ui}"
 SYS_IMAGE="${TRACKER_SYS_IMAGE:-system-images;android-34;google_apis;x86_64}"
 BOOT_TIMEOUT="${TRACKER_EMULATOR_BOOT_TIMEOUT:-900}"

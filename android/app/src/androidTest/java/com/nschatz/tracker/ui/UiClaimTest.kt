@@ -21,6 +21,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,6 +47,15 @@ import org.junit.runner.RunWith
  * the PostGIS tests refuse to run against a mock: the thing under test here is what the PLATFORM
  * draws and what the PLATFORM's accessibility service reports about it, and a fake would only ever
  * assert what we already believed.
+ *
+ * ### Eight cases are @Ignore'd, and that is fenced rather than trusted
+ *
+ * The AC13 and AC14 cases below belong to S0074-tracker-android-a11y-operability, not to the item
+ * that wrote this file. They are kept verbatim as the artefacts that item inherits. An @Ignore here
+ * is only legal while FRONTEND-CONVENTIONS-RECORD.md defers the matching clause/surface pair to a
+ * named item: `uiverify record` compares the ignored set against the deferred set, refuses a
+ * deferral on any pair the spec's clause map does not mark SPLIT, and refuses a half-ignored
+ * claim/demonstration pair. See the "Deferred clauses" section of that record.
  */
 @RunWith(AndroidJUnit4::class)
 class UiClaimTest {
@@ -237,9 +247,31 @@ class UiClaimTest {
         )
     }
 
-    // --- AC13: the platform's own accessibility checks, in both themes --------------------------
+    // --- AC13 and AC14: PARKED, and owned by another item ---------------------------------------
+    //
+    // The eight cases below grade the Android screen's accessibility and its operability without a
+    // pointer. They are NOT criteria of S0056 any more: that item was narrowed on 2026-09-09 and
+    // both criteria, with the two impl-gate findings that parked them, moved to
+    // S0074-tracker-android-a11y-operability.
+    //
+    // They are kept here VERBATIM rather than deleted, because they are the failing artefacts the
+    // new item inherits - the honest test for each defect is the instrumented case that is already
+    // red, and re-deriving one later from a description is how a defect gets lost.
+    //
+    // @Ignore is normally the dodge this whole route exists to close, so it is fenced:
+    // FRONTEND-CONVENTIONS-RECORD.md carries a DEFERRAL row for F1 and F10 on the android screen
+    // naming exactly these four claims and the item that owns them, `uiverify record` refuses a
+    // deferral on any other clause/surface pair, refuses one naming a different item, refuses an
+    // ignored case whose pair-partner still runs, and refuses if the ignored set and the deferred
+    // set are not the same set. Ignoring a ninth case here therefore fails `make verify-ui-record`
+    // until the record says so out loud.
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F21): the platform sweep stayed " +
+            "green against a surface broken to break it, so its pass is not evidence. Parked with " +
+            "AC13; FRONTEND-CONVENTIONS-RECORD.md defers F1 and F10 on this surface to that item.",
+    )
     fun AC13_platform_checks_pass_light() {
         UiHarness.setNightMode(false)
         UiHarness.launch()
@@ -247,6 +279,11 @@ class UiClaimTest {
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F21): this demonstration is the " +
+            "one that goes red - ACCESSIBILITY_DEFECT put a 20dp unlabelled control and sub-floor " +
+            "text on the glass and the Accessibility Test Framework reported zero ERRORs.",
+    )
     fun AC13_platform_checks_pass_light_demonstration() {
         UiHarness.setNightMode(false)
         UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
@@ -254,6 +291,10 @@ class UiClaimTest {
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F21): parked with its " +
+            "demonstration, which is the half that goes red.",
+    )
     fun AC13_platform_checks_pass_dark() {
         UiHarness.setNightMode(true)
         UiHarness.launch()
@@ -261,6 +302,10 @@ class UiClaimTest {
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F21): the dark half of the same " +
+            "defect - the sweep produced results and still returned no ERROR.",
+    )
     fun AC13_platform_checks_pass_dark_demonstration() {
         UiHarness.setNightMode(true)
         UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
@@ -300,6 +345,11 @@ class UiClaimTest {
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability: AC13 moved there whole on 2026-09-09, and this " +
+            "case is green - it is parked with its criterion rather than because it fails, so the " +
+            "new item inherits a working assertion beside the two broken ones.",
+    )
     fun AC13_no_state_by_colour_alone() {
         CollectionStatus.recordBlocked(
             TroubleKind.PERMISSION_LOST,
@@ -310,6 +360,10 @@ class UiClaimTest {
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability: parked with its claim - an ignored demonstration " +
+            "beside a running claim is the exact AC18 dodge, so the pair moves together.",
+    )
     fun AC13_no_state_by_colour_alone_demonstration() {
         CollectionStatus.recordBlocked(
             TroubleKind.PERMISSION_LOST,
@@ -359,12 +413,23 @@ class UiClaimTest {
     // --- AC14: operable without a pointer -------------------------------------------------------
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F20): forty DPAD_DOWN presses " +
+            "never focus the save control, on Compose's Focused semantics, on the same read over " +
+            "the whole subtree, or on the platform's findFocus(FOCUS_INPUT). Whether that is a " +
+            "product defect or a harness defect needs a device, and this case is the artefact.",
+    )
     fun AC14_operable_without_a_pointer() {
         UiHarness.launch()
         operableWithoutAPointer()
     }
 
     @Test
+    @Ignore(
+        "S0074-tracker-android-a11y-operability (impl-gate finding F20): parked with its claim. " +
+            "While the claim fails unconditionally this demonstration passes vacuously, which is " +
+            "no evidence of anything.",
+    )
     fun AC14_operable_without_a_pointer_demonstration() {
         UiHarness.launch(UiMutation.SAVE_NOT_FOCUSABLE)
         assertFails("an unreachable save control was not caught") { operableWithoutAPointer() }

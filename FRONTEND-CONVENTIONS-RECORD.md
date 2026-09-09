@@ -6,16 +6,17 @@ binds both:
 - the **browser map** the Go server serves at `GET /map`, with its vendored assets under `/static`;
 - the **Android screen**, the client's single Compose surface.
 
-This file maps every clause **F1 through F11**, **for each of the two surfaces**, to either the
-rendered assertion that proves it or a named exemption saying why that clause cannot apply there.
-Twenty-two pairs, each mapped exactly once.
+This file maps every clause **F1 through F11**, **for each of the two surfaces**, to the rendered
+assertion that proves it, a named exemption saying why that clause cannot apply there, or a deferral
+naming the item that owns it. Twenty-two pairs, each mapped exactly once.
 
 It is checked, not merely written. `make verify-ui-record` parses the table below and exits non-zero
-naming the clause and surface if any pair is absent, carries both an assertion and an exemption, or
-names an assertion **that did not run in the last recorded invocation of its route**. The browser
-route writes what it ran to `build/uiverify/last-run-web.json`; the Android route's evidence is the
-emulator's own JUnit results under `android/app/build/outputs/androidTest-results/connected/`. A
-skipped or failed case does not count as having run.
+naming the clause and surface if any pair is absent, carries more than one of those three
+dispositions, or names an assertion **that did not run in the last recorded invocation of its
+route**. The browser route writes what it ran to `build/uiverify/last-run-web.json`; the Android
+route's evidence is the emulator's own JUnit results under
+`android/app/build/outputs/androidTest-results/connected/`. A skipped or failed case does not count
+as having run.
 
 Run the whole thing with:
 
@@ -55,18 +56,45 @@ emulator's demonstrations:
   a row here can never cite a check that was only ever seen passing.
 
 `gradlew connectedDebugAndroidTest` on its own is green whenever the cases that *ran* passed, so
-without that second bullet a suite whose twelve demonstrations had been deleted, renamed or
-`@Ignore`d would report the whole Android surface green with no evidence that any of its assertions
-can fail at all.
+without that second bullet a suite whose demonstrations had been deleted, renamed or `@Ignore`d
+would report the whole Android surface green with no evidence that any of its assertions can fail at
+all.
+
+## Deferred clauses
+
+Two of the twenty-two pairs are **deferred**, not answered: **F1 and F10 on the android screen** are
+carried by `S0074-tracker-android-a11y-operability`. S0056 was narrowed on 2026-09-09 when its impl
+gate parked on two findings that are properties of that surface alone:
+
+- **F20** - `AC14_operable_without_a_pointer` fails on the emulator: forty directional presses never
+  focus the save control. Product defect or harness defect is undecided and needs a device.
+- **F21** - `AC13_platform_checks_pass_light_demonstration` and `..._dark_demonstration` fail: the
+  platform accessibility sweep stayed green against a surface deliberately broken to break it, so
+  the claims beside them are not evidence.
+
+The four assertions those two clauses rest on stay in
+`android/app/src/androidTest/.../UiClaimTest.kt`, verbatim and `@Ignore`d, because a failing case is
+the artefact the next item inherits and re-deriving one from a description is how a defect gets
+lost.
+
+**A deferral is fenced, not trusted.** `uiverify record` refuses a deferral on any clause/surface
+pair other than those two, refuses one naming any item other than the one above, refuses a pair
+carrying a deferral beside an assertion or an exemption, refuses a deferred assertion that the last
+run reports as having passed, and compares the deferred set against the set of `@Ignore`d cases in
+the instrumented suite - including that a claim and its `_demonstration` are always ignored
+together, since ignoring a demonstration beside a running claim is exactly the vacuous pass AC18
+forbids. `@Ignore`ing a ninth case therefore turns `make verify-ui-record` red until this file says
+so out loud. The pair list is hard-coded in `internal/uiverify/record.go`; widening it is a source
+change with a name on it.
 
 ## The record
 
 | clause | surface | assertion | exemption |
 |---|---|---|---|
 | F1 | browser map | AC1-keyboard, AC1-names, AC1-colour-free, AC2-contrast-light, AC2-contrast-dark, AC3-focus, AC4-target-size | - |
-| F1 | android screen | AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark, AC13_no_state_by_colour_alone, AC14_operable_without_a_pointer | - |
+| F1 | android screen | deferred to S0074-tracker-android-a11y-operability: AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark, AC13_no_state_by_colour_alone, AC14_operable_without_a_pointer | - |
 | F2 | browser map | AC1-keyboard, AC21-policy | - |
-| F2 | android screen | AC13_platform_checks_pass_light, AC12_nothing_clipped_at_360dp | - |
+| F2 | android screen | AC12_nothing_clipped_at_360dp | - |
 | F3 | browser map | AC5-absence | - |
 | F3 | android screen | AC15_never_measured_reads_not_recorded | - |
 | F4 | browser map | AC6-aggregates | - |
@@ -82,7 +110,7 @@ can fail at all.
 | F9 | browser map | AC11-reflow | - |
 | F9 | android screen | AC12_nothing_clipped_at_360dp | - |
 | F10 | browser map | AC2-contrast-light, AC2-contrast-dark, AC3-theme | - |
-| F10 | android screen | AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark | - |
+| F10 | android screen | deferred to S0074-tracker-android-a11y-operability: AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark | - |
 | F11 | browser map | AC21-policy, AC22-egress | - |
 | F11 | android screen | - | The Android client renders no browser surface: no WebView, no Custom Tab, no embedded HTML and no androidx.browser dependency. There is no document load for a policy to govern and no browser to report a violation against. `make verify-ui-record` scans the client for a web view and FAILS this exemption the moment one appears. |
 
@@ -94,9 +122,11 @@ page with real keystrokes and reads `document.activeElement` back out of the eng
 Leaflet ran, the inline script ran, the stylesheet applied, a marker was drawn. A silenced page that
 formally reported no violation would pass a source check and fails this one.
 
-**F2, android screen.** Likewise: the platform accessibility sweep runs over a hierarchy the
-emulator built, and the 360dp layout assertion reads Compose's laid-out geometry against its clipped
-geometry, which is a fact about what was drawn and has no source-level equivalent.
+**F2, android screen.** The 360dp layout assertion reads Compose's laid-out geometry against its
+clipped geometry on a booted emulator, which is a fact about what was drawn and has no source-level
+equivalent. It carries F2 alone while the platform accessibility sweep is deferred: that sweep is
+the assertion F21 showed incapable of going red, so citing it here would be citing a check that is
+not evidence.
 
 **F9, android screen.** The Android surface is a single scrolling column; "phone first" there is the
 360dp profile assertion, which forces the device to `1080x2340` at 480dpi (exactly 360dp of width)
@@ -106,9 +136,10 @@ and fails on any text clipped or laid out past the display.
 and `#panel` at each operating-system preference. It looks for no class and asks the page nothing:
 "did it render light" is answered by the rendering.
 
-**F10, android screen.** The client's colour scheme is authored per theme rather than derived from
-the wallpaper. Dynamic colour (API 31+) made this screen's contrast a property of whatever picture
-the user had set, which no check can grade - and F1 requires AA contrast, graded in both themes.
+**F10, android screen.** Deferred with F1, above. The client's colour scheme is authored per theme
+rather than derived from the wallpaper - dynamic colour (API 31+) made this screen's contrast a
+property of whatever picture the user had set, which no check can grade - so the surface is ready to
+be graded in both themes; what is missing is a sweep that can be shown going red in either.
 
 ## MAP-VERIFICATION.md
 

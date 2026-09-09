@@ -50,7 +50,36 @@ func newFakeRepo(t *testing.T) *fakeRepo {
 	r.writeAndroidResults(t, withDemonstrations(claimsInTheCommittedRecord(t, AndroidSurface))...)
 	r.writeWebRun(t, claimsInTheCommittedRecord(t, "browser map")...)
 	r.writeAndroidSource(t, "package com.nschatz.tracker\n\nclass Nothing\n")
+	r.writeParkedSuite(t, nil)
 	return r
+}
+
+// writeParkedSuite copies the REAL instrumented suite, optionally edited, so the deferral fence is
+// driven against the file this repository actually ships rather than a convenient stand-in.
+func (r *fakeRepo) writeParkedSuite(t *testing.T, edits ...func(string) string) {
+	t.Helper()
+	real, err := os.ReadFile(filepath.Join(theRepoRoot, parkedSuite))
+	if err != nil {
+		t.Fatalf("reading the committed instrumented suite: %v", err)
+	}
+	body := string(real)
+	for _, edit := range edits {
+		if edit == nil {
+			continue
+		}
+		before := body
+		body = edit(body)
+		if body == before {
+			t.Fatal("the edit changed nothing, so this case would not test what it says it does")
+		}
+	}
+	path := filepath.Join(r.root, parkedSuite)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // withDemonstrations is what a green instrumented run reports: every claim, and beside each one the
@@ -336,12 +365,222 @@ func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
 	t.Run("no results at all", func(t *testing.T) {
 		repo := &fakeRepo{root: t.TempDir()}
 		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t, nil)
 		err := CheckAndroidRun(io.Discard, repo.root)
 		if err == nil {
 			t.Fatal("the Android route reported green with no instrumented results at all")
 		}
 		if !strings.Contains(err.Error(), "verify-ui-android") {
 			t.Fatalf("the refusal does not say the route had not run: %v", err)
+		}
+	})
+}
+
+// --- the deferral fence -------------------------------------------------------------------------
+//
+// A deferral is the weakest of the record's three dispositions: it answers a clause with the item
+// that owns it rather than with evidence or with a reason no evidence is needed. That makes it the
+// one an author could reach for to make a red clause stop being red, so every side of it is fenced
+// and every fence is driven here. If any of these cases stops failing, "deferred" has become a way
+// to write a clause off by editing a table.
+
+const theSplitItem = "S0074-tracker-android-a11y-operability"
+
+const f1AndroidRow = "| F1 | android screen | deferred to " + theSplitItem +
+	": AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark, AC13_no_state_by_colour_alone, AC14_operable_without_a_pointer | - |"
+
+// ignoreOn puts a well-formed @Ignore on one case of the instrumented suite.
+func ignoreOn(caseName, reason string) func(string) string {
+	return func(s string) string {
+		return strings.Replace(s,
+			"    fun "+caseName+"(",
+			"    @Ignore(\""+reason+"\")\n    fun "+caseName+"(", 1)
+	}
+}
+
+func TestADeferralOnAPairTheSpecDoesNotSplitIsRefused(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo(t)
+	repo.writeRecord(t, func(s string) string {
+		return strings.Replace(s,
+			"| F6 | android screen | AC17_stopped_reads_last_known | - |",
+			"| F6 | android screen | deferred to "+theSplitItem+": AC17_stopped_reads_last_known | - |", 1)
+	})
+	err := CheckRecord(io.Discard, repo.root)
+	if err == nil {
+		t.Fatal("a clause was deferred on a pair the narrowed spec does not mark SPLIT, and the record was accepted")
+	}
+	if !strings.Contains(err.Error(), "only legal on the clause/surface pairs") {
+		t.Fatalf("the refusal does not say the pair may not be deferred: %v", err)
+	}
+}
+
+func TestADeferralNamingAnotherItemIsRefused(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo(t)
+	repo.writeRecord(t, func(s string) string {
+		return strings.Replace(s, "| F10 | android screen | deferred to "+theSplitItem+":",
+			"| F10 | android screen | deferred to S0099-somebody-elses-item:", 1)
+	})
+	err := CheckRecord(io.Discard, repo.root)
+	if err == nil {
+		t.Fatal("a deferral pointing at an item that does not carry the clause was accepted")
+	}
+	if !strings.Contains(err.Error(), "this pair is carried by") {
+		t.Fatalf("the refusal does not name the item that actually carries the pair: %v", err)
+	}
+}
+
+func TestADeferralBesideAnotherDispositionIsRefused(t *testing.T) {
+	t.Parallel()
+
+	t.Run("beside an exemption", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, func(s string) string {
+			return strings.Replace(s, f1AndroidRow,
+				strings.TrimSuffix(f1AndroidRow, "- |")+"and also exempt, because reasons |", 1)
+		})
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a row carrying both a deferral and an exemption was accepted")
+		}
+		if !strings.Contains(err.Error(), "BOTH a deferral and an exemption") {
+			t.Fatalf("the refusal does not name the double disposition: %v", err)
+		}
+	})
+
+	t.Run("beside an assertion", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, func(s string) string {
+			return strings.Replace(s,
+				"| F10 | android screen | deferred to "+theSplitItem+":",
+				"| F10 | android screen | AC12_nothing_clipped_at_360dp, deferred to "+theSplitItem+":", 1)
+		})
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a row claiming an assertion AND deferring the clause was accepted")
+		}
+		// The cell no longer opens with the deferral, so it parses as assertions; either refusal is
+		// the right one, and what must not happen is silence.
+		if !strings.Contains(err.Error(), "did not run") && !strings.Contains(err.Error(), "BOTH a deferral") {
+			t.Fatalf("the refusal does not name the double disposition: %v", err)
+		}
+	})
+}
+
+func TestADeferralThatNamesNoAssertionIsRefused(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo(t)
+	repo.writeRecord(t, func(s string) string {
+		return strings.Replace(s, "| F10 | android screen | deferred to "+theSplitItem+
+			": AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark | - |",
+			"| F10 | android screen | deferred to "+theSplitItem+": | - |", 1)
+	})
+	err := CheckRecord(io.Discard, repo.root)
+	if err == nil {
+		t.Fatal("a clause was deferred without naming what moved with it, and the record was accepted")
+	}
+	if !strings.Contains(err.Error(), "names no assertion that moved with it") {
+		t.Fatalf("the refusal does not say the deferral pins nothing: %v", err)
+	}
+}
+
+// A clause cannot be deferred AND graded. If the assertion is running green, the clause is answered
+// here and the deferral is a lie about who owes the work.
+func TestADeferredAssertionThatRanIsRefused(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo(t)
+	repo.writeRecord(t, nil)
+	names := withDemonstrations(claimsInTheCommittedRecord(t, AndroidSurface))
+	names = append(names, "AC13_no_state_by_colour_alone", "AC13_no_state_by_colour_alone"+DemonstrationSuffix)
+	repo.writeAndroidResults(t, names...)
+	err := CheckRecord(io.Discard, repo.root)
+	if err == nil {
+		t.Fatal("a clause was deferred while the assertion carrying it ran green, and the record was accepted")
+	}
+	if !strings.Contains(err.Error(), "reports it PASSING") {
+		t.Fatalf("the refusal does not say the deferred assertion actually ran: %v", err)
+	}
+}
+
+// The two directions of the fence between the record and the suite.
+func TestTheParkedSuiteAndTheRecordMustAgree(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a case is ignored with no deferral behind it", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t,
+			ignoreOn("AC17_stopped_reads_last_known", theSplitItem),
+			ignoreOn("AC17_stopped_reads_last_known"+DemonstrationSuffix, theSplitItem))
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a case stopped running with nothing in the record saying who owns the clause it carried")
+		}
+		if !strings.Contains(err.Error(), "and no row of") {
+			t.Fatalf("the refusal does not say the ignored case is undeferred: %v", err)
+		}
+	})
+
+	t.Run("a clause is deferred with no ignored case behind it", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, func(s string) string {
+			return strings.Replace(s, f1AndroidRow,
+				strings.Replace(f1AndroidRow, "AC14_operable_without_a_pointer",
+					"AC14_operable_without_a_pointer, AC99_an_assertion_still_in_the_suite", 1), 1)
+		})
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a clause was written off while its assertion was still in the suite")
+		}
+		if !strings.Contains(err.Error(), "does not @Ignore it") {
+			t.Fatalf("the refusal does not say the deferred assertion is still in the suite: %v", err)
+		}
+	})
+
+	// The dodge AC18 exists to forbid, wearing a deferral as a disguise: park the demonstration and
+	// leave the claim running, and the claim is green having never been shown able to go red.
+	t.Run("only half a claim/demonstration pair is ignored", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t, ignoreOn("AC16_three_states_are_distinct"+DemonstrationSuffix, theSplitItem))
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a demonstration was parked beside a claim that kept running, and the record was accepted")
+		}
+		if !strings.Contains(err.Error(), "but not") {
+			t.Fatalf("the refusal does not name the half-parked pair: %v", err)
+		}
+	})
+
+	t.Run("an ignored case names no owning item", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t,
+			ignoreOn("AC16_three_states_are_distinct", "flaky on CI"),
+			ignoreOn("AC16_three_states_are_distinct"+DemonstrationSuffix, "flaky on CI"))
+		err := CheckRecord(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a case was parked anonymously and the record was accepted")
+		}
+		if !strings.Contains(err.Error(), "without naming the item that owns it") {
+			t.Fatalf("the refusal does not say the parked case has no owner: %v", err)
+		}
+	})
+
+	// AC18 binds the ROUTE, not only the record check that may be run after it.
+	t.Run("the android route refuses it too, on its own", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t,
+			ignoreOn("AC15_counters_state_their_set", theSplitItem),
+			ignoreOn("AC15_counters_state_their_set"+DemonstrationSuffix, theSplitItem))
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("`make verify-ui-android` reported green with a case parked behind no deferral")
+		}
+		if !strings.Contains(err.Error(), "and no row of") {
+			t.Fatalf("the route's refusal does not say the ignored case is undeferred: %v", err)
 		}
 	})
 }
@@ -371,6 +610,7 @@ func TestNoRunRecordsAtAllIsRefused(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{root: t.TempDir()}
 	repo.writeRecord(t, nil)
+	repo.writeParkedSuite(t, nil)
 	err := CheckRecord(io.Discard, repo.root)
 	if err == nil {
 		t.Fatal("the record check passed with no evidence that either route had ever run")
