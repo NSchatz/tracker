@@ -42,7 +42,7 @@ TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
 
-.PHONY: build test check check-go android fmt vet staticcheck govulncheck tidy clean image compose-check smoke run-db \
+.PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
 
 build:
@@ -82,6 +82,24 @@ staticcheck:
 govulncheck:
 	go run ./cmd/vulngate -govulncheck-version=$(GOVULNCHECK_VERSION) ./...
 
+# The SUPPLY-CHAIN PIN gate (umbrella documentation/pinning-conventions.md, operator 2026-09-07).
+# cmd/pincheck reads every pinnable reference in the working tree - Dockerfile bases, compose
+# service images, workflow actions, the Go module graph, the tool versions above, the Gradle wrapper
+# distribution, the Gradle version catalog and any node manifest - and refuses one that names
+# something a publisher can move under it, quoting the file, the line, the reference and the broken
+# clause.
+#
+# It has its own target because it is the one half of the gate that needs NOTHING: no Docker daemon,
+# no Android SDK, no credentials and no network. It asks no registry whether a digest is still
+# live - P8 is explicit that rot is discovered when a build fails, not by a gate that reds every
+# unrelated pull request when a third party is down. So `make pin-check` reaches the same verdict on
+# an airgapped laptop as it does in CI.
+#
+# internal/pingate's own tests run inside `make test` as well, which is how this reaches CI with no
+# second step in ci.yml - the same shape as internal/toolchain and internal/vulngate.
+pin-check:
+	go run ./cmd/pincheck
+
 # The Android client gate — assemble the debug APK, run Android Lint, run the JVM unit
 # tests. Uses the committed Gradle wrapper (pinned to 8.9), so the only host requirements
 # are a JDK 17 and an Android SDK. Fails with a clear message when the SDK is not located,
@@ -104,7 +122,12 @@ check: check-go android
 
 # The Go half of the gate, kept as its own target so `make check-go` can run the server
 # checks alone (e.g. on a machine without the Android SDK). `check` runs both.
-check-go: fmt vet build test staticcheck govulncheck
+#
+# pin-check rides here rather than in ci.yml, because ci.yml runs `make check` and nothing else:
+# that is the rule that keeps the PR gate identical to the gate a human runs. It guards BOTH stacks'
+# pins (the Gradle wrapper and version catalog included), so it sits in the half that runs
+# everywhere rather than in `android`, which needs an SDK.
+check-go: fmt vet build test staticcheck govulncheck pin-check
 
 # --- user-interface grading -----------------------------------------------------
 #

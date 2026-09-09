@@ -1,0 +1,24 @@
+# DELIBERATELY BROKEN. Do not fix.
+#
+# GitHub never reads this file: workflows are only picked up from `.github/workflows` at the
+# REPOSITORY root, and this one is six directories down inside `testdata/`. It exists so
+# internal/pingate can be shown refusing a mutable action tag under P3.
+name: refusal demonstration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      # The refusal: `v4` is a tag, and its publisher moves it. actions/checkout@v4 and
+      # actions/setup-java@v4 had both moved under this org's workflows before anyone wrote a SHA
+      # down, which is the whole reason P3 exists.
+      - uses: actions/checkout@v4
+
+      # The control: correctly pinned, and the gate must let it through.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+
+      - name: do nothing
+        run: 'true'

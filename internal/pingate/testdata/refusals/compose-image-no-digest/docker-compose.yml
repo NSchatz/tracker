@@ -1,0 +1,19 @@
+# DELIBERATELY BROKEN. Do not fix.
+#
+# `cache` names an image this file does not build, so those bytes come from a publisher who can move
+# the tag under every consumer that wrote it. internal/pingate must refuse it under P1.
+#
+# `app` is the control: it has a `build:` key, so `image:` is only the local name compose tags the
+# build output with. There is no publisher and no digest to resolve, and the gate must NOT refuse
+# it - a check that refuses everything proves nothing about the thing it refused.
+services:
+  cache:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+    image: demo:dev
+    depends_on:
+      - cache

@@ -31,10 +31,19 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// PostGISImage is the image every test runs against. Pinned: the spatial assertions are
-// assertions about a specific PostGIS version's behaviour, so floating this tag would let
-// the thing under test change without the tests changing.
-const PostGISImage = "postgis/postgis:16-3.4"
+// PostGISImage is the image every test runs against, pinned by TAG AND DIGEST (P1 of the
+// org's pinning conventions) and identical to the `postgis` service in docker-compose.yml.
+//
+// The tag stays here so a human can read which PostGIS this is; the digest is what actually
+// resolves, and it is the half that matters. Every spatial assertion tracker makes is an
+// assertion about a specific PostGIS build's behaviour (geography units, on-boundary
+// containment, planner index selection), so a floating tag would let the thing under test
+// change without a single test changing, and would let the database the tests measure
+// drift away from the database the stack runs. Moving it is a two-minute job with the
+// provenance table in README.md; it must move in both places at once.
+//
+// internal/pingate reads this constant and refuses it if it ever loses either half.
+const PostGISImage = "postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5"
 
 // These credentials are synthetic and local to a throwaway container that is never
 // published to a port on the host. They are not, and must never become, a real secret.
