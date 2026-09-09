@@ -488,8 +488,8 @@ So `make verify-ui` drives **Chromium** over the production `/map` and `/static`
 every number back out of the live engine: contrast from the resolved colours in both themes, focus
 indicators from a pixel diff of the rendering, target sizes from laid-out boxes, accessible names
 from the engine's own accessibility tree, network origins and policy violations from the browser's
-own records. `make verify-ui-android` runs an **instrumented** suite on a booted Android emulator
-with Google's Accessibility Test Framework applied to the tree the platform actually built.
+own records. `make verify-ui-android` runs an **instrumented** suite on a booted Android emulator and
+reads back what Compose actually laid out and drew.
 
 **No assertion in either route may pass vacuously.** Each one is also re-run against the same surface
 mutated to break exactly the claim it measures — one substitution in the bytes the server served, or
@@ -508,9 +508,18 @@ demonstration beside it. Deleting, renaming or `@Ignore`-ing a demonstration fai
 **They refuse; they never skip.** No browser engine, no Android SDK, no `/dev/kvm`, no booted device:
 each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
 as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make
-verify-ui-refusal` is the check that keeps that true. The clause-by-clause record, for both surfaces,
-is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make verify-ui-record`
-refuses a record naming an assertion that did not actually run.
+verify-ui-refusal` is the check that keeps that true, and it drives each of those five absences
+separately rather than trusting one refusal to stand for all of them. The clause-by-clause record,
+for both surfaces, is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make
+verify-ui-record` refuses a record naming an assertion that did not actually run.
+
+**Two clauses are deferred rather than answered.** F1 and F10 on the Android screen — the platform
+accessibility sweep in both themes, and operability without a pointer — are carried by
+`S0074-tracker-android-a11y-operability`, with the failing instrumented cases kept in place and
+`@Ignore`d. The record says so per clause, and the deferral is fenced from every side: only those two
+pairs may carry one, only that item may be named, and the deferred set and the suite's `@Ignore`d set
+must match case for case, claims and demonstrations together. Parking a ninth case turns `make
+verify-ui-record` red.
 
 **The paragraphs that used to stand on each surface live in a document instead**, one per surface:
 [`/static/map-explained.html`](internal/server/static/map-explained.html) for the map, which the page

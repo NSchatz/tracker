@@ -128,12 +128,21 @@ location the test injected, not that the fused provider delivers one on a real p
 
 There **is** now an instrumented suite (`app/src/androidTest`, `make verify-ui-android`), and it is
 carefully scoped to the half of that argument which does not apply. It grades **what the screen
-draws** — contrast, touch targets, spoken names, brevity, the counters' honesty, the three states,
-staleness — because that is a claim only a running Android runtime can answer, and because the
-umbrella's frontend conventions say so in as many words: "an emulator, not the JVM, for Android". It
-grades **nothing about collection**: not the permission decisions, not the fused provider, not the
-flush schedule. Those are still the pure unit tests plus the operator check below, and the reasoning
-above is why.
+draws** — brevity and the explanation destination, the counters' honesty, the three states,
+staleness, and a 360dp layout that clips nothing — because that is a claim only a running Android
+runtime can answer, and because the umbrella's frontend conventions say so in as many words: "an
+emulator, not the JVM, for Android". It grades **nothing about collection**: not the permission
+decisions, not the fused provider, not the flush schedule. Those are still the pure unit tests plus
+the operator check below, and the reasoning above is why.
+
+**Eight cases in that suite are `@Ignore`d and belong to another item.** The accessibility sweep
+(contrast, touch targets, spoken names, state carried by colour) and the operable-without-a-pointer
+traversal are carried by `S0074-tracker-android-a11y-operability`: on the emulator the traversal
+never reaches the save control, and the platform sweep stayed green against a screen deliberately
+broken to break it, so its passes were not evidence. They are kept verbatim as the artefacts that
+item inherits. `FRONTEND-CONVENTIONS-RECORD.md` records the deferral clause by clause and
+`make verify-ui-record` fences it — an `@Ignore` with no deferral behind it, or a deferral with no
+`@Ignore` behind it, turns that check red.
 
 The suite needs a booted emulator and **refuses loudly when it cannot have one**, naming the missing
 piece and how to get it (`scripts/android-emulator.sh`). It never skips. Without `/dev/kvm` an
