@@ -519,6 +519,292 @@ func TestGradleScriptRule(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// image references named in Go source
+// ---------------------------------------------------------------------------
+
+// unpinnedRef is written in two halves ON PURPOSE. A whole string literal spelling an unpinned
+// image reference is exactly what the Go-source rule refuses, so writing one here would make this
+// package refuse its own test file - and the two halves say, better than a comment could, where the
+// rule's boundary is: it examines a literal that IS a reference, never a literal that mentions one.
+const unpinnedRef = "postgis/postgis" + ":16-3.4"
+
+const pinnedRef = "postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5"
+
+func TestGoSourceImageRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantRed bool
+	}{
+		{
+			name:    "a pinned image constant",
+			body:    "package x\n\nconst PostGISImage = \"" + pinnedRef + "\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "a tag with no digest",
+			body:    "package x\n\nconst PostGISImage = \"" + unpinnedRef + "\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "a digest with no tag",
+			body:    "package x\n\nconst PostGISImage = \"postgis/postgis@sha256:" + strings.Repeat("a", 64) + "\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "a truncated digest",
+			body:    "package x\n\nconst PostGISImage = \"postgis/postgis:16-3.4@sha256:44126d87\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "an uppercase digest",
+			body:    "package x\n\nconst PostGISImage = \"postgis/postgis:16-3.4@sha256:" + strings.Repeat("A", 64) + "\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "latest",
+			body:    "package x\n\nconst PostGISImage = \"postgis/postgis:latest\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "an inline argument, named by nothing",
+			body:    "package x\n\nimport \"c\"\n\nfunc f() { c.Start(\"" + unpinnedRef + "\") }\n",
+			wantRed: true,
+		},
+		{
+			name:    "a struct field value",
+			body:    "package x\n\ntype R struct{ Image string }\n\nvar r = R{Image: \"" + unpinnedRef + "\"}\n",
+			wantRed: true,
+		},
+		{
+			name:    "an official image with no repository path, named as an image",
+			body:    "package x\n\nconst builderImage = \"golang:1.26.8-bookworm\"\n",
+			wantRed: true,
+		},
+		{
+			name:    "a raw string literal is read the same as a quoted one",
+			body:    "package x\n\nconst PostGISImage = `" + unpinnedRef + "`\n",
+			wantRed: true,
+		},
+		// The negatives. Each is a thing with no compliant form, and refusing it would be the
+		// `runs-on: ubuntu-latest` mistake in a different file type.
+		{
+			name:    "a marker string that is not an image",
+			body:    "package x\n\nconst allowMarker = \"secretscan:allow\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "an import-shaped path",
+			body:    "package x\n\nconst mod = \"github.com/NSchatz/tracker\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "a port spec",
+			body:    "package x\n\nconst port = \"5432/tcp\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "a DSN",
+			body:    "package x\n\nconst dsn = \"postgres://tracker:tracker@localhost:5432/tracker\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "Dockerfile TEXT held as test data, which nothing pulls",
+			body:    "package x\n\nvar fixture = \"FROM golang:1.26.8-bookworm AS build\\nWORKDIR /src\\n\"\n",
+			wantRed: false,
+		},
+		{
+			name:    "a compose fixture held as test data",
+			body:    "package x\n\nvar fixture = \"services:\\n  db:\\n    image: " + unpinnedRef + "\\n\"\n",
+			wantRed: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			report, err := Scan(writeTree(t, map[string]string{"internal/x/x.go": c.body}))
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			red := len(report.Violations) > 0
+			if red != c.wantRed {
+				t.Fatalf("red=%v want %v for:\n%s\nviolations: %v", red, c.wantRed, c.body, report.Violations)
+			}
+			if red && report.Violations[0].File != "internal/x/x.go" {
+				t.Errorf("the refusal names %q, not the Go file that carries the reference", report.Violations[0].File)
+			}
+		})
+	}
+}
+
+// TestGoSourceRuleCatchesTheImageTheTestsRunAgainst is finding F1 stated as a rule rather than as
+// one file's regression: the reference internal/testsupport starts on every `make test` is examined
+// by the gate, and the gate goes RED when it loses its digest. Before this rule existed,
+// docker-compose.yml could be pinned while the database the spatial assertions measure floated.
+func TestGoSourceRuleCatchesTheImageTheTestsRunAgainst(t *testing.T) {
+	report, err := Scan(repoRoot)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	c := category(t, report, "container image references in Go source")
+	if c.Examined == 0 {
+		t.Fatal("the Go-source category examined nothing, so an image reference in Go source is invisible to the gate again")
+	}
+
+	// The mutation: the repository's own testsupport file with the digest taken off. The gate must
+	// refuse it, naming that file, and say what to write instead.
+	mutated := "package testsupport\n\nconst PostGISImage = \"" + unpinnedRef + "\"\n"
+	report, err = Scan(writeTree(t, map[string]string{"internal/testsupport/postgis.go": mutated}))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var found *Violation
+	for i := range report.Violations {
+		if report.Violations[i].File == "internal/testsupport/postgis.go" {
+			found = &report.Violations[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("the gate accepted an unpinned PostGIS image in Go source: %v", report.Violations)
+	}
+	if found.Clause.ID != P1.ID {
+		t.Errorf("the refusal cites %s, want P1: %s", found.Clause.ID, found)
+	}
+	if !strings.Contains(found.Why, "@sha256:") {
+		t.Errorf("the refusal does not say what to write instead: %s", found)
+	}
+}
+
+// TestGoSourceContainerStarterMustNameItsImage closes the way round a literal rule: build the
+// reference at run time and there is no literal left to refuse. A file that imports testcontainers
+// and starts one must name the image it starts, in the file, where the gate can read it.
+func TestGoSourceContainerStarterMustNameItsImage(t *testing.T) {
+	body := "package testsupport\n\nimport (\n\t\"os\"\n\n\t\"github.com/testcontainers/testcontainers-go/modules/postgres\"\n)\n\n" +
+		"func New() { postgres.Run(nil, os.Getenv(\"POSTGIS_IMAGE\")) }\n"
+
+	report, err := Scan(writeTree(t, map[string]string{"internal/testsupport/postgis.go": body}))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(report.Violations) == 0 {
+		t.Fatal("a file that starts a container from an environment variable was accepted, so what it runs is unpinned and unreadable")
+	}
+	if !strings.Contains(report.Violations[0].Why, "names no image reference") {
+		t.Errorf("the refusal does not say why: %s", report.Violations[0])
+	}
+
+	// And the control: the same file with a pinned literal is fine.
+	ok := "package testsupport\n\nimport \"github.com/testcontainers/testcontainers-go/modules/postgres\"\n\n" +
+		"const PostGISImage = \"" + pinnedRef + "\"\n\nfunc New() { postgres.Run(nil, PostGISImage) }\n"
+	report, err = Scan(writeTree(t, map[string]string{"internal/testsupport/postgis.go": ok}))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Fatalf("a pinned container starter was refused: %v", report.Violations)
+	}
+}
+
+// TestGoSourceUnparseableIsRefused: "the gate could not read it" must never round to "it is fine",
+// in Go source as in YAML.
+func TestGoSourceUnparseableIsRefused(t *testing.T) {
+	report, err := Scan(writeTree(t, map[string]string{"internal/x/x.go": "package x\n\nfunc f( {\n"}))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(report.Violations) == 0 {
+		t.Fatal("a Go file that does not parse was accepted")
+	}
+}
+
+// TestWorkflowContainerAndServiceImages: a job may run IN a container and attach service
+// containers, and both are published images a workflow pulls. `uses:` is not the only reference in
+// a workflow file.
+func TestWorkflowContainerAndServiceImages(t *testing.T) {
+	const head = "jobs:\n  j:\n    runs-on: ubuntu-latest\n"
+
+	cases := []struct {
+		name    string
+		body    string
+		wantRed bool
+	}{
+		{"a job container with a digest", head + "    container:\n      image: " + pinnedRef + "\n", false},
+		{"a job container with no digest", head + "    container:\n      image: " + unpinnedRef + "\n", true},
+		{"a job container as a bare string", head + "    container: " + unpinnedRef + "\n", true},
+		{"a job container as a bare pinned string", head + "    container: " + pinnedRef + "\n", false},
+		{"a service image with no digest", head + "    services:\n      db:\n        image: " + unpinnedRef + "\n", true},
+		{"a service image with a digest", head + "    services:\n      db:\n        image: " + pinnedRef + "\n", false},
+		{"a service image from an expression", head + "    services:\n      db:\n        image: ${{ env.DB_IMAGE }}\n", true},
+		{"no container and no services", head + "    steps:\n      - run: make check\n", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			report, err := Scan(writeTree(t, map[string]string{".github/workflows/ci.yml": c.body}))
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if red := len(report.Violations) > 0; red != c.wantRed {
+				t.Fatalf("red=%v want %v for %q; violations: %v", red, c.wantRed, c.body, report.Violations)
+			}
+		})
+	}
+}
+
+// TestDemonstrationMatchesTheRuleItDemonstrates is finding F3: a case whose fixture breaks a second
+// rule in the same file under the same clause must not stay green when the rule it exists to
+// demonstrate goes quiet. Matching therefore takes the reason as well as the clause and the file.
+func TestDemonstrationMatchesTheRuleItDemonstrates(t *testing.T) {
+	node := Demonstrations[len(Demonstrations)-1]
+	if node.Name != "node-lifecycle-scripts" {
+		t.Fatalf("this test is aimed at the node demonstration; the last case is %q", node.Name)
+	}
+
+	// What the node fixture really produces: TWO P4 refusals naming package.json, because it has
+	// neither an .npmrc nor a lockfile beside it. Only one of them is the lifecycle-scripts rule.
+	root, cleanup, err := CaseTree(repoRoot, node)
+	if err != nil {
+		t.Fatalf("CaseTree: %v", err)
+	}
+	report, err := Scan(root)
+	cleanup()
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	sameClauseAndFile := 0
+	for _, v := range report.Violations {
+		if v.Clause.ID == node.Clause.ID && v.File == node.File {
+			sameClauseAndFile++
+		}
+	}
+	if sameClauseAndFile < 2 {
+		t.Fatalf("the node fixture produces %d refusals under %s naming %s; this test asserts the matcher can tell them apart and needs at least 2",
+			sameClauseAndFile, node.Clause.ID, node.File)
+	}
+
+	// The mutation: the lifecycle-scripts refusal is gone and only the lockfile one is left. Clause
+	// and file still match; the reason does not, and the demonstration must NOT count as red.
+	survivor := []Violation{{
+		File: node.File, Line: 2, Reference: node.File, Clause: P4,
+		Why: "no lockfile beside this manifest (package-lock.json), so the dependency tree resolves to whatever the registry serves at install time",
+	}}
+	if matchingViolation(survivor, node) != nil {
+		t.Error("the node demonstration counted as red on a refusal from a different rule: the lifecycle-scripts rule could go quiet unnoticed")
+	}
+
+	// Every demonstration must declare a reason, or the loose match comes back by omission.
+	for _, d := range Demonstrations {
+		if d.WhyContains == "" {
+			t.Errorf("demonstration %q declares no WhyContains", d.Name)
+		}
+	}
+	tmp := writeTree(t, map[string]string{})
+	if err := verifyDemonstrationTree(tmp); err == nil {
+		t.Fatal("verifyDemonstrationTree accepted a tree with no demonstrations at all")
+	}
+}
+
 // TestNodeLifecycleScriptsOptBackIn is the half of P4's node rule the committed demonstration does
 // not carry: an .npmrc that switches lifecycle scripts back ON. The tree is written here rather
 // than committed because a checked-in .npmrc is a credential-shaped file, and this repository has

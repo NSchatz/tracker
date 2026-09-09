@@ -56,7 +56,10 @@ not narrow the invocation to get a green gate — that is the same move as `|| t
 **Every pinnable reference is pinned, and `internal/pingate` is what keeps it that way.** Images carry a
 tag AND a digest, actions carry a commit SHA with the version in a trailing comment, the Gradle wrapper
 carries a `distributionSha256Sum`, and no manifest carries a dynamic version - the org's pinning
-conventions, decided by the operator on 2026-09-07. The gate reads files and **asks no registry
+conventions, decided by the operator on 2026-09-07. An image is read **wherever this repo names one**,
+Go source included: `testsupport.PostGISImage` is the database every spatial assertion is measured
+against, it is pinned to the same `tag@digest` as the `postgis` service in `docker-compose.yml`, and the
+two move together or the stack and the tests stop being the same database. The gate reads files and **asks no registry
 anything**: it reaches the same verdict airgapped as it does in CI, because P8 is explicit that rot is
 discovered when a build fails and *not* by a scheduled liveness workflow that reds unrelated pull
 requests whenever a third party is down. Every refusal names the file, the line, the offending reference

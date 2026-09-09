@@ -508,9 +508,14 @@ under this workflow before anyone wrote a SHA down.
 
 `internal/pingate` enforces it. It runs as `make pin-check` and inside `make check`, it reads files
 and **asks no registry anything**, and every refusal names the file, the line, the offending
-reference and the clause it breaks. Five deliberately broken trees under
+reference and the clause it breaks. It reads image references wherever this repository names one:
+`Dockerfile` bases, compose services, the container and service images a workflow job could run, and
+**image references written in Go source** - the PostGIS the spatial tests start is a Go constant, and
+a gate that pinned what the stack runs while leaving what the tests measure on a floating tag would
+let those two become different databases. Five deliberately broken trees under
 `internal/pingate/testdata/refusals` keep it honest: `make pin-check` fails if fewer than all five go
-red, and it fails if any category it examines has quietly stopped finding anything.
+red, each matched on the clause, the file AND the reason so a case cannot stay green on a refusal
+from some other rule, and it fails if any category it examines has quietly stopped finding anything.
 
 Resolved **2026-09-08**. Every value below came from the command beside it; nothing was retyped.
 
@@ -518,7 +523,7 @@ Resolved **2026-09-08**. Every value below came from the command beside it; noth
 |---|---|---|
 | `golang:1.26.8-bookworm`<br>*(Dockerfile builder)* | `sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81` | `curl -s https://hub.docker.com/v2/namespaces/library/repositories/golang/tags/1.26.8-bookworm \| jq -r .digest` |
 | `gcr.io/distroless/static-debian12:nonroot`<br>*(Dockerfile runtime)* | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | `curl -s https://gcr.io/v2/distroless/static-debian12/tags/list \| jq -r '.manifest \| to_entries[] \| select(.value.tag \| index("nonroot")) \| .key'` |
-| `postgis/postgis:16-3.4`<br>*(compose database)* | `sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5` | `curl -s https://hub.docker.com/v2/namespaces/postgis/repositories/postgis/tags/16-3.4 \| jq -r .digest` |
+| `postgis/postgis:16-3.4`<br>*(compose database, and the same reference in `internal/testsupport` that every spatial test starts)* | `sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5` | `curl -s https://hub.docker.com/v2/namespaces/postgis/repositories/postgis/tags/16-3.4 \| jq -r .digest` |
 | `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` *(v4)* | `gh api repos/actions/checkout/commits/v4 --jq .sha` |
 | `actions/setup-go` | `40f1582b2485089dde7abd97c1529aa768e1baff` *(v5)* | `gh api repos/actions/setup-go/commits/v5 --jq .sha` |
 | `actions/setup-java` | `cf277c60eb25467037889841efdb72551f06f6c3` *(v4)* | `gh api repos/actions/setup-java/commits/v4 --jq .sha` |
@@ -527,8 +532,10 @@ Resolved **2026-09-08**. Every value below came from the command beside it; noth
 
 **Moving a pin is a two-minute job and is meant to be.** Run the command, paste the value into the
 file that holds it - `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml`,
-`android/gradle/wrapper/gradle-wrapper.properties` - and update the row above. `make pin-check`
-tells you if you missed one.
+`android/gradle/wrapper/gradle-wrapper.properties`, `internal/testsupport/postgis.go` - and update
+the row above. The PostGIS digest lives in **two** files, `docker-compose.yml` and
+`internal/testsupport/postgis.go`, and they must move together: the stack and the tests are meant to
+be the same database. `make pin-check` tells you if you missed one.
 
 **Why these are pins you can leave alone.** The conventions require pinning to something the
 publisher *keeps*, not just to something that resolves today. `golang:1.26.8-bookworm` is an active

@@ -23,13 +23,21 @@ import (
 const DemonstrationsDir = "internal/pingate/testdata/refusals"
 
 // Demonstration is one committed instance of a shape the conventions forbid, plus the refusal it
-// must produce. Matching on the clause AND the file is the point: "something went red" would pass
-// even if the gate red-flagged the wrong thing for the wrong reason.
+// must produce. Matching on the clause AND the file AND the reason is the point: "something went
+// red" would pass even if the gate red-flagged the wrong thing for the wrong reason.
 type Demonstration struct {
 	Name   string // directory under DemonstrationsDir
 	Shape  string // the forbidden shape, in words
 	Clause Clause // the clause the refusal must cite
 	File   string // the file inside the case the refusal must name
+
+	// WhyContains is a substring of the refusal's own explanation, and it is what makes a
+	// demonstration evidence for THIS rule rather than for any rule that happens to fire on the
+	// same file under the same clause. The node case is why it exists: that fixture has no .npmrc
+	// AND no lockfile beside it, so it earns two P4 refusals naming package.json, and matching on
+	// the clause and the file alone would keep the case green if the lifecycle-scripts rule went
+	// quiet tomorrow. A demonstration that cannot tell which rule bit it is not a demonstration.
+	WhyContains string
 
 	// CommittedAs maps the name a fixture file is COMMITTED under to the name the scanner has to
 	// see. Exactly one case needs it, and for a reason worth the machinery: a file committed as
@@ -45,28 +53,32 @@ type Demonstration struct {
 // a sixth case, or a missing one, fails the gate rather than silently narrowing what it proves.
 var Demonstrations = []Demonstration{
 	{
-		Name:   "dockerfile-tag-only",
-		Shape:  "a Dockerfile FROM carrying a tag and no digest",
-		Clause: P2,
-		File:   "Dockerfile",
+		Name:        "dockerfile-tag-only",
+		Shape:       "a Dockerfile FROM carrying a tag and no digest",
+		Clause:      P2,
+		File:        "Dockerfile",
+		WhyContains: "takes BOTH halves",
 	},
 	{
-		Name:   "compose-image-no-digest",
-		Shape:  "a compose image: for a service the file does not build, with no digest",
-		Clause: P1,
-		File:   "docker-compose.yml",
+		Name:        "compose-image-no-digest",
+		Shape:       "a compose image: for a service the file does not build, with no digest",
+		Clause:      P1,
+		File:        "docker-compose.yml",
+		WhyContains: "so it pulls a published image",
 	},
 	{
-		Name:   "workflow-mutable-tag",
-		Shape:  "a workflow uses: naming a mutable tag instead of a commit SHA",
-		Clause: P3,
-		File:   ".github/workflows/ci.yml",
+		Name:        "workflow-mutable-tag",
+		Shape:       "a workflow uses: naming a mutable tag instead of a commit SHA",
+		Clause:      P3,
+		File:        ".github/workflows/ci.yml",
+		WhyContains: "names a tag or a branch",
 	},
 	{
-		Name:   "manifest-dynamic-version",
-		Shape:  "a dependency manifest carrying a dynamic version",
-		Clause: P4,
-		File:   "android/gradle/libs.versions.toml",
+		Name:        "manifest-dynamic-version",
+		Shape:       "a dependency manifest carrying a dynamic version",
+		Clause:      P4,
+		File:        "android/gradle/libs.versions.toml",
+		WhyContains: "Gradle's dynamic version",
 	},
 	{
 		Name:        "node-lifecycle-scripts",
@@ -74,6 +86,7 @@ var Demonstrations = []Demonstration{
 		Clause:      P4,
 		File:        "package.json",
 		CommittedAs: map[string]string{"package.json.committed": "package.json"},
+		WhyContains: "npm runs dependency lifecycle scripts by default",
 	},
 }
 
@@ -158,18 +171,26 @@ func RunDemonstrations(root string) (int, error) {
 			continue
 		}
 		problems = append(problems, fmt.Errorf(
-			"refusal demonstration %q (%s) did NOT produce a %s refusal naming %s - the gate has stopped catching this shape.\n  violations it did produce: %s",
-			d.Name, d.Shape, d.Clause.ID, d.File, describeViolations(report.Violations)))
+			"refusal demonstration %q (%s) did NOT produce a %s refusal naming %s and explaining %q - the gate has stopped catching this shape.\n  violations it did produce: %s",
+			d.Name, d.Shape, d.Clause.ID, d.File, d.WhyContains, describeViolations(report.Violations)))
 	}
 
 	return red, errors.Join(problems...)
 }
 
+// matchingViolation finds the refusal a demonstration exists to produce. All three of the clause,
+// the file and the reason must match: a case whose fixture happens to break a second rule in the
+// same file under the same clause would otherwise stay green after the rule it demonstrates went
+// quiet, and the gate would go on reporting five red demonstrations while proving four.
 func matchingViolation(violations []Violation, d Demonstration) *Violation {
 	for i := range violations {
-		if violations[i].Clause.ID == d.Clause.ID && violations[i].File == d.File {
-			return &violations[i]
+		if violations[i].Clause.ID != d.Clause.ID || violations[i].File != d.File {
+			continue
 		}
+		if d.WhyContains != "" && !strings.Contains(violations[i].Why, d.WhyContains) {
+			continue
+		}
+		return &violations[i]
 	}
 	return nil
 }
@@ -225,6 +246,11 @@ func verifyDemonstrationTree(root string) error {
 			DemonstrationsDir, len(Demonstrations), strings.Join(stray, ", ")))
 	}
 	for _, d := range Demonstrations {
+		if d.WhyContains == "" {
+			problems = append(problems, fmt.Errorf(
+				"refusal demonstration %q declares no WhyContains, so ANY %s refusal naming %s would satisfy it, whichever rule produced it; name a substring of the explanation the rule under demonstration writes",
+				d.Name, d.Clause.ID, d.File))
+		}
 		if !found[d.Name] {
 			problems = append(problems, fmt.Errorf("refusal demonstration %q (%s) is not committed under %s", d.Name, d.Shape, DemonstrationsDir))
 			continue

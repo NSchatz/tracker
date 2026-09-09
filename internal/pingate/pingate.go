@@ -169,6 +169,7 @@ type scanner func(root string, r *Report) error
 var scanners = []scanner{
 	scanDockerfiles,
 	scanComposeFiles,
+	scanGoSources,
 	scanWorkflows,
 	scanGoModule,
 	scanMakefile,

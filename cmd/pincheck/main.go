@@ -1,9 +1,10 @@
 // Command pincheck is the `pin-check` step of `make check`.
 //
 // It reads every pinnable reference in the working tree - Dockerfile bases, compose service images,
-// workflow actions, the Go module graph, the Makefile's tool versions, the Gradle wrapper
-// distribution, the Gradle version catalog and any node manifest - and refuses one that does not
-// name exactly what it will get, naming the file, the line, the reference and the clause of
+// image references named in Go source, workflow actions and the container images a workflow job
+// runs, the Go module graph, the Makefile's tool versions, the Gradle wrapper distribution, the
+// Gradle version catalog and any node manifest - and refuses one that does not name exactly what it
+// will get, naming the file, the line, the reference and the clause of
 // documentation/pinning-conventions.md it breaks.
 //
 // It exists as a command as well as a test so the pin verdict is reachable on its own, on a machine
