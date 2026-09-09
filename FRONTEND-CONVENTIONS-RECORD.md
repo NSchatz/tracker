@@ -157,10 +157,10 @@ and `#panel` at each operating-system preference. It looks for no class and asks
 the wallpaper - dynamic colour (API 31+) made this screen's contrast a property of whatever picture
 the user had set, which no check can grade. Each of the three accessibility claims is therefore
 graded twice, with the DEVICE put into light and then dark mode (`cmd uimode night`) rather than a
-flag the test set on itself, and each has a demonstration in each theme. The contrast mutation is chosen per
-theme for the same reason the claim is: a grey that measures 1.7:1 on a white card measures nearly
-9:1 on a dark one, so a theme-blind mutation would leave the dark demonstration green while looking
-broken - which is half of why F21's demonstration could not be shown failing.
+flag the test set on itself, and each has a demonstration in each theme. The contrast mutation is
+chosen per theme for the same reason the claim is: a grey that measures 1.7:1 on a white card
+measures nearly 9:1 on a dark one, so a theme-blind mutation would leave the dark demonstration green
+while looking broken - which is half of why F21's demonstration could not be shown failing.
 
 ## MAP-VERIFICATION.md
 

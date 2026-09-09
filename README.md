@@ -547,15 +547,15 @@ demonstration beside it. Deleting, renaming or `@Ignore`-ing a demonstration fai
 each is an exit-non-zero naming the criterion, the missing prerequisite and how to obtain it, exactly
 as `make android` does for a missing SDK and `make test` for a missing Docker daemon. `make
 verify-ui-refusal` is the check that keeps that true, and it DRIVES each of the seven absences
-separately — the browser engine and its driver, then the Android SDK, the emulator package, the
-system image, the AVD and a device that never finishes booting — rather than trusting one refusal to
+separately - the browser engine and its driver, then the Android SDK, the emulator package, the
+system image, the AVD and a device that never finishes booting - rather than trusting one refusal to
 stand for all of them, and it prints its own count of them. The clause-by-clause record, for both
 surfaces, is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make
 verify-ui-record` refuses a record naming an assertion that did not actually run.
 
 **Every clause is answered on both surfaces, and no clause is answered by an item name.** F1 and F10
-on the Android screen — the platform accessibility sweep in both themes, and operability without a
-pointer — are carried by named assertions in the record, each with its own mutation and each shown
+on the Android screen - the platform accessibility sweep in both themes, and operability without a
+pointer - are carried by named assertions in the record, each with its own mutation and each shown
 going red. The route that would let a record cell answer a clause with an item instead of evidence is
 fenced shut rather than merely unused: the list of clause/surface pairs on which that is legal is
 **empty** in `internal/uiverify/record.go`, so there is no cell anyone can write which makes an
