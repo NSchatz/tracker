@@ -10,10 +10,13 @@
 
 services:
   postgis:
-    # Pinned. Every spatial assertion tracker makes is an assertion about a specific
-    # PostGIS version's behaviour, so a floating tag would let the thing under test change
-    # without the tests changing.
-    image: postgis/postgis:16-3.4
+    # Pinned by TAG AND DIGEST (pinning conventions P1). Every spatial assertion tracker
+    # makes is an assertion about a specific PostGIS version's behaviour, so a floating tag
+    # would let the thing under test change without the tests changing - and a tag alone is
+    # a floating tag, because a publisher can move it. The tag stays here for a human to
+    # read; the digest is what resolves. Provenance and the refresh command are in
+    # README.md, "Pinned references".
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
     restart: unless-stopped
     environment:
       POSTGRES_USER: tracker
@@ -49,6 +52,12 @@ services:
   tracker:
     build:
       context: .
+    # NOT digest-pinned, and the pinning check does not ask it to be: this service is
+    # BUILT from this repository's own context, so `image:` is the local name compose
+    # tags the build output with. There is no publisher and therefore no digest to
+    # resolve; what pins this image is the pinned `FROM` lines in the Dockerfile above
+    # it. A compose service that names an image it does NOT build is a different thing
+    # entirely, and the check refuses that one without a digest (P1).
     image: tracker:dev
     # `unless-stopped`, NOT a bounded `on-failure:N`.
     #

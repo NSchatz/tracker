@@ -1,0 +1,8 @@
+{
+  "name": "refusal-demonstration-node-lifecycle-scripts",
+  "private": true,
+  "description": "DELIBERATELY BROKEN. Do not fix. A node manifest with lifecycle scripts ENABLED and no reason: npm runs a dependency's install and postinstall scripts by default, and nothing in this tree turns them off or says why they are on. There is no .npmrc beside this file and no lockfile either, so installing it would run arbitrary code from the dependency graph against a tree resolved at install time. internal/pingate must refuse it under P4. tracker has no node in it today; this tree is what the gate will do on the day someone adds some.",
+  "dependencies": {
+    "left-pad": "1.3.0"
+  }
+}

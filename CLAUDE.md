@@ -17,8 +17,9 @@ don't build the next one because it seems easy.
 
 ```bash
 make check     # BOTH stacks: check-go + android
-make check-go  # gofmt · vet · build · test -race · staticcheck · govulncheck
+make check-go  # gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check
 make android   # ./gradlew assembleDebug lintDebug testDebugUnitTest
+make pin-check # the supply-chain pin gate alone - no daemon, no SDK, no network
 make smoke     # the real compose stack; asserts /healthz answers 200
 ```
 
@@ -51,6 +52,31 @@ object at whatever depth it was traced to, and it refuses a stream whose `config
 less than `scan_level: symbol` / `scan_mode: source`. Reading the text report is reading **part** of the
 verdict, and `.govulncheck-suppressions.yaml` is the only thing allowed to make the verdict smaller. Do
 not narrow the invocation to get a green gate — that is the same move as `|| true`, spelled differently.
+
+**Every pinnable reference is pinned, and `internal/pingate` is what keeps it that way.** Images carry a
+tag AND a digest, actions carry a commit SHA with the version in a trailing comment, the Gradle wrapper
+carries a `distributionSha256Sum`, and no manifest carries a dynamic version - the org's pinning
+conventions, decided by the operator on 2026-09-07. An image is read **wherever this repo names one**,
+Go source included: `testsupport.PostGISImage` is the database every spatial assertion is measured
+against, it is pinned to the same `tag@digest` as the `postgis` service in `docker-compose.yml`, and the
+two move together or the stack and the tests stop being the same database. The gate reads files and **asks no registry
+anything**: it reaches the same verdict airgapped as it does in CI, because P8 is explicit that rot is
+discovered when a build fails and *not* by a scheduled liveness workflow that reds unrelated pull
+requests whenever a third party is down. Every refusal names the file, the line, the offending reference
+and the broken clause. Five deliberately broken trees under `internal/pingate/testdata/refusals` are the
+proof it still bites, and the check fails if fewer than five go red or if any category it examines has
+quietly stopped finding anything. Do not "fix" those trees, do not add a `pin-check` step to `ci.yml`
+(`make check` already reaches it), and when you move a pin, move the provenance row in `README.md` with
+it. New pinned reference to resolve? Get the value from the publisher once and write it down; a pin
+resolved twice can silently differ.
+
+**The Claude Code tool layer refuses to write `android/gradle/wrapper/gradle-wrapper.properties`**, and
+`.npmrc` with it: they are on its built-in sensitive-file list, so `Edit` and `Write` are both denied
+there no matter what an approved spec says. Do not route around that with `sed`, `python3` or
+`git apply`. The standing rule in the umbrella is that such a file is applied by hand, at the root, on
+the item's branch, and the session's job is to finish everything else and say precisely which file, line
+and value are outstanding. The wrapper's `distributionSha256Sum` is the pin that reached tracker this
+way; the next one will too.
 
 As of **C0** the gate carries **both stacks**: the Go server (above) **and** the Android client
 (`android/` — assemble + Android Lint + JVM unit tests). So the gate env now needs **both** a reachable

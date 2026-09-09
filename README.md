@@ -452,7 +452,8 @@ schema **owner** (it provisions and drops partitions). See [`THREAT-MODEL.md`](T
 ## Development
 
 ```bash
-make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck
+make check     # THE gate: gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check
+make pin-check # the supply-chain pin gate alone - no daemon, no SDK, no network
 make smoke     # brings the real stack up and asserts /healthz answers 200
 ```
 
@@ -496,6 +497,64 @@ it. It runs inside `make check`, so a half-landed bump fails and names the files
 leaving CI to prove things with a compiler production never runs. That matters more than it sounds:
 `govulncheck` scans the standard library of whichever toolchain executes it, so a split pin is a
 vulnerability gate that answers differently depending on where it ran.
+
+### Pinned references
+
+Every image this repo pulls, every action its workflow runs and the Gradle distribution its wrapper
+downloads is pinned by **tag *and* digest**, per the org's pinning conventions (operator decision,
+2026-09-07). The tag is what a human reads; the digest is what actually resolves. A tag alone is a
+**floating** reference - its publisher moves it, and two of the four actions below had already moved
+under this workflow before anyone wrote a SHA down.
+
+`internal/pingate` enforces it. It runs as `make pin-check` and inside `make check`, it reads files
+and **asks no registry anything**, and every refusal names the file, the line, the offending
+reference and the clause it breaks. It reads image references wherever this repository names one:
+`Dockerfile` bases, compose services, the container and service images a workflow job could run, and
+**image references written in Go source** - the PostGIS the spatial tests start is a Go constant, and
+a gate that pinned what the stack runs while leaving what the tests measure on a floating tag would
+let those two become different databases. Five deliberately broken trees under
+`internal/pingate/testdata/refusals` keep it honest: `make pin-check` fails if fewer than all five go
+red, each matched on the clause, the file AND the reason so a case cannot stay green on a refusal
+from some other rule, and it fails if any category it examines has quietly stopped finding anything.
+
+Resolved **2026-09-08**. Every value below came from the command beside it; nothing was retyped.
+
+| reference | pinned to | re-resolve with |
+|---|---|---|
+| `golang:1.26.8-bookworm`<br>*(Dockerfile builder)* | `sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81` | `curl -s https://hub.docker.com/v2/namespaces/library/repositories/golang/tags/1.26.8-bookworm \| jq -r .digest` |
+| `gcr.io/distroless/static-debian12:nonroot`<br>*(Dockerfile runtime)* | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | `curl -s https://gcr.io/v2/distroless/static-debian12/tags/list \| jq -r '.manifest \| to_entries[] \| select(.value.tag \| index("nonroot")) \| .key'` |
+| `postgis/postgis:16-3.4`<br>*(compose database, and the same reference in `internal/testsupport` that every spatial test starts)* | `sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5` | `curl -s https://hub.docker.com/v2/namespaces/postgis/repositories/postgis/tags/16-3.4 \| jq -r .digest` |
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` *(v4)* | `gh api repos/actions/checkout/commits/v4 --jq .sha` |
+| `actions/setup-go` | `40f1582b2485089dde7abd97c1529aa768e1baff` *(v5)* | `gh api repos/actions/setup-go/commits/v5 --jq .sha` |
+| `actions/setup-java` | `cf277c60eb25467037889841efdb72551f06f6c3` *(v4)* | `gh api repos/actions/setup-java/commits/v4 --jq .sha` |
+| `android-actions/setup-android` | `9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407` *(v3)* | `gh api repos/android-actions/setup-android/commits/v3 --jq .sha` |
+| `gradle-8.9-bin.zip`<br>*(wrapper distribution, SHA-256 of the archive, not an image digest)* | `d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab` | `curl -s https://services.gradle.org/distributions/gradle-8.9-bin.zip.sha256` |
+
+**Moving a pin is a two-minute job and is meant to be.** Run the command, paste the value into the
+file that holds it - `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml`,
+`android/gradle/wrapper/gradle-wrapper.properties`, `internal/testsupport/postgis.go` - and update
+the row above. The PostGIS digest lives in **two** files, `docker-compose.yml` and
+`internal/testsupport/postgis.go`, and they must move together: the stack and the tests are meant to
+be the same database. `make pin-check` tells you if you missed one.
+
+**Why these are pins you can leave alone.** The conventions require pinning to something the
+publisher *keeps*, not just to something that resolves today. `golang:1.26.8-bookworm` is an active
+official-library tag whose digests Docker Hub retains. `postgis/postgis:16-3.4` has not moved since
+2024-10-14, which is what a stable database tag looks like. The distroless `nonroot` index is one of
+fifteen aliases gcr.io keeps for that image. Action values are git commit SHAs, which do not expire.
+The Gradle checksum is published beside a released distribution and never changes for that version.
+
+**Two costs, stated rather than buried.** Pinning `postgis/postgis:16-3.4` by digest freezes that
+database image at its 2024-10-14 build, **including its security refreshes**, until someone moves the
+pin - that is the trade for a stack whose spatial behaviour cannot change underneath the tests that
+assert it. And that tag publishes a **linux/amd64 manifest only**, so pinning its digest removes no
+platform the tag offered, but it does turn a would-be arm64 pull into a digest-level failure rather
+than a tag-level one.
+
+**No scheduled liveness check, deliberately.** This repo does not ask a third party every night
+whether it is still up; a gate that does reds every unrelated pull request whenever someone else has
+a bad afternoon. Rot is discovered when a build fails, and the defences that make that survivable
+are the retention argument above and refusals that say precisely which pin and which file.
 
 ## Known limitations
 
