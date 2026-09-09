@@ -51,17 +51,17 @@ var Clauses = []string{"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F1
 const deferralPrefix = "deferred to "
 
 // splitPairs are the ONLY clause/surface pairs a deferral may appear on, and the item that carries
-// each. They are the two rows S0056's clause map marks "SPLIT to S0074" after that item was narrowed
-// on 2026-09-09; every other pair must still name an assertion that ran or an exemption saying the
-// clause cannot apply.
+// each. It is EMPTY, and that is the state of the repository rather than an oversight: F1 and F10 on
+// the android screen were the two rows S0056's clause map marked "SPLIT to S0074" when that item was
+// narrowed on 2026-09-09, and S0074 has graded them, so no clause is answered by a deferral any
+// more. Every pair must name an assertion that ran or an exemption saying the clause cannot apply.
 //
-// This is a hard-coded ceiling on purpose. A deferral is the one disposition that answers a clause
-// with neither evidence nor a reason it needs none, so it must not be reachable by editing the
-// record alone: widening this map is a source change with a name on it and a diff a reviewer sees.
-var splitPairs = map[string]string{
-	"F1|" + AndroidSurface:  "S0074-tracker-android-a11y-operability",
-	"F10|" + AndroidSurface: "S0074-tracker-android-a11y-operability",
-}
+// Leaving the machinery in place with nothing in the map is deliberate on both counts. A deferral is
+// the one disposition that answers a clause with neither evidence nor a reason it needs none, so it
+// must not be reachable by editing the record alone: an empty map makes every deferral illegal
+// TODAY, including one this item might have written for its own criteria, and re-opening the route
+// for a future split is a source change with a name on it and a diff a reviewer sees.
+var splitPairs = map[string]string{}
 
 // parkedSuite is the instrumented suite whose @Ignore'd cases must match the record's deferrals.
 var parkedSuite = filepath.Join(
@@ -300,9 +300,13 @@ func deferralProblems(key string, row recordRow, run surfaceRun) []string {
 	owner, allowed := splitPairs[key]
 	switch {
 	case !allowed:
+		legal := strings.Join(sortedKeys(splitPairs), ", ")
+		if legal == "" {
+			legal = "none: no clause is split to another item today"
+		}
 		problems = append(problems, fmt.Sprintf(
 			"%s is recorded as deferred to %q, but a deferral is only legal on the clause/surface pairs the narrowed spec marks SPLIT (%s); every other pair must name an assertion that ran or an exemption saying the clause cannot apply",
-			where, row.DeferredTo, strings.Join(sortedKeys(splitPairs), ", ")))
+			where, row.DeferredTo, legal))
 	case row.DeferredTo != owner:
 		problems = append(problems, fmt.Sprintf(
 			"%s is deferred to %q, but this pair is carried by %q; a deferral naming the wrong item points a reader at work nobody is doing",

@@ -96,15 +96,25 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
+      # EVERY step below carries `if: success() || failure()`, and that is the criterion rather than
+      # a convenience. A job whose steps run only while the ones before them are green reports
+      # `skipped` for the rest on exactly the day a route goes red - which is the day their answer
+      # is worth having. While the emulator route was failing, the refusal check and the record
+      # check reported `skipped` on every run of that branch, so a workflow that looked as though it
+      # executed all four had executed two. Each route now runs, reports its own result, and the
+      # build still fails if any of them did. A cancelled run still skips them.
+
       # The map's rendered claims, in a real browser engine. The runner image ships Google Chrome;
       # cmd/uiverify finds it on PATH and exits non-zero naming it if it ever stops being there.
       - name: make verify-ui (the browser map)
+        if: success() || failure()
         run: make verify-ui
 
       # Hardware acceleration for the emulator. Without /dev/kvm an x86_64 Android image does not
       # boot at all — it segfaults under QEMU's interpreter — so this is a prerequisite, not a
       # speed-up, and `scripts/android-emulator.sh` says so by name when it is absent.
       - name: enable KVM
+        if: success() || failure()
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -115,7 +125,12 @@ jobs:
       # that looks for it cannot disagree about where it lives - avdmanager's default has moved
       # across cmdline-tools releases, and a mismatch reads as "no emulator", which is the one thing
       # this route must never say when there is one.
+      #
+      # It provisions unconditionally for the same reason: an emulator route that was skipped for
+      # want of an AVD because the BROWSER route went red would be reporting on the workflow rather
+      # than on the Android screen.
       - name: provision the emulator
+        if: success() || failure()
         env:
           ANDROID_AVD_HOME: ${{ github.workspace }}/.avd
         run: |
@@ -129,18 +144,13 @@ jobs:
           ls -la "$ANDROID_AVD_HOME"
 
       # The Android screen's rendered claims, on that emulator, with the platform accessibility
-      # checks enabled over every rendered view.
+      # checks enabled over every rendered view and each of them measured here as well.
       - name: make verify-ui-android (the Android screen)
+        if: success() || failure()
         run: make verify-ui-android
 
       # Both routes, with their prerequisite removed, must exit non-zero naming what is missing.
       # This is the check that keeps the two above from ever degrading into a silent skip.
-      #
-      # `if: success() || failure()` because a step that only ever runs after a green emulator route
-      # is a step that never runs on the day it matters: while the route above was red these two
-      # reported `skipped` on every run of the branch, so AC24's "execute ... the refusal check and
-      # the record check" was not being met by a workflow that looked as though it did. A cancelled
-      # run still skips them.
       - name: make verify-ui-refusal (the refusal paths still bite)
         if: success() || failure()
         run: make verify-ui-refusal

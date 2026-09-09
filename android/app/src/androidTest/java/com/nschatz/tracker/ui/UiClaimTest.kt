@@ -21,7 +21,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,14 +47,23 @@ import org.junit.runner.RunWith
  * draws and what the PLATFORM's accessibility service reports about it, and a fake would only ever
  * assert what we already believed.
  *
- * ### Eight cases are @Ignore'd, and that is fenced rather than trusted
+ * ### Nothing here is @Ignore'd, and that is checked rather than trusted
  *
- * The AC13 and AC14 cases below belong to S0074-tracker-android-a11y-operability, not to the item
- * that wrote this file. They are kept verbatim as the artefacts that item inherits. An @Ignore here
- * is only legal while FRONTEND-CONVENTIONS-RECORD.md defers the matching clause/surface pair to a
- * named item: `uiverify record` compares the ignored set against the deferred set, refuses a
- * deferral on any pair the spec's clause map does not mark SPLIT, and refuses a half-ignored
- * claim/demonstration pair. See the "Deferred clauses" section of that record.
+ * The AC13 and AC14 cases were parked when S0056 was narrowed; they are graded here again, and
+ * FRONTEND-CONVENTIONS-RECORD.md names them rather than deferring them. `uiverify record` refuses a
+ * deferral on any clause/surface pair at all now, and compares the record's (empty) deferred set
+ * against this file's `@Ignore`d set in both directions - so an `@Ignore` added here turns
+ * `make verify-ui-record` red until the record says so out loud, and no record cell can be written
+ * that would make one legal.
+ *
+ * ### One mutation per claim
+ *
+ * AC13 makes four claims - contrast, touch target size, a non-empty spoken name, and no state
+ * carried by colour alone - and each has a mutation that breaks THAT claim and no other, run in both
+ * themes. Impl-gate finding F21 was one mutation breaking two claims at once: the sweep reported
+ * nothing, and nothing in the result could say which of the two checks was blind. Each demonstration
+ * below therefore reads the failure MESSAGE and requires it to name the mutated view and this
+ * claim's own check, which is what makes it a guard rather than a formality.
  */
 @RunWith(AndroidJUnit4::class)
 class UiClaimTest {
@@ -76,6 +84,10 @@ class UiClaimTest {
         UiHarness.clearConfig()
         UiHarness.resetDisplayProfile()
         UiHarness.setNightMode(false)
+        // The AC14 cases take every input method out of service so that no on-screen keyboard sits
+        // between the directional keys and the screen. Put the device back whichever case just ran,
+        // so a later one never inherits a half-configured device.
+        UiHarness.restoreInputMethods()
     }
 
     // --- AC12: brevity, the explanation destination, and a 360dp layout -------------------------
@@ -247,145 +259,239 @@ class UiClaimTest {
         )
     }
 
-    // --- AC13 and AC14: PARKED, and owned by another item ---------------------------------------
+    // --- AC13: the platform accessibility checks, one claim at a time ---------------------------
     //
-    // The eight cases below grade the Android screen's accessibility and its operability without a
-    // pointer. They are NOT criteria of S0056 any more: that item was narrowed on 2026-09-09 and
-    // both criteria, with the two impl-gate findings that parked them, moved to
-    // S0074-tracker-android-a11y-operability.
-    //
-    // They are kept here VERBATIM rather than deleted, because they are the failing artefacts the
-    // new item inherits - the honest test for each defect is the instrumented case that is already
-    // red, and re-deriving one later from a description is how a defect gets lost.
-    //
-    // @Ignore is normally the dodge this whole route exists to close, so it is fenced:
-    // FRONTEND-CONVENTIONS-RECORD.md carries a DEFERRAL row for F1 and F10 on the android screen
-    // naming exactly these four claims and the item that owns them, `uiverify record` refuses a
-    // deferral on any other clause/surface pair, refuses one naming a different item, refuses an
-    // ignored case whose pair-partner still runs, and refuses if the ignored set and the deferred
-    // set are not the same set. Ignoring a ninth case here therefore fails `make verify-ui-record`
-    // until the record says so out loud.
+    // Four claims, each graded in BOTH themes, each with its own demonstration against a screen
+    // mutated to break THAT claim and no other. Sixteen cases where S0056 had six, and the reason is
+    // impl-gate finding F21: one mutation broke two claims at once, the sweep reported nothing, and
+    // there was no way to tell which of the two checks was blind. A demonstration that cannot say
+    // which claim stayed green is not a guard, it is a formality.
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F21): the platform sweep stayed " +
-            "green against a surface broken to break it, so its pass is not evidence. Parked with " +
-            "AC13; FRONTEND-CONVENTIONS-RECORD.md defers F1 and F10 on this surface to that item.",
-    )
-    fun AC13_platform_checks_pass_light() {
+    fun AC13_contrast_light() {
         UiHarness.setNightMode(false)
         UiHarness.launch()
-        platformChecksPass("light")
+        contrastMeetsTheFloor("light")
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F21): this demonstration is the " +
-            "one that goes red - ACCESSIBILITY_DEFECT put a 20dp unlabelled control and sub-floor " +
-            "text on the glass and the Accessibility Test Framework reported zero ERRORs.",
-    )
-    fun AC13_platform_checks_pass_light_demonstration() {
+    fun AC13_contrast_light_demonstration() {
         UiHarness.setNightMode(false)
-        UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
-        assertFails("an accessibility defect was not caught by the platform checks") { platformChecksPass("light") }
+        UiHarness.launch(UiMutation.CONTRAST_BELOW_FLOOR)
+        assertFailsNaming("collection-running", "contrast", "light") { contrastMeetsTheFloor("light") }
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F21): parked with its " +
-            "demonstration, which is the half that goes red.",
-    )
-    fun AC13_platform_checks_pass_dark() {
+    fun AC13_contrast_dark() {
         UiHarness.setNightMode(true)
         UiHarness.launch()
-        platformChecksPass("dark")
+        contrastMeetsTheFloor("dark")
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F21): the dark half of the same " +
-            "defect - the sweep produced results and still returned no ERROR.",
-    )
-    fun AC13_platform_checks_pass_dark_demonstration() {
+    fun AC13_contrast_dark_demonstration() {
         UiHarness.setNightMode(true)
-        UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
-        assertFails("an accessibility defect was not caught by the platform checks") { platformChecksPass("dark") }
-    }
-
-    private fun platformChecksPass(theme: String) {
-        compose.waitForIdle()
-        Thread.sleep(500)
-
-        // AC13 says "on every rendered view", and the platform's checks only ever see the window as
-        // it is RIGHT NOW. The home screen scrolls and is taller than a phone viewport, so a single
-        // sweep inspects the top and reports a clean bill of health for everything below it - which
-        // is exactly what the first emulator run did: it passed this claim twice while the
-        // collection card, carrying both of the mutation's defects, was off the glass. So every card
-        // is scrolled into view and swept.
-        val runs = mutableListOf<AtfRun>()
-        for (tag in listOf("card-permissions", "card-server", "card-collection")) {
-            compose.onNodeWithTag(tag).performScrollTo()
-            compose.waitForIdle()
-            Thread.sleep(400)
-            runs.add(UiHarness.accessibilityErrors())
-        }
-
-        val results = runs.sumOf { it.resultCount }
-        assertTrue(
-            "the accessibility checks produced no results at all in the $theme theme " +
-                "(${runs.joinToString("; ") { it.note }}), so a clean sweep would prove nothing",
-            results > 0,
-        )
-        val failed = runs.filter { it.errors.isNotEmpty() }
-        assertTrue(
-            "the platform accessibility checks failed in the $theme theme:\n  " +
-                failed.joinToString("\n  ") { it.describe() },
-            failed.isEmpty(),
-        )
+        UiHarness.launch(UiMutation.CONTRAST_BELOW_FLOOR)
+        assertFailsNaming("collection-running", "contrast", "dark") { contrastMeetsTheFloor("dark") }
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability: AC13 moved there whole on 2026-09-09, and this " +
-            "case is green - it is parked with its criterion rather than because it fails, so the " +
-            "new item inherits a working assertion beside the two broken ones.",
-    )
-    fun AC13_no_state_by_colour_alone() {
-        CollectionStatus.recordBlocked(
-            TroubleKind.PERMISSION_LOST,
-            "Location permission was revoked, so collection stopped.",
-        )
+    fun AC13_target_size_light() {
+        UiHarness.setNightMode(false)
         UiHarness.launch()
-        noStateByColourAlone()
+        everyTargetMeetsTheFloor("light")
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability: parked with its claim - an ignored demonstration " +
-            "beside a running claim is the exact AC18 dodge, so the pair moves together.",
-    )
-    fun AC13_no_state_by_colour_alone_demonstration() {
-        CollectionStatus.recordBlocked(
-            TroubleKind.PERMISSION_LOST,
-            "Location permission was revoked, so collection stopped.",
-        )
+    fun AC13_target_size_light_demonstration() {
+        UiHarness.setNightMode(false)
+        UiHarness.launch(UiMutation.TARGET_BELOW_FLOOR)
+        assertFailsNaming("action-collection", "touch target size", "light") { everyTargetMeetsTheFloor("light") }
+    }
+
+    @Test
+    fun AC13_target_size_dark() {
+        UiHarness.setNightMode(true)
+        UiHarness.launch()
+        everyTargetMeetsTheFloor("dark")
+    }
+
+    @Test
+    fun AC13_target_size_dark_demonstration() {
+        UiHarness.setNightMode(true)
+        UiHarness.launch(UiMutation.TARGET_BELOW_FLOOR)
+        assertFailsNaming("action-collection", "touch target size", "dark") { everyTargetMeetsTheFloor("dark") }
+    }
+
+    @Test
+    fun AC13_spoken_name_light() {
+        UiHarness.setNightMode(false)
+        UiHarness.launch()
+        everyControlHasASpokenName("light")
+    }
+
+    @Test
+    fun AC13_spoken_name_light_demonstration() {
+        UiHarness.setNightMode(false)
+        UiHarness.launch(UiMutation.CONTROL_WITHOUT_A_NAME)
+        assertFailsNaming("action-collection", "spoken name", "light") { everyControlHasASpokenName("light") }
+    }
+
+    @Test
+    fun AC13_spoken_name_dark() {
+        UiHarness.setNightMode(true)
+        UiHarness.launch()
+        everyControlHasASpokenName("dark")
+    }
+
+    @Test
+    fun AC13_spoken_name_dark_demonstration() {
+        UiHarness.setNightMode(true)
+        UiHarness.launch(UiMutation.CONTROL_WITHOUT_A_NAME)
+        assertFailsNaming("action-collection", "spoken name", "dark") { everyControlHasASpokenName("dark") }
+    }
+
+    @Test
+    fun AC13_no_state_by_colour_alone_light() {
+        UiHarness.setNightMode(false)
+        aDegradedStateIsOnTheScreen()
+        UiHarness.launch()
+        noStateByColourAlone("light")
+    }
+
+    @Test
+    fun AC13_no_state_by_colour_alone_light_demonstration() {
+        UiHarness.setNightMode(false)
+        aDegradedStateIsOnTheScreen()
         UiHarness.launch(UiMutation.WARNING_BY_COLOUR_ONLY)
-        assertFails("a warning carried only by its colour was not caught") { noStateByColourAlone() }
+        assertFailsNaming("collection-error", "state carried by colour alone", "light") { noStateByColourAlone("light") }
     }
 
-    private fun noStateByColourAlone() {
-        compose.waitForIdle()
-        val warning = compose.onNodeWithTag("collection-error").fetchSemanticsNode()
-        val text = warning.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text } ?: ""
-        assertTrue(
-            "the degraded state renders \"$text\", which names no state in words - a reader who cannot " +
-                "see the error colour is told nothing",
-            text.contains("Warning", ignoreCase = true),
+    @Test
+    fun AC13_no_state_by_colour_alone_dark() {
+        UiHarness.setNightMode(true)
+        aDegradedStateIsOnTheScreen()
+        UiHarness.launch()
+        noStateByColourAlone("dark")
+    }
+
+    @Test
+    fun AC13_no_state_by_colour_alone_dark_demonstration() {
+        UiHarness.setNightMode(true)
+        aDegradedStateIsOnTheScreen()
+        UiHarness.launch(UiMutation.WARNING_BY_COLOUR_ONLY)
+        assertFailsNaming("collection-error", "state carried by colour alone", "dark") { noStateByColourAlone("dark") }
+    }
+
+    private fun aDegradedStateIsOnTheScreen() {
+        CollectionStatus.recordBlocked(
+            TroubleKind.PERMISSION_LOST,
+            "Location permission was revoked, so collection stopped.",
         )
-        // The running/stopped state is a word.
+    }
+
+    // --- the four measuring functions ------------------------------------------------------------
+
+    /**
+     * Every rendered text measures at or above the WCAG 2.2 AA floor against the background it is
+     * actually painted on.
+     *
+     * The ratio is computed here, from the emulator's own screenshot and the platform's own node
+     * tree, because the platform check that would otherwise answer this cannot report at ERROR what
+     * it had to infer from a screenshot - and a hierarchy built from an `AccessibilityNodeInfo` tree,
+     * which is the only kind a Compose surface has, gives it nothing else to go on. Filtering that
+     * check's results to ERROR is how finding F21's sweep came back clean over sub-floor text. Its
+     * ERRORs are still failures here; they are no longer the only way this claim can fail.
+     */
+    private fun contrastMeetsTheFloor(theme: String) {
+        val run = sweepEveryCard(theme, "contrast", measureContrast = true)
+        val texts = run.nodes.filter { it.isRenderedText() }
+        val measured = texts.filter { it.contrast != null }.distinctBy { it.name() + it.bounds.toShortString() }
+        assertTrue(
+            "contrast: no rendered text in the $theme theme could be measured at all " +
+                "(${texts.size} text nodes seen, none with a confident foreground and background), " +
+                "so a clean sweep would prove nothing",
+            measured.size >= MINIMUM_TEXTS_MEASURED,
+        )
+        val offenders = measured.filter { it.contrast!! < CONTRAST_FLOOR }
+            .map {
+                "contrast: ${it.name()} measures ${ratio(it.contrast!!)} against its background in " +
+                    "the $theme theme, and the floor is ${ratio(CONTRAST_FLOOR)}"
+            }
+        val platform = run.errorsFrom(CONTRAST_CHECKS).map { "contrast: " + it.describe() }
+        // The message carries the offenders and NOTHING else that could name a view: a demonstration
+        // reads it to decide whether THIS claim went red, and a message that listed every view it
+        // inspected would answer yes whatever failed.
+        assertTrue(
+            (offenders + platform).joinToString("\n  ") +
+                "\n  [${measured.size} texts measured; the sweep's own numbers are in the grading evidence]",
+            offenders.isEmpty() && platform.isEmpty(),
+        )
+    }
+
+    /** Every control a person can hit is at least 48dp square, measured on the running display. */
+    private fun everyTargetMeetsTheFloor(theme: String) {
+        val run = sweepEveryCard(theme, "target-size", measureContrast = false)
+        val controls = run.nodes.filter { it.isControl() }.distinctBy { it.name() + it.bounds.toShortString() }
+        assertTrue(
+            "touch target size: the $theme sweep found ${controls.size} controls on a screen that " +
+                "has at least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
+            controls.size >= MINIMUM_CONTROLS,
+        )
+        val offenders = controls.filter {
+            UiHarness.dpOf(it.bounds.width()) < TARGET_FLOOR_DP || UiHarness.dpOf(it.bounds.height()) < TARGET_FLOOR_DP
+        }.map {
+            "touch target size: ${it.name()} measures " +
+                "${dp(it.bounds.width())}x${dp(it.bounds.height())}dp in the $theme theme, " +
+                "and the floor is ${TARGET_FLOOR_DP.toInt()}x${TARGET_FLOOR_DP.toInt()}dp"
+        }
+        val platform = run.errorsFrom(TARGET_CHECKS).map { "touch target size: " + it.describe() }
+        assertTrue(
+            (offenders + platform).joinToString("\n  ") +
+                "\n  [${controls.size} controls measured; each one's size is in the grading evidence]",
+            offenders.isEmpty() && platform.isEmpty(),
+        )
+    }
+
+    /** Every control and every text field has something a screen reader can announce. */
+    private fun everyControlHasASpokenName(theme: String) {
+        val run = sweepEveryCard(theme, "spoken-name", measureContrast = false)
+        val controls = run.nodes.filter { it.isControl() && it.childCount == 0 }
+            .distinctBy { it.name() + it.bounds.toShortString() }
+        assertTrue(
+            "spoken name: the $theme sweep found ${controls.size} controls on a screen that has at " +
+                "least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
+            controls.size >= MINIMUM_CONTROLS,
+        )
+        val offenders = controls.filter { it.spokenName().isBlank() }.map {
+            "spoken name: ${it.name()} is a control a person can operate and a screen reader would " +
+                "announce it with nothing at all in the $theme theme (no text, no content " +
+                "description, no hint; it is a ${it.className.substringAfterLast('.')} at ${it.bounds.toShortString()})"
+        }
+        val platform = run.errorsFrom(SPOKEN_NAME_CHECKS).map { "spoken name: " + it.describe() }
+        assertTrue(
+            (offenders + platform).joinToString("\n  ") +
+                "\n  [${controls.size} controls measured; each one's name is in the grading evidence]",
+            offenders.isEmpty() && platform.isEmpty(),
+        )
+    }
+
+    /**
+     * No state on this screen is carried by its colour alone: every one of the four AC13 names is
+     * also a word.
+     */
+    private fun noStateByColourAlone(theme: String) {
+        compose.waitForIdle()
+        val warning = textOf("collection-error")
+        assertTrue(
+            "state carried by colour alone: collection-error renders \"$warning\" in the $theme " +
+                "theme, which names no state in words - a reader who cannot see the error colour is told nothing",
+            warning.contains("Warning", ignoreCase = true),
+        )
         val running = textOf("collection-running")
         assertTrue(
-            "the running state renders \"$running\", which is not a word a reader can act on",
+            "state carried by colour alone: collection-running renders \"$running\" in the $theme " +
+                "theme, which is not a word a reader can act on",
             running.equals("Running", true) || running.equals("Stopped", true),
         )
 
@@ -394,8 +500,8 @@ class UiClaimTest {
         // who cannot see which control is emphasised is still told which step they are on.
         val step = textOf("permission-body")
         assertTrue(
-            "the permission step renders \"$step\", which names no step in words - only the card's " +
-                "colour would say which step a reader is on",
+            "state carried by colour alone: permission-body renders \"$step\" in the $theme theme, " +
+                "which names no step in words - only the card's colour would say which step a reader is on",
             step.isNotBlank(),
         )
 
@@ -405,57 +511,115 @@ class UiClaimTest {
         compose.waitForIdle()
         val verdict = textOf("config-verdict")
         assertTrue(
-            "a refused save renders \"$verdict\", which carries the refusal in its colour alone",
+            "state carried by colour alone: config-verdict renders \"$verdict\" in the $theme theme, " +
+                "which carries the refusal in its colour alone",
             verdict.contains("Not saved", ignoreCase = true),
         )
+        UiHarness.evidence(
+            "AC13 no-state-by-colour-alone [$theme]: collection-error=\"$warning\" " +
+                "collection-running=\"$running\" config-verdict=\"$verdict\"",
+        )
+    }
+
+    /**
+     * One sweep per card, because the platform's checks only ever see the window as it is RIGHT NOW.
+     *
+     * The home screen scrolls and is taller than a phone viewport, so a single sweep inspects the top
+     * and reports a clean bill of health for everything below it - which is what the first emulator
+     * run this suite ever had did: it passed the accessibility claim twice while the collection card,
+     * carrying the defect, was off the glass.
+     */
+    private fun sweepEveryCard(theme: String, claim: String, measureContrast: Boolean): AtfRun {
+        compose.waitForIdle()
+        Thread.sleep(500)
+        val nodes = mutableListOf<A11yNode>()
+        val findings = mutableListOf<AtfFinding>()
+        var evaluated = 0
+        var notRun = 0
+        for (tag in listOf("card-permissions", "card-server", "card-collection")) {
+            compose.onNodeWithTag(tag).performScrollTo()
+            compose.waitForIdle()
+            Thread.sleep(400)
+            val run = UiHarness.sweep(measureContrast)
+            nodes += run.nodes
+            findings += run.findings
+            evaluated += run.evaluated
+            notRun += run.notRun
+        }
+        val merged = AtfRun(nodes, findings, evaluated, notRun)
+        UiHarness.evidence(
+            "AC13 $claim [$theme]: ${nodes.size} nodes, platform checks evaluated $evaluated results " +
+                "and declined $notRun",
+        )
+        for (node in nodes.filter { it.isRenderedText() || it.isControl() }) {
+            UiHarness.evidence(
+                "  $claim [$theme] ${node.name()}: ${dp(node.bounds.width())}x${dp(node.bounds.height())}dp " +
+                    "contrast=" + (node.contrast?.let { ratio(it) } ?: "not measured") +
+                    " spoken=\"${node.spokenName()}\" clickable=${node.clickable} editable=${node.editable}",
+            )
+        }
+        for (finding in findings) UiHarness.evidence("  $claim [$theme] platform: " + finding.describe())
+        return merged
     }
 
     // --- AC14: operable without a pointer -------------------------------------------------------
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F20): forty DPAD_DOWN presses " +
-            "never focus the save control, on Compose's Focused semantics, on the same read over " +
-            "the whole subtree, or on the platform's findFocus(FOCUS_INPUT). Whether that is a " +
-            "product defect or a harness defect needs a device, and this case is the artefact.",
-    )
     fun AC14_operable_without_a_pointer() {
         UiHarness.launch()
         operableWithoutAPointer()
     }
 
     @Test
-    @Ignore(
-        "S0074-tracker-android-a11y-operability (impl-gate finding F20): parked with its claim. " +
-            "While the claim fails unconditionally this demonstration passes vacuously, which is " +
-            "no evidence of anything.",
-    )
     fun AC14_operable_without_a_pointer_demonstration() {
         UiHarness.launch(UiMutation.SAVE_NOT_FOCUSABLE)
-        assertFails("an unreachable save control was not caught") { operableWithoutAPointer() }
+        assertFailsNaming("action-save", "directional navigation", "the save control") { operableWithoutAPointer() }
     }
 
+    @Test
+    fun AC14_focus_indicator_is_visible() {
+        UiHarness.launch()
+        focusIndicatorIsVisible()
+    }
+
+    @Test
+    fun AC14_focus_indicator_is_visible_demonstration() {
+        UiHarness.launch(UiMutation.FOCUS_INDICATOR_SUPPRESSED)
+        assertFailsNaming("action-save", "focus indicator", "the save control") { focusIndicatorIsVisible() }
+    }
+
+    /**
+     * The screen is driven end to end with no touch at all: text into both fields, the save control
+     * reached by directional navigation and activated with the centre key, and the effect asserted on
+     * what the screen then SAYS.
+     *
+     * Impl-gate finding F20 was this case going red on the emulator, and the cause was a product
+     * defect rather than a harness one: a Compose text field consumes the arrow keys whether or not
+     * its caret has anywhere to go, so a directional traversal that entered the server URL field
+     * could never leave it and every control below - the save control included - was unreachable.
+     * `Modifier.directionalPassThrough` on both fields is the fix.
+     */
     private fun operableWithoutAPointer() {
         compose.waitForIdle()
+        UiHarness.suppressSoftKeyboard()
 
-        // The server configuration is entered and saved with no touch at all: the fields take text
-        // from the keyboard, and the save control is reached by directional navigation and activated
-        // with the centre key.
         compose.onNodeWithTag("field-url").performScrollTo().performTextReplacement("https://tracker.example.org")
         compose.onNodeWithTag("field-token").performScrollTo().performTextReplacement("a-device-token")
         compose.waitForIdle()
 
-        // Typing raised the IME, and while it is up it is the IME that receives a d-pad key. Put it
-        // away before traversing, or the traversal below goes to the keyboard and the save control
-        // is reported unreachable when it is not.
+        // Typing may still have raised an IME; while one is up it is the IME that receives a d-pad
+        // key, and the traversal below would go to the keyboard rather than to the screen.
         UiHarness.dismissKeyboard()
         compose.waitForIdle()
 
-        val reached = focusByDirection("action-save", SAVE_LABEL)
-        assertTrue("the save control was not reachable by directional navigation", reached)
-
-        // How the focused control paints, captured while it holds focus.
-        val focused = captureOf("action-save")
+        val visited = mutableListOf<String>()
+        val reached = focusByDirection("action-save", visited)
+        assertTrue(
+            "directional navigation: the save control (action-save) was not reachable - " +
+                "$DIRECTIONAL_PRESSES presses of DPAD_DOWN focused, in order: " +
+                visited.joinToString(" -> ").ifBlank { "(nothing at all)" },
+            reached,
+        )
 
         // Activated from the keyboard, to the same effect a touch has, while it still holds focus.
         sendKey(KeyEvent.KEYCODE_DPAD_CENTER)
@@ -464,24 +628,45 @@ class UiClaimTest {
 
         val verdict = textOf("config-verdict")
         assertTrue(
-            "saving from the keyboard produced \"$verdict\"; it must have the same effect a touch has",
+            "directional navigation: saving from the keyboard produced \"$verdict\" on config-verdict; " +
+                "it must have the same effect a touch has",
             verdict.contains("Saved", ignoreCase = true) || verdict.contains("Not saved", ignoreCase = true),
         )
+        UiHarness.evidence("AC14 operable without a pointer: visited " + visited.joinToString(" -> ") + "; verdict \"$verdict\"")
+    }
 
-        // A focus indicator is a RENDERED thing, and it is measured ON THE CONTROL.
-        //
-        // Diffing two FULL-SCREEN shots taken either side of the traversal graded the wrong thing:
-        // the traversal moves focus through several controls and scrolls the column, so the display
-        // differs whatever this control paints and the assertion passed on the scrolling alone.
-        // captureToImage clips to the node, and each shot is of the node WHEREVER IT THEN IS, so
-        // neither scrolling nor the verdict line appearing can contribute a differing pixel.
-        moveFocusAwayFrom("action-save", SAVE_LABEL)
-        val unfocused = captureOf("action-save")
+    /**
+     * The focused control PAINTS something, measured in the band that belongs to the focus ring and
+     * to nothing else.
+     *
+     * F20 aborted before this half ever ran, so it had never been exercised against a rendering at
+     * all. It is measured on the outer [FOCUS_RING_INSET_DP]dp of the control rather than over the
+     * whole of it because a Material ripple tints the INSIDE of a control on focus whatever the ring
+     * does: a whole-control diff would report an indicator that was never painted.
+     */
+    private fun focusIndicatorIsVisible() {
+        compose.waitForIdle()
+        UiHarness.suppressSoftKeyboard()
+
+        val visited = mutableListOf<String>()
+        val reached = focusByDirection("action-save", visited)
         assertTrue(
-            "focusing the save control changed not one pixel OF THAT CONTROL, so it paints no focus " +
-                "indicator - whatever else on the screen moved",
-            pixelsDiffer(focused, unfocused),
+            "directional navigation: the save control (action-save) was not reachable, so its focus " +
+                "indicator cannot be read - visited: " + visited.joinToString(" -> "),
+            reached,
         )
+        val focused = captureOf("action-save")
+
+        moveFocusAwayFrom("action-save")
+        val unfocused = captureOf("action-save")
+        val differing = ringPixelsThatDiffer(focused, unfocused)
+        assertTrue(
+            "focus indicator: focusing the save control (action-save) changed $differing pixels of " +
+                "its outer ${FOCUS_RING_INSET_DP}dp band, and a painted indicator changes at least " +
+                "$MINIMUM_RING_PIXELS - so nothing on the glass says which control has focus",
+            differing >= MINIMUM_RING_PIXELS,
+        )
+        UiHarness.evidence("AC14 focus indicator: $differing pixels of the ring band differ when focused")
     }
 
     // --- AC15: the counters name their set, and absence is not zero -----------------------------
@@ -750,32 +935,40 @@ class UiClaimTest {
         for (child in node.children) walk(child, visit)
     }
 
-    private fun focusByDirection(tag: String, label: String): Boolean {
-        // Start from the top of the screen, then walk down with the directional pad, exactly as a
-        // person with a keyboard or a d-pad would.
+    /**
+     * Walks down with the directional pad, exactly as a person with a keyboard, a d-pad or a screen
+     * reader's directional gestures would, and records where focus went.
+     *
+     * The record is the point. Finding F20 was this returning false with nothing to say about WHY,
+     * which left "product defect or harness defect" undecidable without another device. The visited
+     * list distinguishes the three possibilities on the spot: focus never moved at all (the keys are
+     * not reaching the screen), focus stalled on one control (that control is consuming them), or
+     * focus visited everything except the one being looked for (the focus order skips it).
+     */
+    private fun focusByDirection(tag: String, visited: MutableList<String>): Boolean {
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
-        for (i in 0 until 40) {
+        for (i in 0 until DIRECTIONAL_PRESSES) {
             compose.waitForIdle()
-            if (isFocused(tag, label)) return true
+            val here = UiHarness.focusedName()
+            if (visited.isEmpty() || visited.last() != here) visited.add(here)
+            if (here == tag || isFocused(tag)) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         }
         return false
     }
 
     /**
-     * Whether [tag] holds keyboard focus, judged over the tagged node AND its subtree, in both the
-     * merged and the unmerged tree.
+     * Whether [tag] holds keyboard focus, judged the way an assistive technology would and then, as
+     * a fallback, over the tagged node AND its subtree in both the merged and the unmerged tree.
      *
-     * The testTag and the Focused property are not always on the SAME semantics node: a Compose
-     * Button carries its tag on the modifier chain and its focus state on the focusable node inside
-     * it, so reading Focused off the tagged node alone answers "no" however many times focus has
-     * actually landed there. The first emulator run failed AC14 that way - the save control was
-     * reachable all along, and the reader could not see it.
+     * The platform's own answer comes first and it is now read by test tag rather than by label:
+     * the screen publishes `testTagsAsResourceId`, so the focused node names itself. Matching on the
+     * rendered label instead made this answer depend on which words a control happened to be drawn
+     * with. The Compose reads stay because the testTag and the Focused property are not always on the
+     * same semantics node.
      */
-    private fun isFocused(tag: String, label: String): Boolean {
-        // The platform's own answer first: this is the focus an assistive technology reads, and it
-        // is independent of which semantics node carries Focused.
-        if (UiHarness.focusedLabel()?.trim().equals(label, ignoreCase = true)) return true
+    private fun isFocused(tag: String): Boolean {
+        if (UiHarness.focusedName() == tag) return true
         for (unmerged in listOf(true, false)) {
             for (node in compose.onAllNodesWithTag(tag, useUnmergedTree = unmerged).fetchSemanticsNodes()) {
                 var found = false
@@ -787,8 +980,11 @@ class UiClaimTest {
     }
 
     /** The pixels of one control, wherever it currently sits, rather than of the whole display. */
-    private fun captureOf(tag: String): android.graphics.Bitmap =
-        compose.onNodeWithTag(tag).captureToImage().asAndroidBitmap()
+    private fun captureOf(tag: String): android.graphics.Bitmap {
+        compose.onNodeWithTag(tag).performScrollTo()
+        compose.waitForIdle()
+        return compose.onNodeWithTag(tag).captureToImage().asAndroidBitmap()
+    }
 
     /**
      * Moves focus off [tag] without leaving the screen, and proves it moved.
@@ -798,13 +994,15 @@ class UiClaimTest {
      * control that is the last focusable in its column. A traversal that failed to move focus would
      * otherwise give two identical captures and report a missing focus indicator that is there.
      */
-    private fun moveFocusAwayFrom(tag: String, label: String) {
+    private fun moveFocusAwayFrom(tag: String) {
         for (code in listOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP)) {
             sendKey(code)
             compose.waitForIdle()
-            if (!isFocused(tag, label)) return
+            if (!isFocused(tag)) return
         }
-        throw AssertionError("focus could not be moved off $tag, so its unfocused paint cannot be read")
+        throw AssertionError(
+            "focus indicator: focus could not be moved off $tag, so its unfocused paint cannot be read",
+        )
     }
 
     private fun sendKey(code: Int) {
@@ -812,22 +1010,69 @@ class UiClaimTest {
         Thread.sleep(120)
     }
 
-    private fun pixelsDiffer(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Boolean {
-        if (a.width != b.width || a.height != b.height) return true
+    /**
+     * How many pixels of the control's outer focus-ring band changed between the two captures.
+     *
+     * Only the band, because that is the region the ring owns: a Material ripple paints a focus state
+     * layer across the INSIDE of a control, so a whole-control diff comes back non-zero even when no
+     * ring was painted at all, and the focus-indicator demonstration could never go red.
+     */
+    private fun ringPixelsThatDiffer(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Int {
+        if (a.width != b.width || a.height != b.height) return Int.MAX_VALUE
+        val band = kotlin.math.max(2, kotlin.math.ceil(FOCUS_RING_INSET_DP * UiHarness.density()).toInt())
         var differing = 0
-        var y = 0
-        while (y < a.height) {
-            var x = 0
-            while (x < a.width) {
-                if (a.getPixel(x, y) != b.getPixel(x, y)) {
-                    differing++
-                    if (differing > 50) return true
-                }
-                x += 2
+        for (y in 0 until a.height) {
+            for (x in 0 until a.width) {
+                val onTheBand = x < band || y < band || x >= a.width - band || y >= a.height - band
+                if (!onTheBand) continue
+                if (colourDistance(a.getPixel(x, y), b.getPixel(x, y)) > RING_COLOUR_TOLERANCE) differing++
             }
-            y += 2
         }
-        return differing > 50
+        return differing
+    }
+
+    private fun colourDistance(p: Int, q: Int): Int {
+        val dr = kotlin.math.abs(((p shr 16) and 0xFF) - ((q shr 16) and 0xFF))
+        val dg = kotlin.math.abs(((p shr 8) and 0xFF) - ((q shr 8) and 0xFF))
+        val db = kotlin.math.abs((p and 0xFF) - (q and 0xFF))
+        return kotlin.math.max(dr, kotlin.math.max(dg, db))
+    }
+
+    private fun dp(px: Int): Int = kotlin.math.round(UiHarness.dpOf(px)).toInt()
+
+    private fun ratio(value: Double): String = "%.2f:1".format(java.util.Locale.ENGLISH, value)
+
+    /**
+     * Runs a claim's own measuring code against a mutated screen and requires it to FAIL, naming the
+     * view that was mutated and the check that belongs to this claim.
+     *
+     * AC25 and AC26 both turn on this: "a failure naming a different view or a different check" is
+     * explicitly not a demonstration, because it would mean the mutation was caught by some other
+     * assertion - or by a vacuity guard - rather than by the check it was built to trip. So the
+     * message is read, not merely the fact that something threw.
+     */
+    private fun assertFailsNaming(view: String, check: String, context: String, body: () -> Unit) {
+        val failure: Throwable? = try {
+            body()
+            null
+        } catch (expected: AssertionError) {
+            expected
+        } catch (expected: RuntimeException) {
+            expected
+        }
+        assertTrue(
+            "the check for \"$check\" ($context) stayed green against a surface mutated to break " +
+                "exactly that claim on $view, so its pass is not evidence",
+            failure != null,
+        )
+        val message = failure!!.message.orEmpty()
+        assertTrue(
+            "the check for \"$check\" ($context) failed against the mutated screen, but its message " +
+                "names neither the mutated view ($view) nor that check, so it is not this claim that " +
+                "went red:\n$message",
+            message.contains(view) && message.contains(check),
+        )
+        UiHarness.evidence("demonstration [$context]: \"$check\" went red naming $view")
     }
 
     private fun assertFails(why: String, body: () -> Unit) {
@@ -852,8 +1097,47 @@ class UiClaimTest {
          */
         const val MAX_LABEL_WORDS = 8
 
-        /** What R.string.config_save renders, for reading the platform's focus by name. */
-        const val SAVE_LABEL = "Save"
+        /** WCAG 2.2 AA, success criterion 1.4.3: 4.5:1 for body text against its background. */
+        const val CONTRAST_FLOOR = 4.5
+
+        /**
+         * The floor a touch target is held to, in dp.
+         *
+         * WCAG 2.2's 2.5.8 asks for 24 CSS pixels; Android's own guidance and the platform's
+         * accessibility checks ask for 48dp, and the screen is already built to that. The stricter
+         * of the two is the one applied here, so a control that passes this passes both.
+         */
+        const val TARGET_FLOOR_DP = 48f
+
+        /** How many texts a sweep must have measured before a clean result means anything. */
+        const val MINIMUM_TEXTS_MEASURED = 5
+
+        /**
+         * How many controls this screen has at its least populated: the permission action, both
+         * server fields, the save control, the collection control and three explanation affordances.
+         * A sweep that found fewer was not looking at this screen.
+         */
+        const val MINIMUM_CONTROLS = 5
+
+        /** Presses of DPAD_DOWN a traversal is allowed before it reports a control unreachable. */
+        const val DIRECTIONAL_PRESSES = 40
+
+        /** How different two pixels must be, per channel, to count as differing. */
+        const val RING_COLOUR_TOLERANCE = 24
+
+        /**
+         * How many pixels of the ring band a painted focus indicator changes.
+         *
+         * A 48dp control at any density this app supports has a band of several hundred pixels, and
+         * the ring fills it; the floor is set well under that so anti-aliasing at the rounded corners
+         * cannot decide the answer, and well over zero so a suppressed ring cannot pass.
+         */
+        const val MINIMUM_RING_PIXELS = 100
+
+        /** The platform checks that answer each of the three claims AC13 delegates. */
+        val CONTRAST_CHECKS = setOf("TextContrastCheck", "ImageContrastCheck")
+        val TARGET_CHECKS = setOf("TouchTargetSizeCheck")
+        val SPOKEN_NAME_CHECKS = setOf("SpeakableTextPresentCheck", "EditableContentDescCheck")
 
         /**
          * A sentence of the length the domain layer really produces, for driving the states that

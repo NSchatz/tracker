@@ -22,37 +22,56 @@ import (
 func CheckRefusal(ctx context.Context, w io.Writer) error {
 	var problems []string
 
-	// --- the browser route, with no engine to be found -----------------------------------------
-	saved, hadEnv := os.LookupEnv("TRACKER_BROWSER")
-	savedPath := os.Getenv("PATH")
-	if err := os.Setenv("TRACKER_BROWSER", filepath.Join(os.TempDir(), "uiverify-no-such-browser")); err != nil {
-		return err
-	}
-	if err := os.Setenv("PATH", filepath.Join(os.TempDir(), "uiverify-empty-path")); err != nil {
-		return err
-	}
-	var out bytes.Buffer
-	_, err := RunWeb(ctx, &out)
-	if hadEnv {
-		_ = os.Setenv("TRACKER_BROWSER", saved)
-	} else {
-		_ = os.Unsetenv("TRACKER_BROWSER")
-	}
-	_ = os.Setenv("PATH", savedPath)
+	// --- the browser route, once per absence AC19/AC29 names on that surface ---------------------
+	//
+	// The ENGINE and its DRIVER are two absences and they refuse differently: an engine that is not
+	// there at all is caught before anything starts, while an engine that is there and will not
+	// START under a driver - a snap-confined chromium is the real case - fails only once the driver
+	// has waited for a DevTools endpoint that never arrives. Driving only the first left the second
+	// refusal written but never executed, which is the silent downgrade this criterion forbids.
+	for _, absence := range browserAbsences() {
+		saved, hadEnv := os.LookupEnv("TRACKER_BROWSER")
+		savedPath := os.Getenv("PATH")
+		path, cleanup, perr := absence.stage()
+		if perr != nil {
+			return perr
+		}
+		if err := os.Setenv("TRACKER_BROWSER", path); err != nil {
+			return err
+		}
+		if err := os.Setenv("PATH", filepath.Join(os.TempDir(), "uiverify-empty-path")); err != nil {
+			return err
+		}
+		var out bytes.Buffer
+		_, err := RunWeb(ctx, &out)
+		if hadEnv {
+			_ = os.Setenv("TRACKER_BROWSER", saved)
+		} else {
+			_ = os.Unsetenv("TRACKER_BROWSER")
+		}
+		_ = os.Setenv("PATH", savedPath)
+		cleanup()
 
-	if err == nil {
-		problems = append(problems, "with no browser engine present the browser route returned NO error; it would have reported a clause green without rendering it")
-	} else {
+		if err == nil {
+			problems = append(problems, fmt.Sprintf(
+				"with %s the browser route returned NO error; it would have reported a clause green without rendering it", absence.what))
+			continue
+		}
 		var refusal *Refusal
 		if !errors.As(err, &refusal) {
-			problems = append(problems, "with no browser engine present the browser route failed with a bare error rather than a refusal naming the prerequisite: "+err.Error())
+			problems = append(problems, fmt.Sprintf(
+				"with %s the browser route failed with a bare error rather than a refusal naming the prerequisite: %s", absence.what, err.Error()))
 		} else {
-			problems = append(problems, checkRefusalText("browser route", refusal.Error())...)
+			problems = append(problems, checkRefusalText("browser route ("+absence.what+")", refusal.Error())...)
+			if !strings.Contains(refusal.Error(), absence.names) {
+				problems = append(problems, fmt.Sprintf(
+					"the refusal for %s does not name it (looked for %q): %s", absence.what, absence.names, strings.TrimSpace(refusal.Error())))
+			}
 		}
-		fmt.Fprintf(w, "browser route with no engine:\n%s\n", indent(err.Error()))
-	}
-	if strings.Contains(strings.ToLower(out.String()), "pass") {
-		problems = append(problems, "the browser route printed a PASS line before refusing: "+strings.TrimSpace(out.String()))
+		fmt.Fprintf(w, "browser route with %s:\n%s\n", absence.what, indent(err.Error()))
+		if strings.Contains(strings.ToLower(out.String()), "pass") {
+			problems = append(problems, "the browser route printed a PASS line before refusing: "+strings.TrimSpace(out.String()))
+		}
 	}
 
 	// --- the Android route, once per prerequisite AC19 names -----------------------------------
@@ -81,9 +100,50 @@ func CheckRefusal(ctx context.Context, w io.Writer) error {
 	if len(problems) > 0 {
 		return fmt.Errorf("the refusal paths do not bite:\n  - %s", strings.Join(problems, "\n  - "))
 	}
-	fmt.Fprintf(w, "refusal: both grading routes exit non-zero and name their missing prerequisite, once per each of the %d absences AC19 lists\n",
-		1+len(androidAbsences()))
+	fmt.Fprintf(w, "refusal: both grading routes exit non-zero and name their missing prerequisite, once per each of the %d absences AC29 lists\n",
+		len(browserAbsences())+len(androidAbsences()))
 	return nil
+}
+
+// browserAbsence is one browser-side prerequisite removed, and what the refusal for it must say.
+type browserAbsence struct {
+	what  string
+	names string
+	// stage produces the value TRACKER_BROWSER is pointed at, and a cleanup for whatever it made.
+	stage func() (string, func(), error)
+}
+
+// browserAbsences drives BOTH browser-side prerequisites AC29 names, separately.
+func browserAbsences() []browserAbsence {
+	return []browserAbsence{
+		{
+			what:  "no browser engine",
+			names: "the browser engine named by TRACKER_BROWSER",
+			stage: func() (string, func(), error) {
+				return filepath.Join(os.TempDir(), "uiverify-no-such-browser"), func() {}, nil
+			},
+		},
+		{
+			// An engine that EXISTS and does not come up under a driver. A snap-confined chromium is
+			// the real instance of this: it starts, cannot read the driver's profile directory, and
+			// never publishes a DevTools endpoint - which reads exactly like a broken harness unless
+			// the route refuses by name. Standing in for it here is an executable that exits at once,
+			// which reaches the same refusal by the same path.
+			what:  "an engine that will not start under a driver",
+			names: "a browser engine that will actually START under a driver",
+			stage: func() (string, func(), error) {
+				dir, err := os.MkdirTemp("", "uiverify-dead-browser-")
+				if err != nil {
+					return "", func() {}, err
+				}
+				path := filepath.Join(dir, "chromium")
+				if werr := os.WriteFile(path, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); werr != nil {
+					return "", func() { _ = os.RemoveAll(dir) }, werr
+				}
+				return path, func() { _ = os.RemoveAll(dir) }, nil
+			},
+		},
+	}
 }
 
 // checkRefusalText holds a refusal to the four things AC19 requires it to say, and to the one thing

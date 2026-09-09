@@ -200,14 +200,24 @@ emulator, not the JVM, for Android". It grades **nothing about collection**: not
 decisions, not the fused provider, not the flush schedule. Those are still the pure unit tests plus
 the operator check below, and the reasoning above is why.
 
-**Eight cases in that suite are `@Ignore`d and belong to another item.** The accessibility sweep
-(contrast, touch targets, spoken names, state carried by colour) and the operable-without-a-pointer
-traversal are carried by `S0074-tracker-android-a11y-operability`: on the emulator the traversal
-never reaches the save control, and the platform sweep stayed green against a screen deliberately
-broken to break it, so its passes were not evidence. They are kept verbatim as the artefacts that
-item inherits. `FRONTEND-CONVENTIONS-RECORD.md` records the deferral clause by clause and
-`make verify-ui-record` fences it — an `@Ignore` with no deferral behind it, or a deferral with no
-`@Ignore` behind it, turns that check red.
+**Nothing in that suite is `@Ignore`d.** The accessibility sweep and the operable-without-a-pointer
+traversal were parked while `S0074-tracker-android-a11y-operability` carried them; both are graded
+here again, and `FRONTEND-CONVENTIONS-RECORD.md` names the assertions rather than deferring the
+clauses. The fence stays and is now shut on every pair: an `@Ignore` with no deferral behind it, or a
+deferral of any kind at all, turns `make verify-ui-record` red.
+
+**The accessibility sweep grades ONE claim at a time, in both themes, and measures rather than only
+delegating.** Contrast, touch target size, a non-empty spoken name and no-state-by-colour-alone are
+four claims with four separate mutations, because a mutation that breaks two at once cannot say which
+check went blind — which is what happened the first time this was tried. Google's Accessibility Test
+Framework still runs over the tree, and its ERRORs are failures; but the ratio, the target size and
+the spoken name are also computed here from the same two inputs the platform checks read (the
+`AccessibilityNodeInfo` tree the emulator published and the screenshot it painted), because a
+hierarchy built from node infos carries no text or background colour, so those checks can only report
+a screenshot heuristic — at WARNING, never at ERROR. Filtering their results to ERROR is how a sweep
+came back clean over text at 1.7:1. Every number the sweep measured is written to
+`build/uiverify/android-grading.log` and printed by `make verify-ui-android`, so a PASSING run is
+inspectable rather than merely quiet.
 
 The suite needs a booted emulator and **refuses loudly when it cannot have one**, naming the missing
 piece and how to get it (`scripts/android-emulator.sh`). It never skips. Without `/dev/kvm` an

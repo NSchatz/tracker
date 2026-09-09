@@ -3,6 +3,8 @@ package uiverify
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -77,6 +79,7 @@ func CheckAndroidRun(w io.Writer, root string) error {
 		return derr
 	}
 	problems = append(problems, parkedSuiteProblems(root, deferred)...)
+	problems = append(problems, unmutatedClaimProblems(root)...)
 
 	fmt.Fprintf(w, "\n%s: %d/%d clause assertions ran, %d/%d demonstrated able to fail\n",
 		AndroidSurface, len(run.Ran), len(expected), len(run.Demonstrated), len(run.Ran))
@@ -87,6 +90,67 @@ func CheckAndroidRun(w io.Writer, root string) error {
 			AndroidSurface, strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// unmutatedClaimProblems is the half of AC27 a JUnit result file cannot answer: that the CLAIMS were
+// graded on the screen with NO mutation applied.
+//
+// The result file says a case named `AC13_contrast_light` passed. It cannot say what that case
+// launched, and a claim quietly launched against a mutated screen would be grading something no
+// person will ever see - while its demonstration, which needs a mutation, went red exactly as
+// expected and reported the pair as sound. So the suite is read: a case that is not a
+// `_demonstration` may not select a mutation at all.
+//
+// Like [parkedSuiteProblems] this reads Kotlin SOURCE, and for the same reason. It grades no
+// rendered property - F2's rule is untouched - it answers "what did this case ASK the app to draw",
+// which is a fact about the suite and leaves nothing behind on the emulator to inspect.
+func unmutatedClaimProblems(root string) []string {
+	path := filepath.Join(root, parkedSuite)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return []string{fmt.Sprintf(
+			"could not read the instrumented suite at %s to check that its claims are graded on an unmutated screen: %v",
+			parkedSuite, err)}
+	}
+
+	var problems []string
+	claims := 0
+	blocks := strings.Split(string(body), "@Test")
+	for _, block := range blocks[1:] {
+		// A case's own body ends where the file's private helpers begin. Without that bound the
+		// last @Test in the file would carry every helper below it, and a mutation named in one of
+		// those would be read as the case having selected it.
+		if cut := strings.Index(block, "\n    private "); cut >= 0 {
+			block = block[:cut]
+		}
+		m := funDeclaration.FindStringSubmatch(block)
+		if m == nil {
+			for _, line := range strings.Split(block, "\n") {
+				if n := funDeclaration.FindStringSubmatch(line); n != nil {
+					m = n
+					break
+				}
+			}
+		}
+		if m == nil {
+			continue
+		}
+		name := m[1]
+		if strings.HasSuffix(name, DemonstrationSuffix) {
+			continue
+		}
+		claims++
+		if strings.Contains(block, "UiMutation.") {
+			problems = append(problems, fmt.Sprintf(
+				"%s grades the claim %q against a mutated screen; a claim is graded on the screen with NO mutation applied, and only its %s may select one",
+				parkedSuite, name, DemonstrationSuffix))
+		}
+	}
+	if claims == 0 {
+		problems = append(problems, fmt.Sprintf(
+			"%s declares no claim case at all, so this check would pass over an empty set", parkedSuite))
+	}
+	return problems
 }
 
 // recordedAssertions is the set of rendered assertions the committed record names on one surface,

@@ -54,15 +54,20 @@ Two rules go with it, and both are enforced:
   what keeps that from rotting, and it drives each absence separately rather than letting one
   refusal stand in for the rest.
 
-**`@Ignore` in the instrumented suite is fenced, not forbidden.** A case may only stop running once
-`FRONTEND-CONVENTIONS-RECORD.md` carries a DEFERRAL row naming the item that took the clause over —
-today that is `S0074-tracker-android-a11y-operability` for F1 and F10 on the Android screen, whose
-failing cases are kept in place rather than deleted. `make verify-ui-record` and `make
+**`@Ignore` in the instrumented suite is fenced shut.** A case may only stop running once
+`FRONTEND-CONVENTIONS-RECORD.md` carries a DEFERRAL row naming the item that took the clause over,
+and the list of pairs a deferral is legal on — `splitPairs` in `internal/uiverify/record.go` — is
+**empty**: every clause is answered by an assertion or by an exemption, so there is no cell anyone
+can write in that record which makes an `@Ignore` legal. `make verify-ui-record` and `make
 verify-ui-android` compare the record's deferred set against the suite's `@Ignore`d set in both
 directions, require every parked case to name its owner, and refuse a claim parked without its
-demonstration or a demonstration parked without its claim. Only the pairs hard-coded in
-`internal/uiverify/record.go` may be deferred at all: widening that is a source change with a name
-on it, which is the point.
+demonstration or a demonstration parked without its claim. Re-opening the route for a future split is
+a source change with a name on it, which is the point.
+
+**A claim is graded on the UNMUTATED screen, and that is checked too.** A JUnit result file says a
+case passed; it cannot say what that case launched. So `uiverify android` reads the suite and refuses
+any case that is not a `_demonstration` and yet selects a `UiMutation` — otherwise a claim could be
+quietly pointed at a broken screen, pass, and be reported as evidence about the one people use.
 
 `make check` **is** the gate. CI runs exactly this target and so does the umbrella's
 `scripts/verify.sh tracker` — one gate, defined once, in the `Makefile`. Tool versions are pinned there

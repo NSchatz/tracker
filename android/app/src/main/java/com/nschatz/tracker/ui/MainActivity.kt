@@ -16,8 +16,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
@@ -45,16 +47,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -105,6 +117,7 @@ import java.util.Locale
  * `internal/server/static/app-explained.html`.
  */
 class MainActivity : ComponentActivity() {
+    @OptIn(ExperimentalComposeUiApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Show the truth about the durable queue, and give a backlog left by a killed process a
@@ -119,7 +132,16 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TrackerTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                // testTagsAsResourceId publishes each control's test tag to the platform as its
+                // view id, which is what lets an accessibility sweep NAME the view it is reporting
+                // on. AC13 requires a failure to name the view, the check and the measured value,
+                // and an AccessibilityNodeInfo tree otherwise offers only a class name and a
+                // rectangle. It is set once, at the root, and changes nothing that is drawn.
+                Scaffold(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .semantics { testTagsAsResourceId = true },
+                ) { innerPadding ->
                     TrackerApp(mutation = mutation, modifier = Modifier.padding(innerPadding))
                 }
             }
@@ -181,15 +203,69 @@ private fun TrackerTheme(content: @Composable () -> Unit) {
  * measure. Compose's default focus indication for a Material button is a low-opacity overlay that a
  * screenshot diff can miss entirely, so every control this screen owns gets an explicit ring. The
  * border is always laid out, transparent when unfocused, so gaining focus never moves anything.
+ *
+ * The ring is painted at the OUTER EDGE of the control - the 2dp of padding after it insets
+ * everything the control itself draws - so the band that carries it is a band nothing else paints
+ * in. That is what lets the indicator be measured on its own rather than through a Material ripple
+ * state layer, which tints the inside of the control on focus whatever this ring does.
+ *
+ * [UiMutation.FOCUS_INDICATOR_SUPPRESSED] holds the ring transparent while leaving focus itself
+ * untouched, which is the AC26 demonstration: the control still takes focus and still activates, and
+ * nothing on the glass says which control has it.
  */
 @Composable
-private fun Modifier.focusRing(): Modifier {
+private fun Modifier.focusRing(mutation: UiMutation): Modifier {
     var focused by remember { mutableStateOf(false) }
-    val colour = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent
+    val suppressed = mutation == UiMutation.FOCUS_INDICATOR_SUPPRESSED
+    val colour = if (focused && !suppressed) MaterialTheme.colorScheme.primary else Color.Transparent
     return this
         .onFocusChanged { focused = it.isFocused || it.hasFocus }
-        .border(3.dp, colour, RoundedCornerShape(6.dp))
-        .padding(2.dp)
+        .border(FOCUS_RING_WIDTH_DP.dp, colour, RoundedCornerShape(6.dp))
+        .padding(FOCUS_RING_INSET_DP.dp)
+}
+
+/** The width of the focus ring, in dp. */
+const val FOCUS_RING_WIDTH_DP = 3
+
+/**
+ * How far the control's own paint is inset from the ring, in dp.
+ *
+ * The outer band of this width belongs to the ring and to nothing else - not to the control's
+ * surface, and not to the Material ripple's focus state layer, which tints the inside of a control
+ * whenever it takes focus. That is what makes the indicator measurable on its own: the suite
+ * compares this band focused against unfocused, so a ring that was never painted reads as zero
+ * differing pixels rather than as the ripple's tint.
+ */
+const val FOCUS_RING_INSET_DP = 2
+
+/**
+ * Lets a directional key LEAVE a control that would otherwise swallow it.
+ *
+ * A Compose text field handles the arrow keys itself - they move the caret - and it consumes them
+ * whether or not the caret had anywhere to go. On a single-line field that means DPAD_DOWN moves
+ * nothing and reaches no focus search, so a person driving this screen with a keyboard, a d-pad or a
+ * screen reader's directional gestures lands in the server URL field and can never leave it: every
+ * control below it, the save control included, becomes unreachable. That is impl-gate finding F20,
+ * and it is a defect in the screen rather than in the check that found it.
+ *
+ * `onPreviewKeyEvent` runs on the way DOWN to the focused node, so this sees the key first and moves
+ * focus instead. It consumes only what it actually acted on: a direction with nothing beyond it
+ * falls through to the field, which is the behaviour a caret needs.
+ */
+@Composable
+private fun Modifier.directionalPassThrough(): Modifier {
+    val focusManager = LocalFocusManager.current
+    return this.onPreviewKeyEvent { event ->
+        if (event.type != KeyEventType.KeyDown) {
+            false
+        } else {
+            when (event.key) {
+                Key.DirectionDown -> focusManager.moveFocus(FocusDirection.Down)
+                Key.DirectionUp -> focusManager.moveFocus(FocusDirection.Up)
+                else -> false
+            }
+        }
+    }
 }
 
 /** The minimum a finger can reliably hit, and the floor WCAG 2.2 sets for a target. */
@@ -206,7 +282,7 @@ private fun TrackerApp(mutation: UiMutation, modifier: Modifier = Modifier) {
         HomeScreen(mutation = mutation, onExplain = { topic = it }, modifier = modifier)
     } else {
         BackHandler { topic = null }
-        ExplanationScreen(topic = current, onBack = { topic = null }, modifier = modifier)
+        ExplanationScreen(topic = current, mutation = mutation, onBack = { topic = null }, modifier = modifier)
     }
 }
 
@@ -499,6 +575,7 @@ private fun PermissionCard(
                     RingedButton(
                         onClick = { onRequest(step.permissions) },
                         tag = "permission-action",
+                        mutation = mutation,
                     ) {
                         Text(
                             stringResource(
@@ -523,7 +600,7 @@ private fun PermissionCard(
                         mutation = mutation,
                         tag = "permission-body",
                     )
-                    RingedButton(onClick = onOpenSettings, tag = "permission-action") {
+                    RingedButton(onClick = onOpenSettings, tag = "permission-action", mutation = mutation) {
                         Text(
                             stringResource(
                                 if (background) R.string.permission_step_background_settings_action
@@ -556,14 +633,14 @@ private fun PermissionCard(
                 WarningText(R.string.warning_approximate, mutation, "warning-approximate")
                 TextButton(
                     onClick = onUpgradePrecise,
-                    modifier = Modifier.focusRing().minimumTarget().testTag("action-precise"),
+                    modifier = Modifier.focusRing(mutation).minimumTarget().testTag("action-precise"),
                 ) { Text(stringResource(R.string.action_upgrade_precise)) }
             }
             if (!LocationPermissionFlow.notificationVisible(grants, sdkInt)) {
                 WarningText(R.string.warning_notifications_blocked, mutation, "warning-notifications")
             }
 
-            ExplainAffordance(R.string.explain_permissions, onExplain, "explain-permissions")
+            ExplainAffordance(R.string.explain_permissions, onExplain, "explain-permissions", mutation)
         }
     }
 }
@@ -588,14 +665,22 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                 onValueChange = { url = it },
                 label = { Text(stringResource(R.string.config_url_label)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth().focusRing().testTag("field-url"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .directionalPassThrough()
+                    .focusRing(mutation)
+                    .testTag("field-url"),
             )
             OutlinedTextField(
                 value = credential,
                 onValueChange = { credential = it },
                 label = { Text(stringResource(R.string.config_token_label)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth().focusRing().testTag("field-token"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .directionalPassThrough()
+                    .focusRing(mutation)
+                    .testTag("field-token"),
             )
             // The VIEWER credential, entered the same way as the device token because it is issued
             // the same way: printed once by an operator command, out of band. It is a separate field
@@ -656,6 +741,7 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                         CrossingsRefresher.refreshInBackground(context)
                     },
                     tag = "action-save",
+                    mutation = mutation,
                     focusable = mutation != UiMutation.SAVE_NOT_FOCUSABLE,
                 ) { Text(stringResource(R.string.config_save)) }
             }
@@ -667,7 +753,7 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                     modifier = Modifier.testTag("config-verdict"),
                 )
             }
-            ExplainAffordance(R.string.explain_server, onExplain, "explain-server")
+            ExplainAffordance(R.string.explain_server, onExplain, "explain-server", mutation)
         }
     }
 }
@@ -695,34 +781,54 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
             Text(
                 stringResource(if (running) R.string.collection_running else R.string.collection_stopped),
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (mutation == UiMutation.ACCESSIBILITY_DEFECT) {
-                    Color(0xFFBFC6CC)
+                // The contrast mutation, and it is chosen PER THEME.
+                //
+                // A single fixed grey cannot break this claim in both themes: a light grey that
+                // measures 1.7:1 on a white card measures nearly 9:1 on a dark one, so a
+                // theme-blind mutation leaves the dark demonstration green while looking broken.
+                // Each of these measures about 2.5:1 against the card behind it in its own theme,
+                // which is decisively under the 4.5:1 floor and still a colour a crop can separate
+                // from its background.
+                color = if (mutation == UiMutation.CONTRAST_BELOW_FLOOR) {
+                    if (isSystemInDarkTheme()) Color(0xFF646464) else Color(0xFFA5A5A5)
                 } else {
                     MaterialTheme.colorScheme.onSurface
                 },
                 modifier = Modifier.testTag("collection-running"),
             )
-            RingedButton(
-                onClick = {
-                    if (running) LocationCollectionService.stop(context)
-                    else LocationCollectionService.start(context)
-                },
-                enabled = canCollect,
-                tag = "action-collection",
-                // A touch target under the 48dp floor: the one defect the Accessibility Test
-                // Framework reports as an ERROR without needing to read a screenshot, which is why
-                // the mutation carries it as well as the contrast and the missing name.
-                undersized = mutation == UiMutation.ACCESSIBILITY_DEFECT,
-            ) {
-                // The mutation leaves this control with no speakable name, which is the half of
-                // ACCESSIBILITY_DEFECT the platform checks report reliably.
-                Text(
-                    if (mutation == UiMutation.ACCESSIBILITY_DEFECT) {
-                        ""
-                    } else {
-                        stringResource(if (running) R.string.collection_stop else R.string.collection_start)
-                    },
-                )
+            val collectionLabel = if (mutation == UiMutation.CONTROL_WITHOUT_A_NAME) {
+                ""
+            } else {
+                stringResource(if (running) R.string.collection_stop else R.string.collection_start)
+            }
+            val onCollectionClick: () -> Unit = {
+                if (running) LocationCollectionService.stop(context)
+                else LocationCollectionService.start(context)
+            }
+            if (mutation == UiMutation.TARGET_BELOW_FLOOR) {
+                // A touch target genuinely under the 48dp floor.
+                //
+                // NOT a `Button` at `Modifier.size(20.dp)`: Material's `Button` applies
+                // `minimumInteractiveComponentSize()` inside itself, which expands the laid-out
+                // node back to 48dp around a 20dp visual. A sweep that reported no target-size
+                // defect against one of those was right - the target was 48dp - which is half of
+                // why finding F21's mutation could not be shown going red. A plain clickable box
+                // carries no such expansion, so its bounds are the 20dp a person would have to hit.
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .focusRing(mutation)
+                        .testTag("action-collection")
+                        .clickable(enabled = canCollect, onClick = onCollectionClick),
+                    contentAlignment = Alignment.Center,
+                ) { Text(collectionLabel, style = MaterialTheme.typography.bodySmall) }
+            } else {
+                RingedButton(
+                    onClick = onCollectionClick,
+                    enabled = canCollect,
+                    tag = "action-collection",
+                    mutation = mutation,
+                ) { Text(collectionLabel) }
             }
 
             // ONE state, decided in one place (CollectionReadout), so two of the three can never be
@@ -790,7 +896,7 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 Text(stringResource(R.string.explain_collection_limitation), style = MaterialTheme.typography.bodySmall)
             }
             if (mutation != UiMutation.NO_EXPLANATION_AFFORDANCE) {
-                ExplainAffordance(R.string.explain_counters, onExplain, "explain-counters")
+                ExplainAffordance(R.string.explain_counters, onExplain, "explain-counters", mutation)
             }
         }
     }
@@ -919,10 +1025,10 @@ private fun WarningLiteral(text: String, mutation: UiMutation, tag: String) {
 
 /** One affordance per card, opening this app's own explanation for it. */
 @Composable
-private fun ExplainAffordance(labelRes: Int, onClick: () -> Unit, tag: String) {
+private fun ExplainAffordance(labelRes: Int, onClick: () -> Unit, tag: String, mutation: UiMutation) {
     TextButton(
         onClick = onClick,
-        modifier = Modifier.focusRing().minimumTarget().testTag(tag),
+        modifier = Modifier.focusRing(mutation).minimumTarget().testTag(tag),
     ) { Text(stringResource(labelRes)) }
 }
 
@@ -930,24 +1036,25 @@ private fun ExplainAffordance(labelRes: Int, onClick: () -> Unit, tag: String) {
 private fun RingedButton(
     onClick: () -> Unit,
     tag: String,
+    mutation: UiMutation,
     enabled: Boolean = true,
     focusable: Boolean = true,
-    undersized: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val base = if (undersized) {
-        Modifier.size(20.dp).testTag(tag)
-    } else {
-        Modifier.minimumTarget().testTag(tag)
-    }
-    val withRing = if (focusable) base.focusRing() else base.then(
+    val base = Modifier.minimumTarget().testTag(tag)
+    val withRing = if (focusable) base.focusRing(mutation) else base.then(
         Modifier.focusProperties { canFocus = false },
     )
     Button(onClick = onClick, enabled = enabled, modifier = withRing) { content() }
 }
 
 @Composable
-private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modifier: Modifier = Modifier) {
+private fun ExplanationScreen(
+    topic: ExplanationTopic,
+    mutation: UiMutation,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val prefs = remember { ClientPreferences(context) }
 
@@ -996,7 +1103,7 @@ private fun ExplanationScreen(topic: ExplanationTopic, onBack: () -> Unit, modif
         }
         TextButton(
             onClick = onBack,
-            modifier = Modifier.focusRing().minimumTarget().testTag("explanation-back"),
+            modifier = Modifier.focusRing(mutation).minimumTarget().testTag("explanation-back"),
         ) { Text(stringResource(R.string.explanation_back)) }
     }
 }

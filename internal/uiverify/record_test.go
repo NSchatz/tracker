@@ -374,6 +374,29 @@ func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
 			t.Fatalf("the refusal does not say the route had not run: %v", err)
 		}
 	})
+
+	// AC27: the claims are graded on the screen with NO mutation applied. A JUnit result file cannot
+	// say what a case launched, so a claim quietly pointed at a mutated screen would report green
+	// having graded something no person will ever see.
+	t.Run("a claim graded against a mutated screen", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeParkedSuite(t, func(s string) string {
+			return strings.Replace(s,
+				"    fun AC13_contrast_light() {\n        UiHarness.setNightMode(false)\n        UiHarness.launch()",
+				"    fun AC13_contrast_light() {\n        UiHarness.setNightMode(false)\n        UiHarness.launch(UiMutation.CONTRAST_BELOW_FLOOR)", 1)
+		})
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("a claim was graded against a mutated screen and the route reported green")
+		}
+		if !strings.Contains(err.Error(), "against a mutated screen") {
+			t.Fatalf("the refusal does not say the claim was graded on a mutated screen: %v", err)
+		}
+		if !strings.Contains(err.Error(), "AC13_contrast_light") {
+			t.Fatalf("the refusal does not name the claim: %v", err)
+		}
+	})
 }
 
 // --- the deferral fence -------------------------------------------------------------------------
@@ -386,8 +409,35 @@ func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
 
 const theSplitItem = "S0074-tracker-android-a11y-operability"
 
-const f1AndroidRow = "| F1 | android screen | deferred to " + theSplitItem +
-	": AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark, AC13_no_state_by_colour_alone, AC14_operable_without_a_pointer | - |"
+// theF6AndroidRow is the row these fixtures deface: an ordinary clause answered by an ordinary
+// assertion, chosen because nothing about it is special. A deferral written onto it must be refused,
+// and so must a deferral written onto any other row, because no clause is split to another item now.
+const theF6AndroidRow = "| F6 | android screen | AC17_stopped_reads_last_known | - |"
+
+// rewriteRow replaces one clause/surface row of the record wholesale, whatever it currently says.
+//
+// The deferral fixtures used to lean on the two rows S0056 left deferred. Those are graded now and
+// the record ships no deferral at all, so each fence below WRITES one - which is the honest shape
+// anyway: a fence that could only be tested while a deferral happened to be committed would stop
+// being tested the moment the repository got that right.
+func rewriteRow(clause, surface, cell string) func(string) string {
+	return func(s string) string {
+		prefix := "| " + clause + " | " + surface + " |"
+		lines := strings.Split(s, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, prefix) {
+				lines[i] = prefix + " " + cell
+				return strings.Join(lines, "\n")
+			}
+		}
+		return s
+	}
+}
+
+// deferring rewrites one record row into a deferral naming an item and the assertions that moved.
+func deferring(clause, surface, item, assertions string) func(string) string {
+	return rewriteRow(clause, surface, "deferred to "+item+": "+assertions+" | - |")
+}
 
 // ignoreOn puts a well-formed @Ignore on one case of the instrumented suite.
 func ignoreOn(caseName, reason string) func(string) string {
@@ -398,36 +448,25 @@ func ignoreOn(caseName, reason string) func(string) string {
 	}
 }
 
-func TestADeferralOnAPairTheSpecDoesNotSplitIsRefused(t *testing.T) {
+// No pair may be deferred any more: the split list is empty, so this fence now covers every row of
+// the record rather than the twenty it used to cover.
+func TestADeferralOnAnyPairIsRefused(t *testing.T) {
 	t.Parallel()
-	repo := newFakeRepo(t)
-	repo.writeRecord(t, func(s string) string {
-		return strings.Replace(s,
-			"| F6 | android screen | AC17_stopped_reads_last_known | - |",
-			"| F6 | android screen | deferred to "+theSplitItem+": AC17_stopped_reads_last_known | - |", 1)
-	})
-	err := CheckRecord(io.Discard, repo.root)
-	if err == nil {
-		t.Fatal("a clause was deferred on a pair the narrowed spec does not mark SPLIT, and the record was accepted")
-	}
-	if !strings.Contains(err.Error(), "only legal on the clause/surface pairs") {
-		t.Fatalf("the refusal does not say the pair may not be deferred: %v", err)
-	}
-}
-
-func TestADeferralNamingAnotherItemIsRefused(t *testing.T) {
-	t.Parallel()
-	repo := newFakeRepo(t)
-	repo.writeRecord(t, func(s string) string {
-		return strings.Replace(s, "| F10 | android screen | deferred to "+theSplitItem+":",
-			"| F10 | android screen | deferred to S0099-somebody-elses-item:", 1)
-	})
-	err := CheckRecord(io.Discard, repo.root)
-	if err == nil {
-		t.Fatal("a deferral pointing at an item that does not carry the clause was accepted")
-	}
-	if !strings.Contains(err.Error(), "this pair is carried by") {
-		t.Fatalf("the refusal does not name the item that actually carries the pair: %v", err)
+	for _, row := range []struct{ name, clause, assertion string }{
+		{"an ordinary pair", "F6", "AC17_stopped_reads_last_known"},
+		{"a pair that WAS split, until this item graded it", "F10", "AC13_contrast_light"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			repo := newFakeRepo(t)
+			repo.writeRecord(t, deferring(row.clause, AndroidSurface, theSplitItem, row.assertion))
+			err := CheckRecord(io.Discard, repo.root)
+			if err == nil {
+				t.Fatal("a clause was deferred, and the record was accepted; no clause is split to another item")
+			}
+			if !strings.Contains(err.Error(), "only legal on the clause/surface pairs") {
+				t.Fatalf("the refusal does not say the pair may not be deferred: %v", err)
+			}
+		})
 	}
 }
 
@@ -437,8 +476,9 @@ func TestADeferralBesideAnotherDispositionIsRefused(t *testing.T) {
 	t.Run("beside an exemption", func(t *testing.T) {
 		repo := newFakeRepo(t)
 		repo.writeRecord(t, func(s string) string {
-			return strings.Replace(s, f1AndroidRow,
-				strings.TrimSuffix(f1AndroidRow, "- |")+"and also exempt, because reasons |", 1)
+			return strings.Replace(s, theF6AndroidRow,
+				"| F6 | android screen | deferred to "+theSplitItem+
+					": AC17_stopped_reads_last_known | and also exempt, because reasons |", 1)
 		})
 		err := CheckRecord(io.Discard, repo.root)
 		if err == nil {
@@ -452,9 +492,9 @@ func TestADeferralBesideAnotherDispositionIsRefused(t *testing.T) {
 	t.Run("beside an assertion", func(t *testing.T) {
 		repo := newFakeRepo(t)
 		repo.writeRecord(t, func(s string) string {
-			return strings.Replace(s,
-				"| F10 | android screen | deferred to "+theSplitItem+":",
-				"| F10 | android screen | AC12_nothing_clipped_at_360dp, deferred to "+theSplitItem+":", 1)
+			return strings.Replace(s, theF6AndroidRow,
+				"| F6 | android screen | AC12_nothing_clipped_at_360dp, deferred to "+theSplitItem+
+					": AC17_stopped_reads_last_known | - |", 1)
 		})
 		err := CheckRecord(io.Discard, repo.root)
 		if err == nil {
@@ -471,11 +511,7 @@ func TestADeferralBesideAnotherDispositionIsRefused(t *testing.T) {
 func TestADeferralThatNamesNoAssertionIsRefused(t *testing.T) {
 	t.Parallel()
 	repo := newFakeRepo(t)
-	repo.writeRecord(t, func(s string) string {
-		return strings.Replace(s, "| F10 | android screen | deferred to "+theSplitItem+
-			": AC13_platform_checks_pass_light, AC13_platform_checks_pass_dark | - |",
-			"| F10 | android screen | deferred to "+theSplitItem+": | - |", 1)
-	})
+	repo.writeRecord(t, deferring("F6", AndroidSurface, theSplitItem, ""))
 	err := CheckRecord(io.Discard, repo.root)
 	if err == nil {
 		t.Fatal("a clause was deferred without naming what moved with it, and the record was accepted")
@@ -490,10 +526,7 @@ func TestADeferralThatNamesNoAssertionIsRefused(t *testing.T) {
 func TestADeferredAssertionThatRanIsRefused(t *testing.T) {
 	t.Parallel()
 	repo := newFakeRepo(t)
-	repo.writeRecord(t, nil)
-	names := withDemonstrations(claimsInTheCommittedRecord(t, AndroidSurface))
-	names = append(names, "AC13_no_state_by_colour_alone", "AC13_no_state_by_colour_alone"+DemonstrationSuffix)
-	repo.writeAndroidResults(t, names...)
+	repo.writeRecord(t, deferring("F6", AndroidSurface, theSplitItem, "AC17_stopped_reads_last_known"))
 	err := CheckRecord(io.Discard, repo.root)
 	if err == nil {
 		t.Fatal("a clause was deferred while the assertion carrying it ran green, and the record was accepted")
@@ -524,11 +557,7 @@ func TestTheParkedSuiteAndTheRecordMustAgree(t *testing.T) {
 
 	t.Run("a clause is deferred with no ignored case behind it", func(t *testing.T) {
 		repo := newFakeRepo(t)
-		repo.writeRecord(t, func(s string) string {
-			return strings.Replace(s, f1AndroidRow,
-				strings.Replace(f1AndroidRow, "AC14_operable_without_a_pointer",
-					"AC14_operable_without_a_pointer, AC99_an_assertion_still_in_the_suite", 1), 1)
-		})
+		repo.writeRecord(t, deferring("F6", AndroidSurface, theSplitItem, "AC17_stopped_reads_last_known"))
 		err := CheckRecord(io.Discard, repo.root)
 		if err == nil {
 			t.Fatal("a clause was written off while its assertion was still in the suite")

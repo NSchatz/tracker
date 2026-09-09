@@ -41,6 +41,11 @@ IMAGE ?= tracker:dev
 TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
+# The applicationId, which is what `adb run-as` needs to read the grading evidence the
+# instrumented suite writes: the measured contrast ratio, target size and spoken name of every
+# view it swept. AC13 requires a FAILING run to name the view, the check and the measured value;
+# this is how a PASSING one is inspectable too, rather than merely quiet.
+ANDROID_PACKAGE ?= com.nschatz.tracker
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
@@ -147,10 +152,13 @@ check-go: fmt vet build test staticcheck govulncheck pin-check
 verify-ui:
 	go run ./cmd/uiverify web
 
-# The Android screen's rendered claims (AC12, AC15-AC17) on a booted emulator, plus the repository
-# explanation documents the screen's labels moved their paragraphs into. AC13 and AC14 moved to
-# S0074-tracker-android-a11y-operability; FRONTEND-CONVENTIONS-RECORD.md records that and
-# `verify-ui-record` fences it.
+# The Android screen's rendered claims (AC12-AC17) on a booted emulator, plus the repository
+# explanation documents the screen's labels moved their paragraphs into.
+#
+# The accessibility claims are graded ONE AT A TIME - contrast, touch target size, a non-empty
+# spoken name, and no state carried by colour alone - each in both themes and each with its own
+# mutation. A single mutation breaking two claims at once cannot say which check is blind, which is
+# what impl-gate finding F21 was.
 #
 # The boot's exit status is CHECKED rather than piped away. `x=$(cmd | tail -1)` takes tail's status,
 # so a boot that refused on a timeout - the one absence `require` cannot pre-check - would not stop
@@ -170,7 +178,16 @@ verify-ui-android:
 	serial="$$(tail -1 "$$out")"; \
 	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
-	cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS)
+	adb="$${ANDROID_SDK_ROOT:-$$ANDROID_HOME}/platform-tools/adb"; \
+	"$$adb" -s "$$serial" shell run-as $(ANDROID_PACKAGE) rm -f cache/ui-grading.log >/dev/null 2>&1 || true; \
+	status=0; \
+	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
+	mkdir -p build/uiverify; \
+	"$$adb" -s "$$serial" shell run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log \
+		>build/uiverify/android-grading.log 2>/dev/null || true; \
+	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \
+	cat build/uiverify/android-grading.log 2>/dev/null || echo "(the device wrote no grading evidence)"; \
+	exit $$status
 	go run ./cmd/uiverify android
 
 # Both routes, with their prerequisite removed, must exit non-zero naming what is missing (AC19).
