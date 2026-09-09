@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.util.Base64
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -16,7 +17,6 @@ import com.google.android.apps.common.testing.accessibility.framework.utils.cont
 import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.io.FileInputStream
 import java.util.Locale
 import kotlin.math.abs
@@ -323,24 +323,42 @@ object UiHarness {
      * AC13 asks a failing run to name the view, the check and the measured value; this is where the
      * measured values of a PASSING run go, so a green sweep is inspectable rather than merely quiet.
      *
-     * It lands in the app's EXTERNAL files directory, which `adb pull` can read without `run-as` -
-     * and not in the app's `filesDir`, because the durable fix queue owns that one and counts what it
-     * finds there. The internal cache directory is written too, as the fallback the Makefile reads
-     * through `run-as` when external storage is not mounted.
+     * It is written through the instrumentation's SHELL, into the shell user's own `/data/local/tmp`,
+     * because that is the one place `adb` is certain to be able to read back. Writing it as the app -
+     * into its cache directory, or into its external files directory - produced a file neither
+     * `run-as` nor a pull could retrieve on this emulator, and evidence that stays on the device is
+     * not evidence. Lines are buffered and flushed in blocks, base64-encoded so that a measured value
+     * containing a quote cannot become part of the command.
      */
     fun evidence(line: String) {
-        for (dir in listOf(context.getExternalFilesDir(null), context.cacheDir)) {
-            if (dir == null) continue
+        synchronized(pending) {
+            pending.append(line).append('\n')
+            if (pending.length >= EVIDENCE_FLUSH_BYTES) flushEvidence()
+        }
+    }
+
+    /** Writes whatever evidence is buffered, and empties the buffer. Safe to call at any time. */
+    fun flushEvidence() {
+        synchronized(pending) {
+            if (pending.isEmpty()) return
+            val block = pending.toString()
+            pending.setLength(0)
             try {
-                File(dir, EVIDENCE_FILE).appendText(line + "\n")
-            } catch (ignored: java.io.IOException) {
+                val encoded = Base64.encodeToString(block.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                shell("sh -c 'echo $encoded | base64 -d >> $EVIDENCE_PATH'")
+            } catch (ignored: Exception) {
                 // Evidence is an aid, never a gate: a route that turned red because it could not
                 // write a log would be reporting on the log rather than on the screen.
             }
         }
     }
 
-    const val EVIDENCE_FILE = "ui-grading.log"
+    private val pending = StringBuilder()
+
+    private const val EVIDENCE_FLUSH_BYTES = 4_000
+
+    /** Where the device writes what it measured, and where `make verify-ui-android` reads it back. */
+    const val EVIDENCE_PATH = "/data/local/tmp/tracker-ui-grading.log"
 
     // --- focus, keyboard and configuration -------------------------------------------------------
 

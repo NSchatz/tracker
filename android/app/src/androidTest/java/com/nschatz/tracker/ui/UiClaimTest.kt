@@ -97,6 +97,8 @@ class UiClaimTest {
         // between the directional keys and the screen. Put the device back whichever case just ran,
         // so a later one never inherits a half-configured device.
         UiHarness.restoreInputMethods()
+        // Whatever this case measured, written out while the device is still up.
+        UiHarness.flushEvidence()
     }
 
     // --- AC12: brevity, the explanation destination, and a 360dp layout -------------------------

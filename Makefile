@@ -41,11 +41,14 @@ IMAGE ?= tracker:dev
 TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
-# The applicationId, which is what `adb run-as` needs to read the grading evidence the
-# instrumented suite writes: the measured contrast ratio, target size and spoken name of every
-# view it swept. AC13 requires a FAILING run to name the view, the check and the measured value;
-# this is how a PASSING one is inspectable too, rather than merely quiet.
-ANDROID_PACKAGE ?= com.nschatz.tracker
+# Where the instrumented suite writes what it measured - the contrast ratio, target size and spoken
+# name of every view it swept - and where `verify-ui-android` reads it back off the device. It is
+# the SHELL user's own directory rather than the app's, because that is the one place adb is certain
+# to be able to read: a file written as the app came back empty through both `run-as` and a pull.
+# AC13 requires a FAILING run to name the view, the check and the measured value; this is how a
+# PASSING one is inspectable too, rather than merely quiet. The path is stated in one more place,
+# `UiHarness.EVIDENCE_PATH`, because the device end cannot read a Makefile.
+ANDROID_EVIDENCE ?= /data/local/tmp/tracker-ui-grading.log
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
@@ -179,20 +182,17 @@ verify-ui-android:
 	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
 	adb="$${ANDROID_SDK_ROOT:-$$ANDROID_HOME}/platform-tools/adb"; \
-	evidence="/sdcard/Android/data/$(ANDROID_PACKAGE)/files/ui-grading.log"; \
+	evidence="$(ANDROID_EVIDENCE)"; \
 	"$$adb" -s "$$serial" shell rm -f "$$evidence" >/dev/null 2>&1 || true; \
-	"$$adb" -s "$$serial" shell run-as $(ANDROID_PACKAGE) rm -f cache/ui-grading.log >/dev/null 2>&1 || true; \
 	status=0; \
 	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
 	mkdir -p build/uiverify; \
 	rm -f build/uiverify/android-grading.log; \
-	: "adb exec-out MERGES the device's stderr into stdout, so a 'no such file' from the device" ; \
-	: "lands in the log and makes it look non-empty; silence it on the DEVICE side, not here" ; \
+	: "The suite writes through the instrumentation's SHELL into the shell user's own /data/local/tmp," ; \
+	: "which is the one place adb is certain to read back: a file written as the APP came back empty" ; \
+	: "through both run-as and a pull. exec-out MERGES the device's stderr into stdout, so the device" ; \
+	: "side is silenced there rather than here, or a 'no such file' would look like content." ; \
 	"$$adb" -s "$$serial" exec-out "cat $$evidence 2>/dev/null" >build/uiverify/android-grading.log 2>/dev/null || true; \
-	if [ ! -s build/uiverify/android-grading.log ]; then \
-		"$$adb" -s "$$serial" exec-out "run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log 2>/dev/null" \
-			>build/uiverify/android-grading.log 2>/dev/null || true; \
-	fi; \
 	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \
 	if [ -s build/uiverify/android-grading.log ]; then cat build/uiverify/android-grading.log; \
 	else echo "(the device wrote no grading evidence this run)"; fi; \
