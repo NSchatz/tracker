@@ -270,15 +270,32 @@ class UiClaimTest {
     private fun platformChecksPass(theme: String) {
         compose.waitForIdle()
         Thread.sleep(500)
-        val run = UiHarness.accessibilityErrors()
+
+        // AC13 says "on every rendered view", and the platform's checks only ever see the window as
+        // it is RIGHT NOW. The home screen scrolls and is taller than a phone viewport, so a single
+        // sweep inspects the top and reports a clean bill of health for everything below it - which
+        // is exactly what the first emulator run did: it passed this claim twice while the
+        // collection card, carrying both of the mutation's defects, was off the glass. So every card
+        // is scrolled into view and swept.
+        val runs = mutableListOf<AtfRun>()
+        for (tag in listOf("card-permissions", "card-server", "card-collection")) {
+            compose.onNodeWithTag(tag).performScrollTo()
+            compose.waitForIdle()
+            Thread.sleep(400)
+            runs.add(UiHarness.accessibilityErrors())
+        }
+
+        val results = runs.sumOf { it.resultCount }
         assertTrue(
-            "the accessibility checks produced no results at all in the $theme theme (${run.note}), " +
-                "so a clean sweep would prove nothing",
-            run.resultCount > 0,
+            "the accessibility checks produced no results at all in the $theme theme " +
+                "(${runs.joinToString("; ") { it.note }}), so a clean sweep would prove nothing",
+            results > 0,
         )
+        val failed = runs.filter { it.errors.isNotEmpty() }
         assertTrue(
-            "the platform accessibility checks failed in the $theme theme:\n  " + run.describe(),
-            run.errors.isEmpty(),
+            "the platform accessibility checks failed in the $theme theme:\n  " +
+                failed.joinToString("\n  ") { it.describe() },
+            failed.isEmpty(),
         )
     }
 
@@ -680,9 +697,26 @@ class UiClaimTest {
         return false
     }
 
-    private fun isFocused(tag: String): Boolean =
-        compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()
-            .any { it.config.getOrNull(SemanticsProperties.Focused) == true }
+    /**
+     * Whether [tag] holds keyboard focus, judged over the tagged node AND its subtree, in both the
+     * merged and the unmerged tree.
+     *
+     * The testTag and the Focused property are not always on the SAME semantics node: a Compose
+     * Button carries its tag on the modifier chain and its focus state on the focusable node inside
+     * it, so reading Focused off the tagged node alone answers "no" however many times focus has
+     * actually landed there. The first emulator run failed AC14 that way - the save control was
+     * reachable all along, and the reader could not see it.
+     */
+    private fun isFocused(tag: String): Boolean {
+        for (unmerged in listOf(true, false)) {
+            for (node in compose.onAllNodesWithTag(tag, useUnmergedTree = unmerged).fetchSemanticsNodes()) {
+                var found = false
+                walk(node) { if (it.config.getOrNull(SemanticsProperties.Focused) == true) found = true }
+                if (found) return true
+            }
+        }
+        return false
+    }
 
     /** The pixels of one control, wherever it currently sits, rather than of the whole display. */
     private fun captureOf(tag: String): android.graphics.Bitmap =
