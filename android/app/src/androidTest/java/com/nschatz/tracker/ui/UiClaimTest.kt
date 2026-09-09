@@ -620,7 +620,10 @@ class UiClaimTest {
         val findings = mutableListOf<AtfFinding>()
         var evaluated = 0
         var notRun = 0
-        for (tag in listOf("card-permissions", "card-server", "card-collection")) {
+        // Every card the home column draws, so "on every rendered view" keeps meaning the whole
+        // screen as it grows. The alerts card arrived after this sweep was written and would
+        // otherwise have been the one region the accessibility claims could not go red for.
+        for (tag in listOf("card-permissions", "card-server", "card-collection", "card-alerts")) {
             compose.onNodeWithTag(tag).performScrollTo()
             compose.waitForIdle()
             Thread.sleep(400)
@@ -722,10 +725,13 @@ class UiClaimTest {
         reached["explain-permissions"] = focusByDirection("explain-permissions", visited)
         reached["field-url"] = focusByDirection("field-url", visited)
         reached["field-token"] = focusByDirection("field-token", visited)
+        reached["field-viewer-token"] = focusByDirection("field-viewer-token", visited)
         reached["action-save"] = focusByDirection("action-save", visited)
         reached["explain-server"] = focusByDirection("explain-server", visited)
         reached["action-collection"] = focusByDirection("action-collection", visited)
         reached["explain-counters"] = focusByDirection("explain-counters", visited)
+        reached["action-refresh-crossings"] = focusByDirection("action-refresh-crossings", visited)
+        reached["explain-alerts"] = focusByDirection("explain-alerts", visited)
 
         val route = visited.joinToString(" -> ") { it.name }.ifBlank { "(nothing at all)" }
         val census = reached.entries.joinToString(", ") {
@@ -1426,9 +1432,12 @@ class UiClaimTest {
         const val MINIMUM_TEXTS_MEASURED = 5
 
         /**
-         * How many controls this screen has at its least populated: the permission action, both
-         * server fields, the save control, the collection control and three explanation affordances.
-         * A sweep that found fewer was not looking at this screen.
+         * How many controls a sweep must have found before a clean result means anything.
+         *
+         * A floor rather than the count: the AC14 census is what pins the exact set the home screen
+         * declares - twelve, and every one of them drawn, enabled, reachable and activatable - while
+         * this only has to be high enough that a selector which stopped matching cannot pass over an
+         * almost-empty set. A sweep that found fewer than this was not looking at this screen.
          */
         const val MINIMUM_CONTROLS = 5
 

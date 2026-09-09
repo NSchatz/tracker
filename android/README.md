@@ -215,7 +215,10 @@ the spoken name are also computed here from the same two inputs the platform che
 `AccessibilityNodeInfo` tree the emulator published and the screenshot it painted), because a
 hierarchy built from node infos carries no text or background colour, so those checks can only report
 a screenshot heuristic — at WARNING, never at ERROR. Filtering their results to ERROR is how a sweep
-came back clean over text at 1.7:1. Every number the sweep measured is written to
+came back clean over text at 1.7:1. It sweeps **every card in the home column** — each scrolled into
+view in turn, because the platform's checks only ever see the window as it is right now, and a card
+the sweep does not scroll to is a region the accessibility claims cannot go red for. Every number the
+sweep measured is written to
 `build/uiverify/android-grading.log` and printed by `make verify-ui-android`, so a PASSING run is
 inspectable rather than merely quiet — **and that sentence is now graded rather than trusted**.
 `uiverify android` refuses a run whose evidence file is absent, empty, missing any claim's summary
@@ -234,10 +237,10 @@ the device with `adb logcat -d -v raw`.
 
 **Operability without a pointer is graded over EVERY control, not just the save control.** The
 traversal walks the screen with the directional keys, records where focus went and what the platform
-said each focused node could do, and then requires every one of the nine controls the home screen
+said each focused node could do, and then requires every one of the twelve controls the home screen
 declares to be drawn, enabled, reached and activatable — a control the screen has stopped drawing or
 has disabled is reported as a failure rather than dropped quietly out of the measured set. Two of
-those nine are only operable once the phone has granted *approximate* location, so the suite grants
+those twelve are only operable once the phone has granted *approximate* location, so the suite grants
 exactly that through the shell before each case: the start/stop control is disabled without a
 location grant and the precise-location upgrade has nothing to upgrade from. Nothing about the app's
 own permission flow is stubbed — the app reads the same `checkSelfPermission` it always reads, and it
@@ -245,6 +248,13 @@ is the device that changed. `internal/uiverify`'s two S0074 regression guards ru
 and hold the suite to this: one refuses a control the screen declares and the traversal does not
 name, the other refuses a save-effect predicate that cannot tell "Saved to this device" from
 "Not saved".
+
+The first thing widening that census found was a real one: the **viewer-token field** shipped without
+`Modifier.directionalPassThrough`, which the other two fields carry. A Compose text field consumes
+the arrow keys whether or not its caret has anywhere to go, so focus that landed in it could not
+leave, and Save, the server card's affordance and the whole alerts card below it were unreachable to
+anyone driving the screen without a pointer. That is the defect this suite was written to catch,
+one field further down the same card; it is fixed, and the census is what would have said so.
 
 The suite needs a booted emulator and **refuses loudly when it cannot have one**, naming the missing
 piece and how to get it (`scripts/android-emulator.sh`). It never skips. Without `/dev/kvm` an

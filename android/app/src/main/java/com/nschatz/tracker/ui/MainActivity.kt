@@ -479,12 +479,12 @@ private fun AlertsCard(mutation: UiMutation, onExplain: () -> Unit) {
 
             TextButton(
                 onClick = { CrossingsRefresher.refreshInBackground(context) },
-                modifier = Modifier.focusRing().minimumTarget().testTag("action-refresh-crossings"),
+                modifier = Modifier.focusRing(mutation).minimumTarget().testTag("action-refresh-crossings"),
             ) { Text(stringResource(R.string.crossings_refresh)) }
             if (mutation == UiMutation.PARAGRAPHS_ON_SURFACE) {
                 Text(stringResource(R.string.explain_alerts_limitation), style = MaterialTheme.typography.bodySmall)
             }
-            ExplainAffordance(R.string.explain_alerts, onExplain, "explain-alerts")
+            ExplainAffordance(R.string.explain_alerts, onExplain, "explain-alerts", mutation)
         }
     }
 }
@@ -696,7 +696,17 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
                 onValueChange = { viewerCredential = it },
                 label = { Text(stringResource(R.string.config_viewer_token_label)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth().focusRing().testTag("field-viewer-token"),
+                // directionalPassThrough for the same reason the two fields above carry it, and this
+                // one arrived without it: a Compose text field consumes the arrow keys whether or
+                // not its caret has anywhere to go, so a directional traversal that lands here can
+                // never leave, and Save, the server card's affordance and the whole alerts card
+                // below become unreachable to anyone driving this screen without a pointer. That is
+                // impl-gate finding F20 exactly, one field further down.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .directionalPassThrough()
+                    .focusRing(mutation)
+                    .testTag("field-viewer-token"),
             )
             Label(
                 short = R.string.config_plaintext_note,
