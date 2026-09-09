@@ -230,13 +230,14 @@ const val FOCUS_RING_WIDTH_DP = 3
 /**
  * How far the control's own paint is inset from the ring, in dp.
  *
- * The outer band of this width belongs to the ring and to nothing else - not to the control's
- * surface, and not to the Material ripple's focus state layer, which tints the inside of a control
- * whenever it takes focus. That is what makes the indicator measurable on its own: the suite
- * compares this band focused against unfocused, so a ring that was never painted reads as zero
- * differing pixels rather than as the ripple's tint.
+ * It EQUALS the ring width on purpose. The outer band of that width then belongs to the ring and to
+ * nothing else - not to the control's surface, and not to the Material ripple's focus state layer,
+ * which tints the inside of a control whenever it takes focus. That is what makes the indicator
+ * measurable on its own: the suite compares this band focused against unfocused, so a ring that was
+ * never painted reads as zero differing pixels rather than as the ripple's tint. At 2dp the ripple
+ * reached the last half-pixel of the band and the AC26 demonstration could not be shown going red.
  */
-const val FOCUS_RING_INSET_DP = 2
+const val FOCUS_RING_INSET_DP = FOCUS_RING_WIDTH_DP
 
 /**
  * Lets a directional key LEAVE a control that would otherwise swallow it.

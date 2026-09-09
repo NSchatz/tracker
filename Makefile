@@ -179,14 +179,21 @@ verify-ui-android:
 	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
 	adb="$${ANDROID_SDK_ROOT:-$$ANDROID_HOME}/platform-tools/adb"; \
+	evidence="/sdcard/Android/data/$(ANDROID_PACKAGE)/files/ui-grading.log"; \
+	"$$adb" -s "$$serial" shell rm -f "$$evidence" >/dev/null 2>&1 || true; \
 	"$$adb" -s "$$serial" shell run-as $(ANDROID_PACKAGE) rm -f cache/ui-grading.log >/dev/null 2>&1 || true; \
 	status=0; \
 	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
 	mkdir -p build/uiverify; \
-	"$$adb" -s "$$serial" shell run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log \
-		>build/uiverify/android-grading.log 2>/dev/null || true; \
+	rm -f build/uiverify/android-grading.log; \
+	"$$adb" -s "$$serial" exec-out "cat $$evidence" >build/uiverify/android-grading.log 2>/dev/null || true; \
+	if [ ! -s build/uiverify/android-grading.log ]; then \
+		"$$adb" -s "$$serial" exec-out run-as $(ANDROID_PACKAGE) cat cache/ui-grading.log \
+			>build/uiverify/android-grading.log 2>/dev/null || true; \
+	fi; \
 	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \
-	cat build/uiverify/android-grading.log 2>/dev/null || echo "(the device wrote no grading evidence)"; \
+	if [ -s build/uiverify/android-grading.log ]; then cat build/uiverify/android-grading.log; \
+	else echo "(the device wrote no grading evidence this run)"; fi; \
 	exit $$status
 	go run ./cmd/uiverify android
 

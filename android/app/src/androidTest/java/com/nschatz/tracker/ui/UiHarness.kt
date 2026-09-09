@@ -223,6 +223,7 @@ object UiHarness {
                 clickable = node.isClickable,
                 focusable = node.isFocusable,
                 editable = node.isEditable,
+                enabled = node.isEnabled,
                 visible = node.isVisibleToUser,
                 childCount = node.childCount,
                 contrast = if (shot != null && text.isNotBlank()) contrastOf(shot, bounds) else null,
@@ -321,16 +322,21 @@ object UiHarness {
      *
      * AC13 asks a failing run to name the view, the check and the measured value; this is where the
      * measured values of a PASSING run go, so a green sweep is inspectable rather than merely quiet.
-     * It lands in the app's cache directory rather than its files directory because the durable fix
-     * queue owns the latter and counts what it finds there.
+     *
+     * It lands in the app's EXTERNAL files directory, which `adb pull` can read without `run-as` -
+     * and not in the app's `filesDir`, because the durable fix queue owns that one and counts what it
+     * finds there. The internal cache directory is written too, as the fallback the Makefile reads
+     * through `run-as` when external storage is not mounted.
      */
     fun evidence(line: String) {
-        try {
-            val file = File(context.cacheDir, EVIDENCE_FILE)
-            file.appendText(line + "\n")
-        } catch (ignored: java.io.IOException) {
-            // Evidence is an aid, never a gate: a route that turned red because it could not write a
-            // log would be reporting on the log rather than on the screen.
+        for (dir in listOf(context.getExternalFilesDir(null), context.cacheDir)) {
+            if (dir == null) continue
+            try {
+                File(dir, EVIDENCE_FILE).appendText(line + "\n")
+            } catch (ignored: java.io.IOException) {
+                // Evidence is an aid, never a gate: a route that turned red because it could not
+                // write a log would be reporting on the log rather than on the screen.
+            }
         }
     }
 
@@ -429,6 +435,7 @@ data class A11yNode(
     val clickable: Boolean,
     val focusable: Boolean,
     val editable: Boolean,
+    val enabled: Boolean,
     val visible: Boolean,
     val childCount: Int,
     val contrast: Double?,
@@ -441,12 +448,15 @@ data class A11yNode(
         return className.substringAfterLast('.') + " " + bounds.toShortString()
     }
 
-    /** What a screen reader would have to announce for this node. */
-    fun spokenName(): String = listOf(text, description, hint).firstOrNull { it.isNotBlank() }.orEmpty()
+    /** What a screen reader would have to announce for THIS node, before its subtree is consulted. */
+    fun ownSpokenName(): String = listOf(text, description, hint).firstOrNull { it.isNotBlank() }.orEmpty()
 
     fun isControl(): Boolean = visible && (clickable || editable) && bounds.width() > 0 && bounds.height() > 0
 
     fun isRenderedText(): Boolean = visible && text.isNotBlank() && bounds.width() > 0 && bounds.height() > 0
+
+    /** Whether [other] sits inside this node's rectangle, which is how a subtree reads geometrically. */
+    fun contains(other: A11yNode): Boolean = bounds.contains(other.bounds)
 }
 
 /** One result the Accessibility Test Framework produced, at whatever severity it produced it. */

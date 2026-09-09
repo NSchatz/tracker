@@ -405,7 +405,12 @@ class UiClaimTest {
      */
     private fun contrastMeetsTheFloor(theme: String) {
         val run = sweepEveryCard(theme, "contrast", measureContrast = true)
-        val texts = run.nodes.filter { it.isRenderedText() }
+        // WCAG 2.2's 1.4.3 exempts "text or images of text that are part of an inactive user
+        // interface component". Material paints a disabled control at 38% of the content colour by
+        // design, so measuring one would report the platform's own disabled styling as a defect of
+        // this screen. The start/stop control IS disabled on an emulator, where no location grant
+        // exists, and it was the only thing the first run reported.
+        val texts = run.nodes.filter { it.isRenderedText() && !isInactive(it, run.nodes) }
         val measured = texts.filter { it.contrast != null }.distinctBy { it.name() + it.bounds.toShortString() }
         assertTrue(
             "contrast: no rendered text in the $theme theme could be measured at all " +
@@ -432,7 +437,7 @@ class UiClaimTest {
     /** Every control a person can hit is at least 48dp square, measured on the running display. */
     private fun everyTargetMeetsTheFloor(theme: String) {
         val run = sweepEveryCard(theme, "target-size", measureContrast = false)
-        val controls = run.nodes.filter { it.isControl() }.distinctBy { it.name() + it.bounds.toShortString() }
+        val controls = largestObservationPerControl(run.nodes)
         assertTrue(
             "touch target size: the $theme sweep found ${controls.size} controls on a screen that " +
                 "has at least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
@@ -453,20 +458,41 @@ class UiClaimTest {
         )
     }
 
+    /**
+     * The LARGEST rectangle each control was seen at, across the sweep's three scroll positions.
+     *
+     * `boundsInScreen` is clipped to what is on the glass, so a control half over the fold reports
+     * the sliver that is showing - the first emulator run measured the start/stop control at 145x1dp
+     * and called it an undersized target when it is 145x48. Every card is scrolled fully into view at
+     * some point in the sweep, so the largest observation is the control's real size, and a control
+     * that is genuinely small is small at every one of them.
+     */
+    private fun largestObservationPerControl(nodes: List<A11yNode>): List<A11yNode> {
+        val biggest = mutableMapOf<String, A11yNode>()
+        for (node in nodes.filter { it.isControl() }) {
+            val key = node.name()
+            val seen = biggest[key]
+            val area = node.bounds.width().toLong() * node.bounds.height().toLong()
+            val seenArea = seen?.let { it.bounds.width().toLong() * it.bounds.height().toLong() } ?: -1L
+            if (area > seenArea) biggest[key] = node
+        }
+        return biggest.values.toList()
+    }
+
     /** Every control and every text field has something a screen reader can announce. */
     private fun everyControlHasASpokenName(theme: String) {
         val run = sweepEveryCard(theme, "spoken-name", measureContrast = false)
-        val controls = run.nodes.filter { it.isControl() && it.childCount == 0 }
-            .distinctBy { it.name() + it.bounds.toShortString() }
+        val controls = largestObservationPerControl(run.nodes)
         assertTrue(
             "spoken name: the $theme sweep found ${controls.size} controls on a screen that has at " +
                 "least $MINIMUM_CONTROLS, so it was measuring something other than this screen",
             controls.size >= MINIMUM_CONTROLS,
         )
-        val offenders = controls.filter { it.spokenName().isBlank() }.map {
+        val offenders = controls.filter { spokenNameOf(it, run.nodes).isBlank() }.map {
             "spoken name: ${it.name()} is a control a person can operate and a screen reader would " +
                 "announce it with nothing at all in the $theme theme (no text, no content " +
-                "description, no hint; it is a ${it.className.substringAfterLast('.')} at ${it.bounds.toShortString()})"
+                "description, no hint, and nothing inside it either; it is a " +
+                "${it.className.substringAfterLast('.')} at ${it.bounds.toShortString()})"
         }
         val platform = run.errorsFrom(SPOKEN_NAME_CHECKS).map { "spoken name: " + it.describe() }
         assertTrue(
@@ -474,6 +500,37 @@ class UiClaimTest {
                 "\n  [${controls.size} controls measured; each one's name is in the grading evidence]",
             offenders.isEmpty() && platform.isEmpty(),
         )
+    }
+
+    /**
+     * What a screen reader would announce for a control: its own text, or anything inside it.
+     *
+     * Compose publishes a control and the label drawn inside it as separate nodes rather than one
+     * merged node, so a control with a perfectly good label has no text OF ITS OWN. Reading only the
+     * control's own text reported every control on the screen as unnamed, which is a defect in the
+     * reading and not in the screen; requiring the control to be a leaf found no controls at all.
+     * Containment is how a subtree reads geometrically, and it is what a person hears.
+     */
+    private fun spokenNameOf(control: A11yNode, nodes: List<A11yNode>): String {
+        val own = control.ownSpokenName()
+        if (own.isNotBlank()) return own
+        return nodes.filter { it !== control && control.contains(it) }
+            .map { it.ownSpokenName() }
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
+    }
+
+    /**
+     * Whether a node is, or sits inside, a control the screen has disabled.
+     *
+     * WCAG 2.2's 1.4.3 has no contrast requirement for an inactive component, and Material paints one
+     * at 38% of the content colour by design. On an emulator there is no location grant, so the
+     * start/stop control is disabled and its label measures about 2.3:1 - the platform's own styling,
+     * not a defect of this screen.
+     */
+    private fun isInactive(node: A11yNode, nodes: List<A11yNode>): Boolean {
+        if (!node.enabled) return true
+        return nodes.any { it !== node && !it.enabled && (it.clickable || it.editable) && it.contains(node) }
     }
 
     /**
@@ -555,7 +612,9 @@ class UiClaimTest {
             UiHarness.evidence(
                 "  $claim [$theme] ${node.name()}: ${dp(node.bounds.width())}x${dp(node.bounds.height())}dp " +
                     "contrast=" + (node.contrast?.let { ratio(it) } ?: "not measured") +
-                    " spoken=\"${node.spokenName()}\" clickable=${node.clickable} editable=${node.editable}",
+                    " spoken=\"${spokenNameOf(node, nodes)}\" clickable=${node.clickable}" +
+                    " editable=${node.editable} enabled=${node.enabled}" +
+                    " inactive=${isInactive(node, nodes)} children=${node.childCount}",
             )
         }
         for (finding in findings) UiHarness.evidence("  $claim [$theme] platform: " + finding.describe())
@@ -1019,7 +1078,10 @@ class UiClaimTest {
      */
     private fun ringPixelsThatDiffer(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Int {
         if (a.width != b.width || a.height != b.height) return Int.MAX_VALUE
-        val band = kotlin.math.max(2, kotlin.math.ceil(FOCUS_RING_INSET_DP * UiHarness.density()).toInt())
+        // One dp inside the band, so the measurement is strictly of pixels the ring owns. The ripple's
+        // focus state layer begins exactly where the ring's inset ends, and at the boundary a
+        // half-pixel of it was enough to report an indicator that had not been painted.
+        val band = kotlin.math.max(2, ((FOCUS_RING_INSET_DP - 1) * UiHarness.density()).toInt())
         var differing = 0
         for (y in 0 until a.height) {
             for (x in 0 until a.width) {
