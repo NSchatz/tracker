@@ -10,6 +10,7 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -100,7 +101,7 @@ class UiClaimTest {
     private fun everyStateStaysShort() {
         // A save the client refuses, reached the way a person reaches it: press Save with nothing
         // entered. setUp cleared the stored configuration, so this is the refusal every time.
-        compose.onNodeWithTag("action-save").performClick()
+        compose.onNodeWithTag("action-save").performScrollTo().performClick()
         compose.waitForIdle()
         val verdict = textOf("config-verdict")
         assertTrue(
@@ -154,7 +155,12 @@ class UiClaimTest {
                 1,
                 compose.onAllNodesWithTag(tag).fetchSemanticsNodes().size,
             )
-            compose.onNodeWithTag(tag).performClick()
+            // Scrolled to first: the home screen is a scrolling column and is TALLER than a phone
+            // viewport, so the third card's affordance is simply not on screen when the screen
+            // opens. Clicking a node that is not in the viewport injects a tap that lands nowhere,
+            // which reads as "the affordance does not work" when what happened is that a person
+            // would have scrolled to it.
+            compose.onNodeWithTag(tag).performScrollTo().performClick()
             compose.waitForIdle()
             compose.onNodeWithTag("explanation").assertIsDisplayed()
 
@@ -164,7 +170,7 @@ class UiClaimTest {
                 "the explanation opened from $tag renders no paragraph, so the claims were dropped rather than moved",
                 paragraphs.isNotEmpty(),
             )
-            compose.onNodeWithTag("explanation-back").performClick()
+            compose.onNodeWithTag("explanation-back").performScrollTo().performClick()
             compose.waitForIdle()
             compose.onNodeWithTag("home").assertIsDisplayed()
         }
@@ -191,23 +197,40 @@ class UiClaimTest {
         assertTrue("the home screen laid out to zero width", rootWidth > 0)
 
         val offenders = mutableListOf<String>()
+        var measured = 0
         for (node in compose.onAllNodesWithTag("home", useUnmergedTree = true).fetchSemanticsNodes()) {
             // Walk everything under the home column.
             walk(node) { child ->
                 val text = child.config.getOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }
                 if (!text.isNullOrBlank()) {
-                    // boundsInRoot is CLIPPED by every ancestor; size is what layout gave the node.
-                    // A node whose visible box is narrower than its laid-out box has had its text cut
-                    // off, and one whose box runs past the display has been pushed outside it.
-                    if (child.boundsInRoot.width + 1f < child.size.width) {
-                        offenders.add("clipped: \"$text\" (laid out ${child.size.width}px, visible ${child.boundsInRoot.width}px)")
+                    // AC12 is about HORIZONTAL fit: "no text clipped or pushed outside the display
+                    // and no horizontal scrolling". The column scrolls VERTICALLY by design, so a
+                    // node below the fold has an empty boundsInRoot - it is out of the viewport, not
+                    // cut off, and a person reaches it by scrolling. Measuring it would report every
+                    // screen taller than the glass as clipped, which is what the first emulator run
+                    // did. Only what is currently in view can be judged for clipping.
+                    if (child.boundsInRoot.height > 0f && child.boundsInRoot.width > 0f) {
+                        measured++
+                        // boundsInRoot is CLIPPED by every ancestor; size is what layout gave the
+                        // node. A visible box narrower than the laid-out box has had its text cut
+                        // off, and a box running past the display has been pushed outside it.
+                        if (child.boundsInRoot.width + 1f < child.size.width) {
+                            offenders.add("clipped: \"$text\" (laid out ${child.size.width}px, visible ${child.boundsInRoot.width}px)")
+                        }
                     }
+                    // Horizontal overflow is judged on the LAID-OUT box whether or not the node is
+                    // scrolled into view: a column wider than the display is wrong at every offset,
+                    // and this is the half the OVERFLOWING_LAYOUT mutation trips.
                     if (child.positionInRoot.x + child.size.width > rootWidth + 1f) {
                         offenders.add("pushed outside: \"$text\" ends at ${child.positionInRoot.x + child.size.width}px of ${rootWidth}px")
                     }
                 }
             }
         }
+        assertTrue(
+            "no text was in the viewport to measure, so this assertion would pass vacuously",
+            measured >= 5,
+        )
         assertTrue(
             "at a 360dp-wide profile the screen does not fit:\n  " + offenders.joinToString("\n  "),
             offenders.isEmpty(),
@@ -226,8 +249,8 @@ class UiClaimTest {
     @Test
     fun AC13_platform_checks_pass_light_demonstration() {
         UiHarness.setNightMode(false)
-        UiHarness.launch(UiMutation.LOW_CONTRAST_STATUS)
-        assertFails("low-contrast text was not caught by the platform checks") { platformChecksPass("light") }
+        UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
+        assertFails("an accessibility defect was not caught by the platform checks") { platformChecksPass("light") }
     }
 
     @Test
@@ -240,8 +263,8 @@ class UiClaimTest {
     @Test
     fun AC13_platform_checks_pass_dark_demonstration() {
         UiHarness.setNightMode(true)
-        UiHarness.launch(UiMutation.LOW_CONTRAST_STATUS)
-        assertFails("low-contrast text was not caught by the platform checks") { platformChecksPass("dark") }
+        UiHarness.launch(UiMutation.ACCESSIBILITY_DEFECT)
+        assertFails("an accessibility defect was not caught by the platform checks") { platformChecksPass("dark") }
     }
 
     private fun platformChecksPass(theme: String) {
@@ -307,7 +330,7 @@ class UiClaimTest {
 
         // And the fourth: a refused save leads with the refusal as a WORD rather than carrying it
         // in the error colour alone. setUp cleared the stored configuration, so Save refuses.
-        compose.onNodeWithTag("action-save").performClick()
+        compose.onNodeWithTag("action-save").performScrollTo().performClick()
         compose.waitForIdle()
         val verdict = textOf("config-verdict")
         assertTrue(
@@ -336,8 +359,14 @@ class UiClaimTest {
         // The server configuration is entered and saved with no touch at all: the fields take text
         // from the keyboard, and the save control is reached by directional navigation and activated
         // with the centre key.
-        compose.onNodeWithTag("field-url").performTextReplacement("https://tracker.example.org")
-        compose.onNodeWithTag("field-token").performTextReplacement("a-device-token")
+        compose.onNodeWithTag("field-url").performScrollTo().performTextReplacement("https://tracker.example.org")
+        compose.onNodeWithTag("field-token").performScrollTo().performTextReplacement("a-device-token")
+        compose.waitForIdle()
+
+        // Typing raised the IME, and while it is up it is the IME that receives a d-pad key. Put it
+        // away before traversing, or the traversal below goes to the keyboard and the save control
+        // is reported unreachable when it is not.
+        UiHarness.dismissKeyboard()
         compose.waitForIdle()
 
         val reached = focusByDirection("action-save")
@@ -463,12 +492,14 @@ class UiClaimTest {
             "the queue could not be read but the figure renders \"$queued\"; it must read as unavailable in words",
             queued.contains("unavailable", ignoreCase = true),
         )
-        // Everything else still draws, and still works.
-        compose.onNodeWithTag("card-permissions").assertIsDisplayed()
-        compose.onNodeWithTag("card-server").assertIsDisplayed()
-        compose.onNodeWithTag("action-collection").assertIsDisplayed()
-        compose.onNodeWithTag("counter-delivered-value").assertIsDisplayed()
-        compose.onNodeWithTag("action-save").performClick()
+        // Everything else still draws, and still works. Scrolled to first: the column is taller
+        // than the viewport, so "still draws" means a person can reach it, not that all three cards
+        // fit on the glass at once.
+        compose.onNodeWithTag("card-permissions").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("card-server").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("action-collection").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("counter-delivered-value").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("action-save").performScrollTo().performClick()
         compose.waitForIdle()
         assertTrue(
             "with the queue unreadable the save control no longer works",
@@ -641,7 +672,7 @@ class UiClaimTest {
         // Start from the top of the screen, then walk down with the directional pad, exactly as a
         // person with a keyboard or a d-pad would.
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
-        for (i in 0 until 30) {
+        for (i in 0 until 40) {
             compose.waitForIdle()
             if (isFocused(tag)) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)

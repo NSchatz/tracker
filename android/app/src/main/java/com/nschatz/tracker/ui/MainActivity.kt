@@ -498,7 +498,7 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
             Text(
                 stringResource(if (running) R.string.collection_running else R.string.collection_stopped),
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (mutation == UiMutation.LOW_CONTRAST_STATUS) {
+                color = if (mutation == UiMutation.ACCESSIBILITY_DEFECT) {
                     Color(0xFFBFC6CC)
                 } else {
                     MaterialTheme.colorScheme.onSurface
@@ -513,7 +513,15 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 enabled = canCollect,
                 tag = "action-collection",
             ) {
-                Text(stringResource(if (running) R.string.collection_stop else R.string.collection_start))
+                // The mutation leaves this control with no speakable name, which is the half of
+                // ACCESSIBILITY_DEFECT the platform checks report reliably.
+                Text(
+                    if (mutation == UiMutation.ACCESSIBILITY_DEFECT) {
+                        ""
+                    } else {
+                        stringResource(if (running) R.string.collection_stop else R.string.collection_start)
+                    },
+                )
             }
 
             // ONE state, decided in one place (CollectionReadout), so two of the three can never be

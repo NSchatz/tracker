@@ -125,6 +125,19 @@ object UiHarness {
      * while the stored configuration is unusable. `SharedPreferences` outlive a case, so without
      * this the state a case reaches would depend on which case happened to run before it.
      */
+    /**
+     * Closes the soft keyboard if one is up.
+     *
+     * Entering text into a Compose field raises the IME, and while it is up the IME is what receives
+     * a d-pad key - so a directional traversal issued straight after typing goes to the keyboard and
+     * never reaches the screen. ESCAPE rather than BACK on purpose: BACK with no IME showing would
+     * finish the Activity, which would turn one weak assertion into a confusing crash.
+     */
+    fun dismissKeyboard() {
+        shell("input keyevent 111") // KEYCODE_ESCAPE
+        Thread.sleep(500)
+    }
+
     fun clearConfig() {
         val prefs = ClientPreferences(context)
         prefs.baseUrl = ""

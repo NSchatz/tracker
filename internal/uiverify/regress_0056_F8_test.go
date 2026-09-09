@@ -249,12 +249,17 @@ func TestRegressS0056F8TheAndroidHomeTreeRendersParagraphs(t *testing.T) {
 	}
 	sweep := sliceBetween(t, claims, "private fun everyStateStaysShort()", "private fun labelsStayShort")
 	for _, needed := range []string{
-		`onNodeWithTag("action-save").performClick()`, // it enters the refused-save state
-		`textOf("config-verdict")`,                    // ... and proves it got there
-		`TroubleKind.entries`,                         // it sweeps the whole closed set
-		`CollectionStatus.recordBlocked(kind`,         // ... driving each one onto the screen
-		`textOf("collection-error")`,                  // ... and proves each one drew
-		`labelsStayShort()`,                           // ... measuring at every stop
+		// It enters the refused-save state. The press is written `performScrollTo().performClick()`
+		// because the home column is taller than a phone viewport and a tap at a node that is not
+		// in view lands nowhere - so the tag and the click are matched separately rather than as one
+		// literal, which would break every time the traversal in front of the click changed.
+		`onNodeWithTag("action-save")`,
+		`.performClick()`,
+		`textOf("config-verdict")`,            // ... and proves it got there
+		`TroubleKind.entries`,                 // it sweeps the whole closed set
+		`CollectionStatus.recordBlocked(kind`, // ... driving each one onto the screen
+		`textOf("collection-error")`,          // ... and proves each one drew
+		`labelsStayShort()`,                   // ... measuring at every stop
 	} {
 		if !strings.Contains(sweep, needed) {
 			t.Fatalf("everyStateStaysShort in %s does not contain %q, so it does not actually drive and "+

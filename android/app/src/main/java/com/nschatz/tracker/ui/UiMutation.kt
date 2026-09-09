@@ -28,8 +28,18 @@ enum class UiMutation {
     /** Remove the collection card's explanation affordance. */
     NO_EXPLANATION_AFFORDANCE,
 
-    /** Paint the collection status at a contrast the platform checks reject. */
-    LOW_CONTRAST_STATUS,
+    /**
+     * Break the accessibility of the collection card: paint its status at a contrast below the
+     * floor, and leave its start/stop control with no speakable name.
+     *
+     * Two defects rather than one because they break the SAME claim - "the platform accessibility
+     * checks pass on every rendered view" - and the first emulator run showed the contrast half
+     * alone is not enough to make that claim go red. The Accessibility Test Framework reports
+     * per-element contrast from a screenshot heuristic and returns no ERROR when it cannot decide,
+     * which on a Compose surface is often; an unlabelled clickable control it reports every time. A
+     * demonstration that cannot go red is worth nothing, so the mutation carries both.
+     */
+    ACCESSIBILITY_DEFECT,
 
     /** Drop the word that carries a warning, leaving only its colour. */
     WARNING_BY_COLOUR_ONLY,
