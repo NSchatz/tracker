@@ -386,7 +386,7 @@ class UiClaimTest {
         UiHarness.dismissKeyboard()
         compose.waitForIdle()
 
-        val reached = focusByDirection("action-save")
+        val reached = focusByDirection("action-save", SAVE_LABEL)
         assertTrue("the save control was not reachable by directional navigation", reached)
 
         // How the focused control paints, captured while it holds focus.
@@ -410,7 +410,7 @@ class UiClaimTest {
         // differs whatever this control paints and the assertion passed on the scrolling alone.
         // captureToImage clips to the node, and each shot is of the node WHEREVER IT THEN IS, so
         // neither scrolling nor the verdict line appearing can contribute a differing pixel.
-        moveFocusAwayFrom("action-save")
+        moveFocusAwayFrom("action-save", SAVE_LABEL)
         val unfocused = captureOf("action-save")
         assertTrue(
             "focusing the save control changed not one pixel OF THAT CONTROL, so it paints no focus " +
@@ -685,13 +685,13 @@ class UiClaimTest {
         for (child in node.children) walk(child, visit)
     }
 
-    private fun focusByDirection(tag: String): Boolean {
+    private fun focusByDirection(tag: String, label: String): Boolean {
         // Start from the top of the screen, then walk down with the directional pad, exactly as a
         // person with a keyboard or a d-pad would.
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         for (i in 0 until 40) {
             compose.waitForIdle()
-            if (isFocused(tag)) return true
+            if (isFocused(tag, label)) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         }
         return false
@@ -707,7 +707,10 @@ class UiClaimTest {
      * actually landed there. The first emulator run failed AC14 that way - the save control was
      * reachable all along, and the reader could not see it.
      */
-    private fun isFocused(tag: String): Boolean {
+    private fun isFocused(tag: String, label: String): Boolean {
+        // The platform's own answer first: this is the focus an assistive technology reads, and it
+        // is independent of which semantics node carries Focused.
+        if (UiHarness.focusedLabel()?.trim().equals(label, ignoreCase = true)) return true
         for (unmerged in listOf(true, false)) {
             for (node in compose.onAllNodesWithTag(tag, useUnmergedTree = unmerged).fetchSemanticsNodes()) {
                 var found = false
@@ -730,11 +733,11 @@ class UiClaimTest {
      * control that is the last focusable in its column. A traversal that failed to move focus would
      * otherwise give two identical captures and report a missing focus indicator that is there.
      */
-    private fun moveFocusAwayFrom(tag: String) {
+    private fun moveFocusAwayFrom(tag: String, label: String) {
         for (code in listOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP)) {
             sendKey(code)
             compose.waitForIdle()
-            if (!isFocused(tag)) return
+            if (!isFocused(tag, label)) return
         }
         throw AssertionError("focus could not be moved off $tag, so its unfocused paint cannot be read")
     }
@@ -783,6 +786,9 @@ class UiClaimTest {
          * this screen ships passes.
          */
         const val MAX_LABEL_WORDS = 8
+
+        /** What R.string.config_save renders, for reading the platform's focus by name. */
+        const val SAVE_LABEL = "Save"
 
         /**
          * A sentence of the length the domain layer really produces, for driving the states that

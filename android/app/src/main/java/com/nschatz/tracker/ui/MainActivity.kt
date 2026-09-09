@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -512,6 +513,10 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 },
                 enabled = canCollect,
                 tag = "action-collection",
+                // A touch target under the 48dp floor: the one defect the Accessibility Test
+                // Framework reports as an ERROR without needing to read a screenshot, which is why
+                // the mutation carries it as well as the contrast and the missing name.
+                undersized = mutation == UiMutation.ACCESSIBILITY_DEFECT,
             ) {
                 // The mutation leaves this control with no speakable name, which is the half of
                 // ACCESSIBILITY_DEFECT the platform checks report reliably.
@@ -731,9 +736,14 @@ private fun RingedButton(
     tag: String,
     enabled: Boolean = true,
     focusable: Boolean = true,
+    undersized: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val base = Modifier.minimumTarget().testTag(tag)
+    val base = if (undersized) {
+        Modifier.size(20.dp).testTag(tag)
+    } else {
+        Modifier.minimumTarget().testTag(tag)
+    }
     val withRing = if (focusable) base.focusRing() else base.then(
         Modifier.focusProperties { canFocus = false },
     )

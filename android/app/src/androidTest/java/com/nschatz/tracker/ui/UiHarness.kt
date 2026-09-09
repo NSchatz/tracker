@@ -126,6 +126,20 @@ object UiHarness {
      * this the state a case reaches would depend on which case happened to run before it.
      */
     /**
+     * The label of whatever currently holds input focus, as the PLATFORM reports it.
+     *
+     * This is the ground truth for "operable by directional navigation": it is the same focus an
+     * assistive technology reads, and it does not depend on which Compose semantics node happens to
+     * carry the Focused property relative to the one carrying the testTag. The first two emulator
+     * runs failed AC14 on exactly that mismatch.
+     */
+    fun focusedLabel(): String? {
+        val root = activeWindowRoot() ?: return null
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
+        return (focused.text ?: focused.contentDescription)?.toString()
+    }
+
+    /**
      * Closes the soft keyboard if one is up.
      *
      * Entering text into a Compose field raises the IME, and while it is up the IME is what receives
