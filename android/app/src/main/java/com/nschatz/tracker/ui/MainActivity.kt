@@ -1047,6 +1047,21 @@ private fun ExplainAffordance(labelRes: Int, onClick: () -> Unit, tag: String, m
     ) { Text(stringResource(labelRes)) }
 }
 
+/**
+ * A button with its focus ring on a WRAPPER, which is what makes the ring measurable.
+ *
+ * The ring used to sit in the button's own modifier chain, and it could not be read from there. A
+ * Compose semantics node takes its bounds from the coordinator of the semantics modifier itself
+ * rather than from the outermost one, and Material's button merges its descendants, so a capture of
+ * the tagged node came back as the button's SURFACE with the ring outside the frame - while the
+ * Material ripple's focus state layer, which tints that surface on focus, was inside it. The claim
+ * passed on the ripple and the AC26 demonstration refused it, correctly: nothing about that
+ * measurement could tell an indicator that had been painted from one that had not.
+ *
+ * On a wrapper the geometry is not a question. The Box's own outer [FOCUS_RING_WIDTH_DP]dp carries
+ * the ring and nothing else - the button begins after the inset - so the band the suite compares is
+ * the indicator, and a suppressed ring reads as zero.
+ */
 @Composable
 private fun RingedButton(
     onClick: () -> Unit,
@@ -1057,11 +1072,14 @@ private fun RingedButton(
     content: @Composable () -> Unit,
 ) {
     val base = Modifier.minimumTarget().testTag(tag)
-    val withRing = if (focusable) base.focusRing(mutation) else base.then(
-        Modifier.focusProperties { canFocus = false },
-    )
-    Button(onClick = onClick, enabled = enabled, modifier = withRing) { content() }
+    val button = if (focusable) base else base.then(Modifier.focusProperties { canFocus = false })
+    Box(modifier = Modifier.testTag(ringTagOf(tag)).focusRing(mutation)) {
+        Button(onClick = onClick, enabled = enabled, modifier = button) { content() }
+    }
 }
+
+/** Where a control's focus ring is drawn, and the tag the suite measures it by. */
+fun ringTagOf(tag: String): String = "$tag-ring"
 
 @Composable
 private fun ExplanationScreen(

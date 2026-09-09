@@ -735,10 +735,10 @@ class UiClaimTest {
                 "indicator cannot be read - visited: " + visited.joinToString(" -> "),
             reached,
         )
-        val focused = captureOf("action-save")
+        val focused = captureOf(ringTagOf("action-save"))
 
         moveFocusAwayFrom("action-save")
-        val unfocused = captureOf("action-save")
+        val unfocused = captureOf(ringTagOf("action-save"))
         val differing = ringPixelsThatDiffer(focused, unfocused)
         lastMeasurement = "$differing pixels of the ring band differ; the focused capture is " +
             "${focused.width}x${focused.height} and the unfocused one ${unfocused.width}x${unfocused.height}"
@@ -1109,6 +1109,10 @@ class UiClaimTest {
      * ring was painted at all, and the focus-indicator demonstration could never go red.
      */
     private fun ringPixelsThatDiffer(a: android.graphics.Bitmap, b: android.graphics.Bitmap): Int {
+        // Measured on the ring's own wrapper, whose outer band nothing else paints in - see
+        // RingedButton. Measuring it on the button itself read the Material ripple's focus state
+        // layer instead of the ring, which is a difference that appears whether or not an indicator
+        // was ever drawn.
         // The two captures are compared over the region they SHARE, and a size mismatch is not
         // treated as a difference. Returning "differs enormously" for one was an escape hatch that
         // could pass the claim without a ring ever being painted: the node's bounds are floats and a
