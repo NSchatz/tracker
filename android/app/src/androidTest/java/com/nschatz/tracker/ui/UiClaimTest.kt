@@ -2,6 +2,7 @@ package com.nschatz.tracker.ui
 
 import android.view.KeyEvent
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -427,14 +428,27 @@ class UiClaimTest {
         // this screen. The start/stop control IS disabled on an emulator, where no location grant
         // exists, and it was the only thing the first run reported.
         val texts = run.nodes.filter { it.isRenderedText() && !isInactive(it, run.nodes) }
-        val measured = texts.filter { it.contrast != null }.distinctBy { it.name() + it.bounds.toShortString() }
-        lastMeasurement = "${measured.size} texts, ratios " +
+            .distinctBy { it.name() + it.bounds.toShortString() }
+        val measured = texts.filter { it.contrast != null }
+        lastMeasurement = "${measured.size} of ${texts.size} texts, ratios " +
             measured.joinToString(", ") { "${it.name()}=${ratio(it.contrast!!)}" }
+        // The floor is a FRACTION of the texts on the glass, not a fixed count. AC13 says "on every
+        // rendered view", and against a fixed five a run that measured five of a hundred passed
+        // identically to one that measured all hundred - impl-gate advisory F5. The fraction is set
+        // from what a real run achieves rather than guessed: the first run whose grading evidence
+        // was readable measured 130 of the 132 rendered texts it swept, so the floor is generous
+        // enough that the harness declining an awkward crop cannot fail the claim, and far too high
+        // for a screen the sweep has stopped seeing.
+        val floor = maxOf(
+            MINIMUM_TEXTS_MEASURED,
+            kotlin.math.ceil(texts.size * MEASURED_TEXT_FRACTION).toInt(),
+        )
         assertTrue(
-            "contrast: no rendered text in the $theme theme could be measured at all " +
-                "(${texts.size} text nodes seen, none with a confident foreground and background), " +
-                "so a clean sweep would prove nothing",
-            measured.size >= MINIMUM_TEXTS_MEASURED,
+            "contrast: the $theme sweep measured ${measured.size} of the ${texts.size} rendered " +
+                "texts it swept and the floor is $floor - a sweep that declined most of the screen " +
+                "reports the same clean result as one that read all of it, so a pass here would " +
+                "prove nothing about what it did not measure",
+            measured.size >= floor,
         )
         val offenders = measured.filter { it.contrast!! < CONTRAST_FLOOR }
             .map {
@@ -714,9 +728,9 @@ class UiClaimTest {
 
         // --- every control, reachable and activatable ---------------------------------------------
         //
-        // One walk down the screen records where focus went and what the platform said each focused
-        // node could do; the per-control lookups below then read that walk. A control the walk never
-        // reached gets its own traversal, which is the case worth spending presses on.
+        // One walk down the screen records where focus went and what the composition publishes for
+        // each control it stopped on; the per-control lookups below read that walk, and a control it
+        // never reached gets its own traversal - which is the case worth spending presses on.
         val visited = mutableListOf<FocusStop>()
         walkTheScreen(visited)
         val reached = linkedMapOf<String, Boolean>()
@@ -847,19 +861,29 @@ class UiClaimTest {
      * from wherever focus is, so nine independent walks would measure nine different things.
      */
     private fun walkTheScreen(visited: MutableList<FocusStop>) {
+        var still = 0
         for (i in 0 until DIRECTIONAL_PRESSES) {
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
             compose.waitForIdle()
-            recordFocusStop(UiHarness.focusedName(), visited)
+            val before = visited.size
+            recordFocusStop(focusedTag(), visited)
+            // The bottom of the focus order: pressing DOWN there moves nothing, and the remaining
+            // presses would only be spent. Generous, because a control that has to be scrolled into
+            // view can take more than one press to become the focused one, and stopping early on a
+            // slow scroll would report a control unreachable that is not.
+            still = if (visited.size == before) still + 1 else 0
+            if (still >= STILL_PRESSES_MEAN_THE_END) return
         }
     }
 
     /**
      * Records where focus is NOW, under [name], unless the traversal is still standing where it was.
      *
-     * `activatable` is the PLATFORM's own answer about the focused node, which is what decides
-     * whether a centre key press does anything: a node that reports neither a click nor an editable
-     * field is one the directional keys can reach and nothing more.
+     * `activatable` is what the composition publishes for that control - a click action, or a text
+     * field's set-text action - which is what decides whether the centre key does anything where it
+     * stands. The platform's own mirror of the same fact goes in [FocusStop.detail] for the evidence,
+     * but it is not what the assertion turns on, because it lags a key press by an interval nobody
+     * here controls.
      */
     private fun recordFocusStop(name: String, visited: MutableList<FocusStop>) {
         if (visited.isNotEmpty() && visited.last().name == name) return
@@ -867,14 +891,25 @@ class UiClaimTest {
         visited.add(
             FocusStop(
                 name = name,
-                activatable = node != null && (node.isClickable || node.isEditable),
-                detail = if (node == null) {
-                    "nothing held focus"
-                } else {
-                    "clickable=${node.isClickable} editable=${node.isEditable} enabled=${node.isEnabled}"
-                },
+                activatable = activatableAt(name),
+                detail = "compose: click=${activatableAt(name)}; platform mirror: " +
+                    if (node == null) "nothing held focus" else "id=${UiHarness.focusedName()}",
             ),
         )
+    }
+
+    /** Whether the composition publishes something to activate on [tag] - a click, or a text field. */
+    private fun activatableAt(tag: String): Boolean {
+        for (node in compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()) {
+            var found = false
+            walk(node) {
+                if (it.config.contains(SemanticsActions.OnClick) || it.config.contains(SemanticsActions.SetText)) {
+                    found = true
+                }
+            }
+            if (found) return true
+        }
+        return false
     }
 
     /**
@@ -1242,8 +1277,7 @@ class UiClaimTest {
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         for (i in 0 until DIRECTIONAL_PRESSES) {
             compose.waitForIdle()
-            val here = UiHarness.focusedName()
-            recordFocusStop(if (here == tag || isFocused(tag)) tag else here, visited)
+            recordFocusStop(focusedTag(), visited)
             if (visited.last().name == tag) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         }
@@ -1251,17 +1285,54 @@ class UiClaimTest {
     }
 
     /**
-     * Whether [tag] holds keyboard focus, judged the way an assistive technology would and then, as
-     * a fallback, over the tagged node AND its subtree in both the merged and the unmerged tree.
+     * Which control holds focus RIGHT NOW, read from the composition rather than from the platform's
+     * mirror of it.
      *
-     * The platform's own answer comes first and it is now read by test tag rather than by label:
-     * the screen publishes `testTagsAsResourceId`, so the focused node names itself. Matching on the
-     * rendered label instead made this answer depend on which words a control happened to be drawn
-     * with. The Compose reads stay because the testTag and the Focused property are not always on the
-     * same semantics node.
+     * This is the correction the first run of the census forced, and the grading evidence is what
+     * showed it. `UiHarness.focusedName()` reads `AccessibilityNodeInfo`, which the platform rebuilds
+     * on its own schedule - Compose batches accessibility events on a recurring interval - so a read
+     * taken immediately after a key press can describe where focus WAS. A traversal that samples once
+     * per press then loses stops: the walk recorded `explain-permissions -> field-token ->
+     * explain-server -> explain-counters -> explain-alerts` on a screen whose focus order had visited
+     * every control between them, and reported seven of twelve unreachable that were not. The
+     * semantics tree is the composition's own state and is current the moment `waitForIdle` returns.
+     *
+     * The tag is resolved by NEAREST ANCESTOR because the node that carries `Focused` and the node
+     * that carries the `testTag` are usually not the same one: a control's tag sits on the outside of
+     * its modifier chain and its focus target sits within.
+     */
+    private fun focusedTag(): String {
+        var found: String? = null
+        for (root in compose.onAllNodesWithTag("home", useUnmergedTree = true).fetchSemanticsNodes()) {
+            walkTagged(root, null) { tag, node ->
+                if (found == null && node.config.getOrNull(SemanticsProperties.Focused) == true) {
+                    found = tag ?: UNTAGGED
+                }
+            }
+        }
+        return found ?: NOTHING_FOCUSED
+    }
+
+    private fun walkTagged(
+        node: androidx.compose.ui.semantics.SemanticsNode,
+        inherited: String?,
+        visit: (String?, androidx.compose.ui.semantics.SemanticsNode) -> Unit,
+    ) {
+        val tag = node.config.getOrNull(SemanticsProperties.TestTag) ?: inherited
+        visit(tag, node)
+        for (child in node.children) walkTagged(child, tag, visit)
+    }
+
+    /**
+     * Whether [tag] holds keyboard focus, over the tagged node AND its subtree in both trees.
+     *
+     * Read from the composition only. The platform's mirror used to be consulted first, on the
+     * ground that it is what an assistive technology reads - true, and it is still what the evidence
+     * records - but it LAGS, and a stale "still focused" answer here made
+     * `AC14_focus_indicator_is_visible_demonstration` report that focus could not be moved off a
+     * control it had already left.
      */
     private fun isFocused(tag: String): Boolean {
-        if (UiHarness.focusedName() == tag) return true
         for (unmerged in listOf(true, false)) {
             for (node in compose.onAllNodesWithTag(tag, useUnmergedTree = unmerged).fetchSemanticsNodes()) {
                 var found = false
@@ -1428,8 +1499,19 @@ class UiClaimTest {
          */
         const val TARGET_FLOOR_DP = 48f
 
-        /** How many texts a sweep must have measured before a clean result means anything. */
+        /** The absolute floor on texts measured, under which a clean sweep means nothing at all. */
         const val MINIMUM_TEXTS_MEASURED = 5
+
+        /**
+         * The share of the texts ON THE GLASS a sweep must have actually measured.
+         *
+         * Impl-gate advisory F5: with a fixed count, a run that measured five texts of a hundred
+         * passed identically to one that measured all hundred, and AC13 says "on every rendered
+         * view". Set from the measured rate of the first run whose grading evidence could be read -
+         * 130 of 132 - so that the contrast measurement declining an awkward crop or two cannot fail
+         * the claim, while a sweep that has stopped seeing the screen cannot pass it.
+         */
+        const val MEASURED_TEXT_FRACTION = 0.6
 
         /**
          * How many controls a sweep must have found before a clean result means anything.
@@ -1443,6 +1525,21 @@ class UiClaimTest {
 
         /** Presses of DPAD_DOWN a traversal is allowed before it reports a control unreachable. */
         const val DIRECTIONAL_PRESSES = 40
+
+        /**
+         * Consecutive presses that move focus nowhere before the walk calls it the end of the order.
+         *
+         * Generous on purpose: a control that has to be scrolled into view can take a press or two
+         * to become the focused one, and a walk that gave up on the first still press would report
+         * everything below a slow scroll unreachable.
+         */
+        const val STILL_PRESSES_MEAN_THE_END = 8
+
+        /** What the traversal calls a focus stop that is inside the screen but on no tagged control. */
+        const val UNTAGGED = "(an untagged view)"
+
+        /** What it calls a stop where the composition reports nothing focused at all. */
+        const val NOTHING_FOCUSED = "(nothing)"
 
         /**
          * What the running screen says about a control the home tree can draw.

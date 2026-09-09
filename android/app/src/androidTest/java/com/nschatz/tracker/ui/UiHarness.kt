@@ -1,7 +1,9 @@
 package com.nschatz.tracker.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
@@ -457,7 +459,13 @@ object UiHarness {
      * every case is what makes the state uniform instead of depending on which case ran first.
      */
     fun grantApproximateLocation() {
-        shell("pm grant " + context.packageName + " android.permission.ACCESS_COARSE_LOCATION")
+        val said = shell("pm grant " + context.packageName + " android.permission.ACCESS_COARSE_LOCATION")
+        // Recorded rather than assumed. A grant that did not take shows up two hundred lines later as
+        // "the screen has action-collection disabled", which is a true statement about the screen and
+        // a useless one about the cause; this line says which it was, in the grading evidence.
+        val granted = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        evidence("device: approximate location grant -> granted=$granted " + said.trim())
     }
 }
 
