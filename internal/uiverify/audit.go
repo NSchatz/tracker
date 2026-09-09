@@ -255,25 +255,44 @@ const auditJS = `
       return out;
     },
 
-    // Every chrome text this page authors, for the "labels stay to a few words" measurement.
-    // Device NAMES are excluded by class: they are family data the server supplied, not a label
-    // this page wrote, and their length is not this page's to control.
+    // Every chrome text on the surface, for the "labels stay to a few words" measurement. The
+    // sweep is the whole rendered body, not only the regions this page declares, because AC10 says
+    // "every label and every state word ON THE SURFACE" - the Leaflet attribution and the zoom
+    // controls are on it too, and a floor that only looked inside [data-region] could be dodged by
+    // moving a paragraph one element out.
+    //
+    // Two things are excluded, and both are device NAMES rather than labels: elements carrying the
+    // 'name' class, and Leaflet's permanent marker tooltips, whose content is built as
+    // "<device name> - <state>". A name is family data the server supplied, not a label this page
+    // wrote, and its length is not this page's to control. inRegion is reported so the caller can
+    // assert the sweep really did reach past the declared regions.
     chromeTexts: function () {
       var out = [];
-      var scopes = document.querySelectorAll('[data-region]');
-      for (var s = 0; s < scopes.length; s++) {
-        var all = scopes[s].querySelectorAll('*');
-        for (var i = 0; i < all.length; i++) {
-          var el = all[i];
-          if (el.classList.contains('name')) { continue; }
-          var text = ownText(el);
-          if (!text || !visible(el)) { continue; }
-          out.push({
-            path: path(el),
-            text: text,
-            words: text.split(/\s+/).filter(function (w) { return w.length; }).length
-          });
-        }
+      var all = document.body.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.closest('.name, .leaflet-tooltip')) { continue; }
+        var text = ownText(el);
+        if (!text || !visible(el)) { continue; }
+        out.push({
+          path: path(el),
+          text: text,
+          inRegion: !!el.closest('[data-region]'),
+          words: text.split(/\s+/).filter(function (w) { return w.length; }).length
+        });
+      }
+      return out;
+    },
+
+    // Where the 'name' class occurs. R3 of this item's readings excludes device names from the
+    // brevity floor on the grounds that they only ever appear inside a device row; this reports the
+    // evidence for that rather than assuming it, so the exclusion cannot be widened by accident into
+    // a way of hiding a paragraph from the measurement.
+    nameClassPlacement: function () {
+      var out = [];
+      var all = document.querySelectorAll('.name');
+      for (var i = 0; i < all.length; i++) {
+        out.push({ path: path(all[i]), inDeviceRow: !!all[i].closest('#panel li') });
       }
       return out;
     },

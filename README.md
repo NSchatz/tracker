@@ -511,6 +511,15 @@ verify-ui-refusal` is the check that keeps that true. The clause-by-clause recor
 is [`FRONTEND-CONVENTIONS-RECORD.md`](FRONTEND-CONVENTIONS-RECORD.md), and `make verify-ui-record`
 refuses a record naming an assertion that did not actually run.
 
+**The paragraphs that used to stand on each surface live in a document instead**, one per surface:
+[`/static/map-explained.html`](internal/server/static/map-explained.html) for the map, which the page
+links to once per region, and [`/static/app-explained.html`](internal/server/static/app-explained.html)
+for the Android screen, which is the repository copy of what the app's own explanation destination
+renders from its string resources; the client has no web view and does not load it. Both are served
+files rather than Markdown, because the map's links have to RESOLVE in a browser and the
+credential-free surface is fixed at the health check, the map shell and its static assets.
+`go run ./cmd/uiverify docs` refuses either document that has lost a claim which left a surface.
+
 These are **not** folded into `make check`: that target is the gate a human runs on a laptop, and it
 does not need a browser or an emulator. CI runs both.
 

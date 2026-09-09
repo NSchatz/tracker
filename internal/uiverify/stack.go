@@ -75,6 +75,12 @@ type Stack struct {
 	// mutation, when set, rewrites the served document and its policy. This is how a check is shown
 	// going red against a surface broken in exactly one way.
 	mutation *Mutation
+
+	// mutationErr is the first apply() failure since the mutation was installed: the substitution no
+	// longer occurs in the page or in the policy, so the surface the check was measured against was
+	// never actually broken. The run reads it back rather than inferring a demonstration from "the
+	// check went red", because a check going red at an error page proves nothing about the claim.
+	mutationErr error
 }
 
 // NewStack starts the verification stack and returns it. Close it when done.
@@ -104,10 +110,26 @@ func (s *Stack) Close() {
 }
 
 // SetMutation installs (or clears, with nil) the one-claim mutation applied to the served surface.
+// It also clears any recorded apply() failure, so MutationError only ever describes the mutation
+// currently installed.
 func (s *Stack) SetMutation(m *Mutation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mutation = m
+	s.mutationErr = nil
+}
+
+// MutationError reports whether the installed mutation failed to apply to anything it was served.
+//
+// This is what keeps a demonstration from rotting into a fake one. A mutation whose Find no longer
+// occurs - because the page was refactored under it - makes the response a 500, and a check run
+// against an error page goes red for a reason that has nothing to do with the claim it measures. The
+// run must call that NOT DEMONSTRATED rather than counting it, or AC18's count starts passing on
+// evidence that no longer exists.
+func (s *Stack) MutationError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mutationErr
 }
 
 // SetPositions scripts the next GET /v1/positions.
@@ -285,7 +307,14 @@ func (s *Stack) mutating(next http.Handler) http.Handler {
 		if err := m.apply(r.URL.Path, &body, headers); err != nil {
 			// A mutation that no longer applies is a broken demonstration, and a broken
 			// demonstration is worse than none: it would let a check "prove" it can fail against a
-			// surface that was never actually changed. Say so in the response so the driver sees it.
+			// surface that was never actually changed. Record it so the run can report NOT
+			// DEMONSTRATED - the check is about to go red at this error page, and that redness is
+			// not evidence about the claim - and say so in the response so the driver sees it too.
+			s.mu.Lock()
+			if s.mutationErr == nil {
+				s.mutationErr = err
+			}
+			s.mu.Unlock()
 			http.Error(w, "uiverify: mutation did not apply: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

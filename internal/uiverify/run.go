@@ -63,6 +63,14 @@ func RunWeb(ctx context.Context, out io.Writer) ([]Result, error) {
 			stack.Restore()
 			res.DemoErr = c.Run(runner)
 			res.Demonstrated = res.DemoErr != nil
+			// ...unless the mutation never applied. A Find that no longer occurs turns the response
+			// into a 500, and a check that goes red at an error page has been shown nothing about
+			// the claim it measures. Counting that would let one refactor silently convert a real
+			// demonstration into a fake one, which is precisely the vacuous pass AC18 closes.
+			if merr := stack.MutationError(); merr != nil {
+				res.MutationBroke = fmt.Errorf("the mutation never applied, so this check was never run against a broken surface: %w", merr)
+				res.Demonstrated = false
+			}
 			stack.SetMutation(nil)
 		}
 		res.Duration = time.Since(started)

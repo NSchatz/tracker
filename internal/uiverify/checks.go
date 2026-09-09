@@ -424,7 +424,19 @@ func checkFocusIndicator() Check {
 				if err := r.openWatched(theme, 1280, 800); err != nil {
 					return err
 				}
-				for _, sel := range []string{"#token", "#watch", "#controls-doc"} {
+				// AC3 says "IF A CONTROL's focus indicator is suppressed or drawn below that floor",
+				// so the set measured here is every control the page renders - the same enumeration
+				// checkTargetSize floors - rather than a hand-written shortlist. Leaflet's zoom
+				// buttons and the attribution link are controls a keyboard user lands on too.
+				controls, err := r.controls()
+				if err != nil {
+					return err
+				}
+				if len(controls) < 4 {
+					return fmt.Errorf("only %d controls were found in the %s theme; the page renders more than that, so this check would measure almost nothing", len(controls), theme)
+				}
+				for _, c := range controls {
+					sel := c.Path
 					before, err := r.S.Screenshot(sel)
 					if err != nil {
 						return fmt.Errorf("screenshotting %s unfocused (%s): %w", sel, theme, err)
@@ -472,11 +484,18 @@ func checkFocusIndicator() Check {
 // focusByTab moves keyboard focus onto a selector using real Tab keystrokes, because Chromium only
 // treats focus as :focus-visible when it came from the keyboard. Scripting .focus() would measure a
 // different and more forgiving thing.
+//
+// The budget has to clear the whole tab ring, since the control being looked for may be the last
+// stop on it: the map pane's own controls sit after everything the page authors.
 func (r *Runner) focusByTab(selector string) error {
 	if err := r.S.Eval(`(function(){document.activeElement && document.activeElement.blur(); return true})()`, new(bool)); err != nil {
 		return err
 	}
-	for i := 0; i < 12; i++ {
+	budget := 12
+	if controls, err := r.controls(); err == nil && 2*len(controls)+4 > budget {
+		budget = 2*len(controls) + 4
+	}
+	for i := 0; i < budget; i++ {
 		if err := r.S.PressTab(false); err != nil {
 			return err
 		}
@@ -1115,16 +1134,47 @@ func checkExplanation() Check {
 				return err
 			}
 
+			// The device NAMES this floor excludes are only excludable because they can only be
+			// device names. Assert that before measuring anything, or the exclusion becomes a place
+			// to hide a paragraph from the count.
+			var names []struct {
+				Path        string `json:"path"`
+				InDeviceRow bool   `json:"inDeviceRow"`
+			}
+			if err := r.S.Eval(`window.__uiaudit.nameClassPlacement()`, &names); err != nil {
+				return err
+			}
+			if len(names) == 0 {
+				return errors.New("no device name was rendered, so the exclusion the brevity floor relies on was never exercised")
+			}
+			for _, n := range names {
+				if !n.InDeviceRow {
+					return fmt.Errorf("%s carries the `name` class outside a device row; that class is what excludes family-supplied names from the brevity floor and it may not be used for authored text", n.Path)
+				}
+			}
+
 			var texts []struct {
-				Path  string `json:"path"`
-				Text  string `json:"text"`
-				Words int    `json:"words"`
+				Path     string `json:"path"`
+				Text     string `json:"text"`
+				InRegion bool   `json:"inRegion"`
+				Words    int    `json:"words"`
 			}
 			if err := r.S.Eval(`window.__uiaudit.chromeTexts()`, &texts); err != nil {
 				return err
 			}
 			if len(texts) < 8 {
 				return fmt.Errorf("only %d chrome texts were measured; the page carries more than that", len(texts))
+			}
+			outside := 0
+			for _, t := range texts {
+				if !t.InRegion {
+					outside++
+				}
+			}
+			if outside == 0 {
+				// AC10 is about the whole surface. If the sweep only ever saw declared regions it
+				// has silently narrowed back to the thing it was widened from.
+				return errors.New("every chrome text measured was inside a declared region; the map pane's own chrome (the attribution, the zoom controls) was not reached, so the floor is narrower than the clause")
 			}
 			var wordy []string
 			for _, t := range texts {
