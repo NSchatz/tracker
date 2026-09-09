@@ -46,11 +46,18 @@ enum class UiMutation {
     /**
      * Shrink ONE touch target below the floor, and change nothing else.
      *
-     * The start/stop control drawn as a 20dp clickable box where the floor is 48dp. It is a plain
-     * clickable rather than a Material `Button` on purpose: `Button` applies
-     * `minimumInteractiveComponentSize()`, which quietly restores a 48dp touch target around a
-     * 20dp visual, so a `Modifier.size(20.dp)` Button is NOT an undersized target and a sweep that
-     * reported nothing against one was telling the truth.
+     * The start/stop control drawn as a 20dp clickable box, with the platform's minimum touch target
+     * taken away for that one control. Both halves are needed, and finding out why is most of what
+     * impl-gate finding F21 was hiding:
+     *
+     *  - a Material `Button` applies `minimumInteractiveComponentSize()`, which restores a 48dp
+     *    touch target around a 20dp visual, so `Modifier.size(20.dp)` on one is not an undersized
+     *    target at all;
+     *  - and Compose reports a node's TOUCH bounds to the accessibility layer, expanding any small
+     *    target to `ViewConfiguration.minimumTouchTargetSize` (48dp) for pointer input. So even a
+     *    plain 20dp clickable still HAS a 48dp target, and a sweep reading those bounds - which is
+     *    what the platform's own touch-target check reads - was telling the truth when it reported
+     *    no defect. Success criterion 2.5.8 is about the target, not about the paint.
      */
     TARGET_BELOW_FLOOR,
 

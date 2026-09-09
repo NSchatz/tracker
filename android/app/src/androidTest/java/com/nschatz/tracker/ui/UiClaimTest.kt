@@ -1061,11 +1061,20 @@ class UiClaimTest {
         return false
     }
 
-    /** The pixels of one control, wherever it currently sits, rather than of the whole display. */
+    /**
+     * The pixels of one control, wherever it currently sits, rather than of the whole display.
+     *
+     * Captured from the UNMERGED tree, and that is the whole point. The test tag and the Material
+     * button's `mergeDescendants` clickable are on different layout nodes, so a merged lookup
+     * resolves to the button's SURFACE - 79x42dp - while the node the tag is actually on, the one
+     * carrying the focus ring and its inset, is 79x54dp. Capturing the merged node cut the ring out
+     * of the picture entirely, and the claim was passing on the Material ripple's focus state layer
+     * tinting the surface instead: the demonstration refused it, correctly, and said so.
+     */
     private fun captureOf(tag: String): android.graphics.Bitmap {
         compose.onNodeWithTag(tag).performScrollTo()
         compose.waitForIdle()
-        return compose.onNodeWithTag(tag).captureToImage().asAndroidBitmap()
+        return compose.onNodeWithTag(tag, useUnmergedTree = true).captureToImage().asAndroidBitmap()
     }
 
     /**

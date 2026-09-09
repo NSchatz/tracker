@@ -39,6 +39,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,12 +62,15 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -807,21 +811,32 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 else LocationCollectionService.start(context)
             }
             if (mutation == UiMutation.TARGET_BELOW_FLOOR) {
-                // A touch target genuinely under the 48dp floor.
+                // A touch target genuinely under the 48dp floor, which takes TWO changes rather
+                // than one, and finding out why is most of what finding F21 was hiding.
                 //
-                // NOT a `Button` at `Modifier.size(20.dp)`: Material's `Button` applies
-                // `minimumInteractiveComponentSize()` inside itself, which expands the laid-out
-                // node back to 48dp around a 20dp visual. A sweep that reported no target-size
-                // defect against one of those was right - the target was 48dp - which is half of
-                // why finding F21's mutation could not be shown going red. A plain clickable box
-                // carries no such expansion, so its bounds are the 20dp a person would have to hit.
-                Box(
-                    modifier = Modifier
-                        .size(20.dp)
-                        .testTag("action-collection")
-                        .clickable(onClick = onCollectionClick),
-                    contentAlignment = Alignment.Center,
-                ) { Text(collectionLabel, maxLines = 1, style = MaterialTheme.typography.bodySmall) }
+                // Drawing the control at 20dp is not enough, and neither is dropping Material's
+                // `Button` (whose `minimumInteractiveComponentSize()` expands the laid-out node back
+                // to 48dp around a 20dp visual). Compose reports the node's TOUCH bounds to the
+                // accessibility layer, and it expands any small target to
+                // `ViewConfiguration.minimumTouchTargetSize` - 48dp - for pointer input. So a 20dp
+                // control still HAS a 48dp target, an accessibility sweep reading those bounds was
+                // telling the truth when it reported no defect, and success criterion 2.5.8 is about
+                // the target rather than the paint. Taking that floor away for this one control is
+                // what actually breaks the claim.
+                val platform = LocalViewConfiguration.current
+                CompositionLocalProvider(
+                    LocalViewConfiguration provides object : ViewConfiguration by platform {
+                        override val minimumTouchTargetSize: DpSize get() = DpSize.Zero
+                    },
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .testTag("action-collection")
+                            .clickable(onClick = onCollectionClick),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(collectionLabel, maxLines = 1, style = MaterialTheme.typography.bodySmall) }
+                }
             } else {
                 RingedButton(
                     onClick = onCollectionClick,
