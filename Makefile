@@ -41,14 +41,23 @@ IMAGE ?= tracker:dev
 TRACKER_AVD ?= tracker-ui
 TRACKER_SYS_IMAGE ?= system-images;android-34;google_apis;x86_64
 ANDROID_UI_TASKS ?= connectedDebugAndroidTest
-# Where the instrumented suite writes what it measured - the contrast ratio, target size and spoken
-# name of every view it swept - and where `verify-ui-android` reads it back off the device. It is
-# the SHELL user's own directory rather than the app's, because that is the one place adb is certain
-# to be able to read: a file written as the app came back empty through both `run-as` and a pull.
-# AC13 requires a FAILING run to name the view, the check and the measured value; this is how a
-# PASSING one is inspectable too, rather than merely quiet. The path is stated in one more place,
-# `UiHarness.EVIDENCE_PATH`, because the device end cannot read a Makefile.
-ANDROID_EVIDENCE ?= /data/local/tmp/tracker-ui-grading.log
+# The log tag the instrumented suite writes what it measured under - the contrast ratio, target size
+# and spoken name of every view it swept - and which `verify-ui-android` dumps off the device into
+# build/uiverify/android-grading.log. AC13 requires a FAILING run to name the view, the check and the
+# measured value; this is how a PASSING one is inspectable too, rather than merely quiet, and
+# `uiverify android` REFUSES a run whose evidence is missing or silent, so it cannot go quiet again.
+#
+# It is the device LOG rather than a device FILE because of impl-gate finding F3: every real emulator
+# run pulled back a zero-byte file while this comment and android/README.md both said it carried
+# every number. `UiAutomation.executeShellCommand` runs its argument through
+# `Runtime.getRuntime().exec`, which splits on whitespace and honours no quoting, expands nothing and
+# starts no shell - so the suite's `sh -c '... | base64 -d >> FILE'` never redirected anything. The
+# log needs no quoting, no redirect and no filesystem permission. The tag is stated in one more
+# place, `UiHarness.EVIDENCE_TAG`, because the device end cannot read a Makefile.
+ANDROID_EVIDENCE_TAG ?= TrackerUiGrade
+# How much device log to keep while the suite runs. The sweep writes a line per view per claim per
+# theme, which is a few hundred kilobytes; the default ring buffer would evict the first cases.
+ANDROID_LOG_BUFFER ?= 16M
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
@@ -182,17 +191,18 @@ verify-ui-android:
 	if [ -z "$$serial" ]; then echo "the emulator script exited 0 but named no device" >&2; exit 1; fi; \
 	echo "instrumented suite on $$serial"; \
 	adb="$${ANDROID_SDK_ROOT:-$$ANDROID_HOME}/platform-tools/adb"; \
-	evidence="$(ANDROID_EVIDENCE)"; \
-	"$$adb" -s "$$serial" shell rm -f "$$evidence" >/dev/null 2>&1 || true; \
+	: "Room for the whole sweep, and a clean slate, so the evidence dumped below is THIS run's." ; \
+	"$$adb" -s "$$serial" logcat -G $(ANDROID_LOG_BUFFER) >/dev/null 2>&1 || true; \
+	"$$adb" -s "$$serial" logcat -c >/dev/null 2>&1 || true; \
 	status=0; \
 	( cd android && ANDROID_SERIAL="$$serial" ./gradlew --no-daemon $(ANDROID_UI_TASKS) ) || status=$$?; \
 	mkdir -p build/uiverify; \
 	rm -f build/uiverify/android-grading.log; \
-	: "The suite writes through the instrumentation's SHELL into the shell user's own /data/local/tmp," ; \
-	: "which is the one place adb is certain to read back: a file written as the APP came back empty" ; \
-	: "through both run-as and a pull. exec-out MERGES the device's stderr into stdout, so the device" ; \
-	: "side is silenced there rather than here, or a 'no such file' would look like content." ; \
-	"$$adb" -s "$$serial" exec-out "cat $$evidence 2>/dev/null" >build/uiverify/android-grading.log 2>/dev/null || true; \
+	: "-v raw prints the message and nothing else, so the file is the suite's own lines; -s TAG:I" ; \
+	: "silences every other tag. The suite writes here through android.util.Log because the" ; \
+	: "instrumentation's shell cannot redirect: executeShellCommand is Runtime.exec, which splits on" ; \
+	: "whitespace and starts no shell, so the file this used to write was never created (finding F3)." ; \
+	"$$adb" -s "$$serial" logcat -d -v raw -s $(ANDROID_EVIDENCE_TAG):I >build/uiverify/android-grading.log 2>/dev/null || true; \
 	echo "--- what the emulator measured (build/uiverify/android-grading.log) ---"; \
 	if [ -s build/uiverify/android-grading.log ]; then cat build/uiverify/android-grading.log; \
 	else echo "(the device wrote no grading evidence this run)"; fi; \

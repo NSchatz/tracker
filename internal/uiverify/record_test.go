@@ -13,6 +13,7 @@
 package uiverify
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -51,7 +52,40 @@ func newFakeRepo(t *testing.T) *fakeRepo {
 	r.writeWebRun(t, claimsInTheCommittedRecord(t, "browser map")...)
 	r.writeAndroidSource(t, "package com.nschatz.tracker\n\nclass Nothing\n")
 	r.writeParkedSuite(t, nil)
+	r.writeGradingEvidence(t, nil)
 	return r
+}
+
+// writeGradingEvidence lays down what a healthy emulator run leaves in build/uiverify: one summary
+// line per claim per theme and the per-view measurements underneath them.
+//
+// It exists because the shape of that file is now GRADED. Impl-gate finding F3 was a mechanism that
+// wrote nothing on every real run while two committed documents said it wrote everything, and the
+// reason nothing noticed is that the route did not look. These tests are what keep it looking.
+func (r *fakeRepo) writeGradingEvidence(t *testing.T, edit func(string) string) {
+	t.Helper()
+	var b strings.Builder
+	for _, marker := range evidenceMarkers {
+		b.WriteString(marker + " 12 nodes, platform checks evaluated 40 results and declined 3\n")
+	}
+	for i := 0; i < minimumMeasurementLines+20; i++ {
+		fmt.Fprintf(&b, "  contrast [light] view-%d: 145x48dp contrast=8.20:1 spoken=\"Save\" clickable=true\n", i)
+	}
+	body := b.String()
+	if edit != nil {
+		before := body
+		body = edit(body)
+		if body == before {
+			t.Fatal("the edit changed nothing, so this case would not test what it says it does")
+		}
+	}
+	path := filepath.Join(r.root, EvidenceLog)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // writeParkedSuite copies the REAL instrumented suite, optionally edited, so the deferral fence is
@@ -395,6 +429,76 @@ func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "AC13_contrast_light") {
 			t.Fatalf("the refusal does not name the claim: %v", err)
+		}
+	})
+
+	// Impl-gate finding F3: android/README.md and the Makefile both state that every number the sweep
+	// measured is written to build/uiverify/android-grading.log and printed by this route, and on
+	// every real emulator run that file was ZERO BYTES. Nothing turned red, because nothing looked.
+	// These three drive the looking.
+	t.Run("the emulator wrote no grading evidence at all", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		if err := os.Remove(filepath.Join(repo.root, EvidenceLog)); err != nil {
+			t.Fatal(err)
+		}
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with no grading evidence, which is the state finding F3 found")
+		}
+		if !strings.Contains(err.Error(), "there is no grading evidence") {
+			t.Fatalf("the refusal does not say the evidence is absent: %v", err)
+		}
+	})
+
+	t.Run("the grading evidence is empty", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		if err := os.WriteFile(filepath.Join(repo.root, EvidenceLog), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with a zero-byte grading evidence file")
+		}
+		if !strings.Contains(err.Error(), "is empty") {
+			t.Fatalf("the refusal does not say the evidence is empty: %v", err)
+		}
+	})
+
+	t.Run("one claim's numbers are missing from the evidence", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeGradingEvidence(t, func(s string) string {
+			return strings.Replace(s, "AC13 contrast [dark]:", "AC13 something-else [dark]:", 1)
+		})
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with a claim's measured numbers absent from the evidence")
+		}
+		if !strings.Contains(err.Error(), "AC13 contrast [dark]:") {
+			t.Fatalf("the refusal does not name the claim whose numbers are missing: %v", err)
+		}
+	})
+
+	t.Run("the summaries are there and the numbers are not", func(t *testing.T) {
+		repo := newFakeRepo(t)
+		repo.writeRecord(t, nil)
+		repo.writeGradingEvidence(t, func(s string) string {
+			var kept []string
+			for _, line := range strings.Split(s, "\n") {
+				if !strings.Contains(line, "contrast=") {
+					kept = append(kept, line)
+				}
+			}
+			return strings.Join(kept, "\n")
+		})
+		err := CheckAndroidRun(io.Discard, repo.root)
+		if err == nil {
+			t.Fatal("the Android route reported green with every per-view measurement missing")
+		}
+		if !strings.Contains(err.Error(), "per-view measurements") {
+			t.Fatalf("the refusal does not say the numbers are missing: %v", err)
 		}
 	})
 }

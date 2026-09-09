@@ -76,6 +76,18 @@ enum class UiMutation {
     SAVE_NOT_FOCUSABLE,
 
     /**
+     * Let the save control be reached and activated, and take away exactly its EFFECT.
+     *
+     * The control still draws, still takes focus, still activates from the centre key and still puts
+     * a verdict on the glass - what it no longer does is save. This is the demonstration for the
+     * third of AC14's SHALLs, "saved to the same effect a touch has, with the effect asserted on
+     * what the screen then shows", and it exists because impl-gate finding F1 found that clause
+     * graded by a predicate which accepted the refusal verdict as readily as the saved one. An
+     * assertion that cannot tell a save from a refusal cannot go red against this.
+     */
+    SAVE_WITHOUT_EFFECT,
+
+    /**
      * Suppress exactly the focus indicator, and change nothing else.
      *
      * Every control still takes focus and still activates; the ring that says WHICH control has it

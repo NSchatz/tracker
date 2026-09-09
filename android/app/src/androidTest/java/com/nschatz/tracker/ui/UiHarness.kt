@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Rect
-import android.util.Base64
+import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -322,43 +322,39 @@ object UiHarness {
      *
      * AC13 asks a failing run to name the view, the check and the measured value; this is where the
      * measured values of a PASSING run go, so a green sweep is inspectable rather than merely quiet.
+     * `uiverify android` REFUSES a run whose evidence is missing or silent, so this is a mechanism
+     * with a gate on it rather than an aid that can quietly stop working.
      *
-     * It is written through the instrumentation's SHELL, into the shell user's own `/data/local/tmp`,
-     * because that is the one place `adb` is certain to be able to read back. Writing it as the app -
-     * into its cache directory, or into its external files directory - produced a file neither
-     * `run-as` nor a pull could retrieve on this emulator, and evidence that stays on the device is
-     * not evidence. Lines are buffered and flushed in blocks, base64-encoded so that a measured value
-     * containing a quote cannot become part of the command.
+     * ### Why it is the device log and not a file
+     *
+     * Impl-gate finding F3: every real emulator run pulled back a ZERO-BYTE evidence file while two
+     * committed documents said it carried every measured number. The cause is one line of platform
+     * behaviour. [shell] goes through `UiAutomation.executeShellCommand`, whose implementation is
+     * `Runtime.getRuntime().exec(command)` - and `Runtime.exec(String)` splits its argument on
+     * WHITESPACE with a `StringTokenizer`. It honours no quoting, expands nothing, and starts no
+     * shell. So `sh -c 'echo ... | base64 -d >> /data/local/tmp/...'` was never a redirect: `sh` was
+     * handed the token `'echo` as its script, failed on the unmatched quote, wrote its complaint to a
+     * stderr nobody read, and exited 0-ish with the file never created. Every other call in this
+     * object is a bare command with no metacharacters, which is exactly why the others worked.
+     *
+     * The device log needs no quoting, no redirect and no filesystem permission: the instrumentation
+     * writes under a tag of its own and `make verify-ui-android` dumps that tag. Long lines are split
+     * because the platform truncates a single log message at about 4kB.
      */
     fun evidence(line: String) {
-        synchronized(pending) {
-            pending.append(line).append('\n')
-            if (pending.length >= EVIDENCE_FLUSH_BYTES) flushEvidence()
-        }
+        for (chunk in line.chunked(EVIDENCE_MAX_CHUNK)) Log.i(EVIDENCE_TAG, chunk)
     }
 
-    /** Writes whatever evidence is buffered, and empties the buffer. Safe to call at any time. */
-    fun flushEvidence() {
-        synchronized(pending) {
-            if (pending.isEmpty()) return
-            val block = pending.toString()
-            pending.setLength(0)
-            try {
-                val encoded = Base64.encodeToString(block.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                shell("sh -c 'echo $encoded | base64 -d >> $EVIDENCE_PATH'")
-            } catch (ignored: Exception) {
-                // Evidence is an aid, never a gate: a route that turned red because it could not
-                // write a log would be reporting on the log rather than on the screen.
-            }
-        }
-    }
+    /**
+     * The log tag the evidence is written under, and the one `make verify-ui-android` dumps.
+     *
+     * Stated in one more place, the Makefile's `ANDROID_EVIDENCE_TAG`, because the device end cannot
+     * read a Makefile and the host end cannot read this file.
+     */
+    const val EVIDENCE_TAG = "TrackerUiGrade"
 
-    private val pending = StringBuilder()
-
-    private const val EVIDENCE_FLUSH_BYTES = 4_000
-
-    /** Where the device writes what it measured, and where `make verify-ui-android` reads it back. */
-    const val EVIDENCE_PATH = "/data/local/tmp/tracker-ui-grading.log"
+    /** How much of one evidence line fits in a single log message before the platform truncates it. */
+    private const val EVIDENCE_MAX_CHUNK = 3_000
 
     // --- focus, keyboard and configuration -------------------------------------------------------
 
@@ -439,6 +435,29 @@ object UiHarness {
         val prefs = ClientPreferences(context)
         prefs.baseUrl = ""
         prefs.deviceToken = ""
+    }
+
+    /**
+     * Puts the device into the one grant state in which this screen draws EVERY control it can draw.
+     *
+     * AC14 is about "every control reachable and activatable", and on a freshly created emulator two
+     * of the nine this screen declares are simply not operable: with no location grant at all the
+     * start/stop control is DISABLED (`capability` is `NONE`) and the precise-location upgrade is not
+     * drawn (`canUpgradeToPrecise` needs an approximate grant to upgrade FROM). A traversal run in
+     * that state can only ever grade seven of them, which leaves the other two in exactly the
+     * position impl-gate finding F20 found the save control in: off the measured set.
+     *
+     * An APPROXIMATE-only grant is the state that draws all nine. It is granted through the shell
+     * rather than with `GrantPermissionRule` so that nothing about the app's own permission flow is
+     * bypassed or stubbed - the app reads the same `checkSelfPermission` it always reads, and what
+     * changes is the device, which is the thing a person changes too.
+     *
+     * It is never REVOKED. An instrumented test runs inside the app's own process, and revoking a
+     * runtime permission kills that process - which would kill the run. Granting it in setUp for
+     * every case is what makes the state uniform instead of depending on which case ran first.
+     */
+    fun grantApproximateLocation() {
+        shell("pm grant " + context.packageName + " android.permission.ACCESS_COARSE_LOCATION")
     }
 }
 

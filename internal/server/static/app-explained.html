@@ -78,7 +78,10 @@
     app's data is already switched off.
   </p>
   <p id="config_verdict_note">
-    Save reports the verdict of validating what you typed, never a blanket "Saved". A URL the app
+    Save reports the verdict of validating what you typed, never a blanket "it worked". A save that
+    happened says "Saved to this device"; one that did not says "Not saved" and why. The two verdicts
+    do not share a prefix on purpose - "Saved" alone reads as part of "Not saved" to anyone skimming.
+    A URL the app
     will refuse to use says so on the card in a few words - "Not saved: No device token set" - and
     the full sentence naming what to fix is shown at the top of the in-app explanation this page
     mirrors. A release build also refuses plain <code>http://</code>, so a shipped app cannot send a

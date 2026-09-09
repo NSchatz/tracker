@@ -707,36 +707,53 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 RingedButton(
                     onClick = {
-                        prefs.baseUrl = url
-                        prefs.deviceToken = credential
-                        prefs.viewerToken = viewerCredential
-                        // Report the validated verdict, not a blanket "Saved": a URL the client will
-                        // refuse to use must say so here, not fail silently at the first fix. And the
-                        // refusal is a WORD, not a colour — "Not saved" leads the verdict.
-                        //
-                        // What the card draws is the SUMMARY, a few words. The sentence is behind
-                        // "About server settings", which is what F8 asks for and what
-                        // explain_config_verdict has always promised. The mutation branch draws the
-                        // sentence instead, so the brevity assertion can be shown going red against
-                        // a state that is not on the screen when it opens.
-                        when (val status = prefs.readConfig()) {
-                            is ConfigStatus.Configured -> {
-                                // A usable configuration is the one thing that unblocks a queue parked
-                                // by a `Result.failure()` for want of a URL or a token, so ask for a
-                                // flush the moment one exists.
-                                FixUploadWorker.enqueueFlush(context)
-                                refused = false
-                                message = context.getString(R.string.config_saved)
-                            }
-
-                            is ConfigStatus.Incomplete -> {
-                                refused = true
-                                val verdict = if (mutation == UiMutation.PROSE_IN_A_DEGRADED_STATE) {
-                                    status.reason
-                                } else {
-                                    status.summary
+                        if (mutation == UiMutation.SAVE_WITHOUT_EFFECT) {
+                            // Everything a press does EXCEPT the saving: the control was reachable,
+                            // it took focus, the centre key activated it, and a verdict lands on the
+                            // glass. Nothing is written, so the verdict is the refusal.
+                            //
+                            // This is the AC26 demonstration for AC14's third SHALL. Impl-gate
+                            // finding F1: the assertion that graded "saved to the same effect a
+                            // touch has" accepted BOTH verdicts, so it passed whether the keyboard
+                            // save saved or the screen refused. It has to be able to go red against
+                            // a screen that answers a keyboard press with a refusal, and this is
+                            // that screen.
+                            refused = true
+                            message = context.getString(R.string.config_not_saved) + ": " +
+                                ((prefs.readConfig() as? ConfigStatus.Incomplete)?.summary ?: "")
+                        } else {
+                            prefs.baseUrl = url
+                            prefs.deviceToken = credential
+                            prefs.viewerToken = viewerCredential
+                            // Report the validated verdict, not a blanket "Saved": a URL the client
+                            // will refuse to use must say so here, not fail silently at the first
+                            // fix. And the refusal is a WORD, not a colour — "Not saved" leads the
+                            // verdict.
+                            //
+                            // What the card draws is the SUMMARY, a few words. The sentence is behind
+                            // "About server settings", which is what F8 asks for and what
+                            // explain_config_verdict has always promised. The mutation branch draws
+                            // the sentence instead, so the brevity assertion can be shown going red
+                            // against a state that is not on the screen when it opens.
+                            when (val status = prefs.readConfig()) {
+                                is ConfigStatus.Configured -> {
+                                    // A usable configuration is the one thing that unblocks a queue
+                                    // parked by a `Result.failure()` for want of a URL or a token, so
+                                    // ask for a flush the moment one exists.
+                                    FixUploadWorker.enqueueFlush(context)
+                                    refused = false
+                                    message = context.getString(R.string.config_saved)
                                 }
-                                message = context.getString(R.string.config_not_saved) + ": " + verdict
+
+                                is ConfigStatus.Incomplete -> {
+                                    refused = true
+                                    val verdict = if (mutation == UiMutation.PROSE_IN_A_DEGRADED_STATE) {
+                                        status.reason
+                                    } else {
+                                        status.summary
+                                    }
+                                    message = context.getString(R.string.config_not_saved) + ": " + verdict
+                                }
                             }
                         }
                         // A newly-entered viewer credential is the one thing that unblocks the alert

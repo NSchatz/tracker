@@ -14,6 +14,8 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.nschatz.tracker.R
+import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.TroubleKind
 import org.junit.After
@@ -84,6 +86,11 @@ class UiClaimTest {
     fun setUp() {
         UiHarness.resetStatus()
         UiHarness.clearConfig()
+        // Every case is graded in the one grant state that draws all nine of this screen's controls.
+        // Without it two of them are not operable at all - the start/stop control is disabled and the
+        // precise-location upgrade is not drawn - and AC14's "every control" could only ever be
+        // measured over seven. See UiHarness.grantApproximateLocation.
+        UiHarness.grantApproximateLocation()
         UiHarness.setNightMode(false)
     }
 
@@ -97,8 +104,6 @@ class UiClaimTest {
         // between the directional keys and the screen. Put the device back whichever case just ran,
         // so a later one never inherits a half-configured device.
         UiHarness.restoreInputMethods()
-        // Whatever this case measured, written out while the device is still up.
-        UiHarness.flushEvidence()
     }
 
     // --- AC12: brevity, the explanation destination, and a 360dp layout -------------------------
@@ -653,8 +658,17 @@ class UiClaimTest {
 
     @Test
     fun AC14_operable_without_a_pointer_demonstration() {
+        // AC14 makes three SHALLs, and two of them are graded by this measuring code: every control
+        // reachable and activatable, and the URL and token saved to the same effect a touch has. So
+        // it is shown going red against a mutation for each.
         UiHarness.launch(UiMutation.SAVE_NOT_FOCUSABLE)
         assertFailsNaming("action-save", "directional navigation", "the save control") { operableWithoutAPointer() }
+
+        // And the half impl-gate finding F1 named: a save control that is reachable, focusable and
+        // activatable, and whose activation does not save. An effect assertion that accepts any
+        // verdict at all stays green against this.
+        UiHarness.launch(UiMutation.SAVE_WITHOUT_EFFECT)
+        assertFailsNaming("action-save", "keyboard save", "the effect of a keyboard save") { operableWithoutAPointer() }
     }
 
     @Test
@@ -670,22 +684,102 @@ class UiClaimTest {
     }
 
     /**
-     * The screen is driven end to end with no touch at all: text into both fields, the save control
-     * reached by directional navigation and activated with the centre key, and the effect asserted on
-     * what the screen then SAYS.
+     * The screen is driven end to end with no touch at all: EVERY control reached by the directional
+     * keys and reported activatable where it stands, then text into both fields, then the save
+     * control activated with the centre key and the effect asserted on what the screen then SAYS.
      *
      * Impl-gate finding F20 was this case going red on the emulator, and the cause was a product
      * defect rather than a harness one: a Compose text field consumes the arrow keys whether or not
      * its caret has anywhere to go, so a directional traversal that entered the server URL field
      * could never leave it and every control below - the save control included - was unreachable.
      * `Modifier.directionalPassThrough` on both fields is the fix.
+     *
+     * Two later findings shaped the rest of it, and both were assertions that could not fail:
+     *
+     *  - **F2**: AC14 says "every control reachable and activatable" and this graded ONE. A control
+     *    nothing measures is F20 one step away, so the census below names every control the home
+     *    screen declares and requires each to be operable, reached and activatable.
+     *  - **F1**: the effect was asserted with `contains("Saved") || contains("Not saved")`, which
+     *    accepts both verdicts this screen can draw - the second disjunct says so, and Kotlin's
+     *    case-insensitive `contains` makes the first say it too. The claim passed whether the
+     *    keyboard save SAVED or the screen REFUSED. It is now the saved verdict or nothing, and the
+     *    SAVE_WITHOUT_EFFECT mutation is what shows it going red.
      */
     private fun operableWithoutAPointer() {
         compose.waitForIdle()
         UiHarness.suppressSoftKeyboard()
 
-        compose.onNodeWithTag("field-url").performScrollTo().performTextReplacement("https://tracker.example.org")
-        compose.onNodeWithTag("field-token").performScrollTo().performTextReplacement("a-device-token")
+        // --- every control, reachable and activatable ---------------------------------------------
+        //
+        // One walk down the screen records where focus went and what the platform said each focused
+        // node could do; the per-control lookups below then read that walk. A control the walk never
+        // reached gets its own traversal, which is the case worth spending presses on.
+        val visited = mutableListOf<FocusStop>()
+        walkTheScreen(visited)
+        val reached = linkedMapOf<String, Boolean>()
+        reached["permission-action"] = focusByDirection("permission-action", visited)
+        reached["action-precise"] = focusByDirection("action-precise", visited)
+        reached["explain-permissions"] = focusByDirection("explain-permissions", visited)
+        reached["field-url"] = focusByDirection("field-url", visited)
+        reached["field-token"] = focusByDirection("field-token", visited)
+        reached["action-save"] = focusByDirection("action-save", visited)
+        reached["explain-server"] = focusByDirection("explain-server", visited)
+        reached["action-collection"] = focusByDirection("action-collection", visited)
+        reached["explain-counters"] = focusByDirection("explain-counters", visited)
+
+        val route = visited.joinToString(" -> ") { it.name }.ifBlank { "(nothing at all)" }
+        val census = reached.entries.joinToString(", ") {
+            "${it.key}=${operabilityOf(it.key)}/${if (it.value) "reached" else "NOT-REACHED"}"
+        }
+        lastMeasurement = "focus visited $route; census $census"
+        UiHarness.evidence("AC14 operable without a pointer: visited $route")
+        UiHarness.evidence("AC14 operable without a pointer: census $census")
+
+        val notOperable = mutableListOf<String>()
+        val unreachable = mutableListOf<String>()
+        val unactivatable = mutableListOf<String>()
+        for ((tag, wasReached) in reached) {
+            when (operabilityOf(tag)) {
+                NOT_DRAWN -> notOperable.add("$tag (this screen state does not draw it at all)")
+                DISABLED -> notOperable.add("$tag (drawn, but the screen has it disabled)")
+                else -> {
+                    if (!wasReached) {
+                        unreachable.add(tag)
+                    } else {
+                        val stop = visited.first { it.name == tag }
+                        if (!stop.activatable) unactivatable.add("$tag (${stop.detail})")
+                    }
+                }
+            }
+        }
+
+        // The census is only evidence while every control it names is actually on the glass and
+        // operable: a control the screen has stopped drawing would otherwise drop silently out of
+        // the measured set, which is precisely how a control goes unmeasured.
+        assertTrue(
+            "directional navigation: the census cannot grade these controls because this screen " +
+                "state does not offer them - " + notOperable.joinToString(", ") +
+                " - so AC14's \"every control\" would be measured over fewer than the " +
+                "${reached.size} the home screen declares",
+            notOperable.isEmpty(),
+        )
+        assertTrue(
+            "directional navigation: these controls could not be reached with the directional keys " +
+                "at all - " + unreachable.joinToString(", ") +
+                " - so a person using a keyboard, a d-pad or a screen reader's directional gestures " +
+                "cannot operate them. $DIRECTIONAL_PRESSES presses of DPAD_DOWN focused, in order: $route",
+            unreachable.isEmpty(),
+        )
+        assertTrue(
+            "directional navigation: these controls take focus but the platform reports nothing to " +
+                "activate on them, so the centre key would do nothing where they stand - " +
+                unactivatable.joinToString(", "),
+            unactivatable.isEmpty(),
+        )
+
+        // --- the URL and the token, entered and saved with no pointer -----------------------------
+        compose.onNodeWithTag("field-url").performScrollTo().performTextReplacement(A_USABLE_URL)
+        compose.onNodeWithTag("field-token").performScrollTo().performTextReplacement(A_USABLE_TOKEN)
         compose.waitForIdle()
 
         // Typing may still have raised an IME; while one is up it is the IME that receives a d-pad
@@ -693,28 +787,124 @@ class UiClaimTest {
         UiHarness.dismissKeyboard()
         compose.waitForIdle()
 
-        val visited = mutableListOf<String>()
-        val reached = focusByDirection("action-save", visited)
-        lastMeasurement = "focus visited " + visited.joinToString(" -> ").ifBlank { "(nothing at all)" }
+        // The census walked PAST the save control, so focus has to be put back on it before the
+        // centre key can mean anything. This is a fresh traversal, not a memo.
         assertTrue(
-            "directional navigation: the save control (action-save) was not reachable - " +
-                "$DIRECTIONAL_PRESSES presses of DPAD_DOWN focused, in order: " +
-                visited.joinToString(" -> ").ifBlank { "(nothing at all)" },
-            reached,
+            "directional navigation: the save control (action-save) could not be focused again after " +
+                "the census, so the centre key had nothing to activate. Focus visited: $route",
+            focusOnto("action-save"),
         )
-
-        // Activated from the keyboard, to the same effect a touch has, while it still holds focus.
         sendKey(KeyEvent.KEYCODE_DPAD_CENTER)
         compose.waitForIdle()
         Thread.sleep(500)
 
-        val verdict = textOf("config-verdict")
+        // --- and the EFFECT, which is the one a touch has -----------------------------------------
+        val saved = UiHarness.context.getString(R.string.config_saved)
+        val verdict = textOf("config-verdict").trim()
+        val stored = ClientPreferences(UiHarness.context)
+        lastMeasurement = "config-verdict=\"$verdict\" (a touch leaves \"$saved\"); " +
+            "stored baseUrl=\"${stored.baseUrl.orEmpty()}\" token=${if (stored.deviceToken.isNullOrEmpty()) "empty" else "set"}"
+        UiHarness.evidence("AC14 operable without a pointer: keyboard save left \"$verdict\" on config-verdict")
+        // The verdict is pinned as a PHRASE, and the phrase is the one the screen draws for a save
+        // that happened. `internal/uiverify`'s F1 regression artifact runs inside `make check` and
+        // holds the two ends together: it reads config_saved and config_not_saved out of strings.xml
+        // and refuses this predicate unless it accepts the saved verdict AND rejects the refusal.
+        // That pairing is the fix for impl-gate finding F1, where the predicate was
+        // `contains("Saved") || contains("Not saved")` and accepted both - "Not saved" contains
+        // "Saved", so even the first disjunct alone could not tell one outcome from the other.
         assertTrue(
-            "directional navigation: saving from the keyboard produced \"$verdict\" on config-verdict; " +
-                "it must have the same effect a touch has",
-            verdict.contains("Saved", ignoreCase = true) || verdict.contains("Not saved", ignoreCase = true),
+            "keyboard save: saving from the keyboard produced \"$verdict\" on config-verdict after " +
+                "action-save was activated with the centre key, and a save that happens produces " +
+                "\"$saved\". AC14 asks for the SAME EFFECT a touch has, asserted on what the screen " +
+                "then shows, and this screen draws exactly two verdicts - so a predicate that accepts " +
+                "either of them asserts nothing at all",
+            verdict.contains("Saved to this device", ignoreCase = true),
         )
-        UiHarness.evidence("AC14 operable without a pointer: visited " + visited.joinToString(" -> ") + "; verdict \"$verdict\"")
+        // The screen said it saved; the store agrees. This is not the clause's own assertion - AC14
+        // puts that on what the screen shows - it is the check that the screen was telling the truth.
+        assertEquals(
+            "keyboard save: config-verdict says \"$verdict\" after action-save was activated from the " +
+                "keyboard, but the stored server URL is \"${stored.baseUrl.orEmpty()}\"; the effect a " +
+                "touch has is that the configuration is kept",
+            A_USABLE_URL,
+            stored.baseUrl.orEmpty(),
+        )
+    }
+
+    /** One stop a directional traversal made, and what the platform said about the control there. */
+    private data class FocusStop(val name: String, val activatable: Boolean, val detail: String)
+
+    /**
+     * Walks the whole screen once with the directional keys, recording every control focus landed on.
+     *
+     * The per-control lookups read this rather than each re-walking the screen: a traversal restarts
+     * from wherever focus is, so nine independent walks would measure nine different things.
+     */
+    private fun walkTheScreen(visited: MutableList<FocusStop>) {
+        for (i in 0 until DIRECTIONAL_PRESSES) {
+            sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
+            compose.waitForIdle()
+            recordFocusStop(UiHarness.focusedName(), visited)
+        }
+    }
+
+    /**
+     * Records where focus is NOW, under [name], unless the traversal is still standing where it was.
+     *
+     * `activatable` is the PLATFORM's own answer about the focused node, which is what decides
+     * whether a centre key press does anything: a node that reports neither a click nor an editable
+     * field is one the directional keys can reach and nothing more.
+     */
+    private fun recordFocusStop(name: String, visited: MutableList<FocusStop>) {
+        if (visited.isNotEmpty() && visited.last().name == name) return
+        val node = UiHarness.focusedNode()
+        visited.add(
+            FocusStop(
+                name = name,
+                activatable = node != null && (node.isClickable || node.isEditable),
+                detail = if (node == null) {
+                    "nothing held focus"
+                } else {
+                    "clickable=${node.isClickable} editable=${node.isEditable} enabled=${node.isEnabled}"
+                },
+            ),
+        )
+    }
+
+    /**
+     * Whether the running screen draws [tag] at all, and whether it has disabled it.
+     *
+     * Read from the app as it stands rather than from a list written here: a control this screen
+     * state does not offer is not a control AC14 can ask to be reachable, and a control it has
+     * disabled has no functionality for the keyboard to reach (WCAG 2.2's 2.1.1 binds "all
+     * functionality"). Saying which of the three it is, out loud, is what stops either case from
+     * quietly shrinking the measured set.
+     */
+    private fun operabilityOf(tag: String): String {
+        val nodes = compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes()
+        if (nodes.isEmpty()) return NOT_DRAWN
+        var disabled = false
+        for (node in nodes) walk(node) { if (it.config.contains(SemanticsProperties.Disabled)) disabled = true }
+        return if (disabled) DISABLED else OPERABLE
+    }
+
+    /**
+     * Puts focus ON [tag] and LEAVES it there, walking up first and then down.
+     *
+     * Distinct from [focusByDirection], which answers "was this control reachable" and is allowed to
+     * answer from the census. Activating a control needs focus to actually be on it, and after the
+     * census it is at the bottom of the screen.
+     */
+    private fun focusOnto(tag: String): Boolean {
+        if (isFocused(tag)) return true
+        for (code in listOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) {
+            for (i in 0 until DIRECTIONAL_PRESSES) {
+                sendKey(code)
+                compose.waitForIdle()
+                if (isFocused(tag)) return true
+            }
+        }
+        return false
     }
 
     /**
@@ -730,11 +920,17 @@ class UiClaimTest {
         compose.waitForIdle()
         UiHarness.suppressSoftKeyboard()
 
-        val visited = mutableListOf<String>()
+        // The two assertions below the capture are the ONLY ones in this function whose message names
+        // both the mutated view and the check string "focus indicator", and that is deliberate.
+        // `assertFailsNaming` accepts any failure carrying both, so a precondition that named them
+        // would let the AC26 demonstration report a traversal failure - or a focus move that would not
+        // budge - as the indicator having been demonstrated (impl-gate finding F4). Both of those now
+        // fail under a different check name.
+        val visited = mutableListOf<FocusStop>()
         val reached = focusByDirection("action-save", visited)
         assertTrue(
-            "directional navigation: the save control (action-save) was not reachable, so its focus " +
-                "indicator cannot be read - visited: " + visited.joinToString(" -> "),
+            "directional navigation: the save control (action-save) was not reachable, so there is " +
+                "nothing focused to photograph - visited: " + visited.joinToString(" -> ") { it.name },
             reached,
         )
         val focused = captureOf(ringTagOf("action-save"))
@@ -1029,13 +1225,20 @@ class UiClaimTest {
      * not reaching the screen), focus stalled on one control (that control is consuming them), or
      * focus visited everything except the one being looked for (the focus order skips it).
      */
-    private fun focusByDirection(tag: String, visited: MutableList<String>): Boolean {
+    private fun focusByDirection(tag: String, visited: MutableList<FocusStop>): Boolean {
+        // Already focused once on this traversal. A control is reachable or it is not; walking to it
+        // a second time would only measure where the previous lookup happened to leave focus.
+        if (visited.any { it.name == tag }) return true
+        // A control this screen state does not draw, or has disabled, cannot take focus and there is
+        // nothing to walk toward. Say so at once rather than spending the whole traversal budget on
+        // it; the caller reports it as not-operable, which is a louder answer than "not reached".
+        if (operabilityOf(tag) != OPERABLE) return false
         sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         for (i in 0 until DIRECTIONAL_PRESSES) {
             compose.waitForIdle()
             val here = UiHarness.focusedName()
-            if (visited.isEmpty() || visited.last() != here) visited.add(here)
-            if (here == tag || isFocused(tag)) return true
+            recordFocusStop(if (here == tag || isFocused(tag)) tag else here, visited)
+            if (visited.last().name == tag) return true
             sendKey(KeyEvent.KEYCODE_DPAD_DOWN)
         }
         return false
@@ -1094,7 +1297,10 @@ class UiClaimTest {
             if (!isFocused(tag)) return
         }
         throw AssertionError(
-            "focus indicator: focus could not be moved off $tag, so its unfocused paint cannot be read",
+            "focus traversal: focus could not be moved off $tag, so its unfocused paint cannot be " +
+                "read. Named for the traversal rather than for the indicator on purpose: a " +
+                "demonstration reads the failure message, and one that named the indicator here would " +
+                "count a stuck focus as the indicator having been shown going red (finding F4)",
         )
     }
 
@@ -1228,6 +1434,28 @@ class UiClaimTest {
 
         /** Presses of DPAD_DOWN a traversal is allowed before it reports a control unreachable. */
         const val DIRECTIONAL_PRESSES = 40
+
+        /**
+         * What the running screen says about a control the home tree can draw.
+         *
+         * AC14 binds every control to be "reachable and activatable", and the three answers are not
+         * interchangeable: OPERABLE is the one the traversal grades, and the other two are reported
+         * as failures rather than quietly excluded, because a control that stops being drawn is
+         * exactly how one stops being measured.
+         */
+        const val OPERABLE = "operable"
+        const val DISABLED = "disabled"
+        const val NOT_DRAWN = "not-drawn"
+
+        /**
+         * A server configuration this client ACCEPTS, so that a save from the keyboard has the
+         * effect a touch has rather than the refusal.
+         *
+         * It has to be usable: the verdict is validated, and a URL the client refuses would make the
+         * screen say "Not saved" for a reason that has nothing to do with the keyboard.
+         */
+        const val A_USABLE_URL = "https://tracker.example.org"
+        const val A_USABLE_TOKEN = "a-device-token"
 
         /** How different two pixels must be, per channel, to count as differing. */
         const val RING_COLOUR_TOLERANCE = 24

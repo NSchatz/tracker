@@ -217,7 +217,34 @@ hierarchy built from node infos carries no text or background colour, so those c
 a screenshot heuristic — at WARNING, never at ERROR. Filtering their results to ERROR is how a sweep
 came back clean over text at 1.7:1. Every number the sweep measured is written to
 `build/uiverify/android-grading.log` and printed by `make verify-ui-android`, so a PASSING run is
-inspectable rather than merely quiet.
+inspectable rather than merely quiet — **and that sentence is now graded rather than trusted**.
+`uiverify android` refuses a run whose evidence file is absent, empty, missing any claim's summary
+line, or carrying summaries with no per-view measurements under them, so the route cannot report
+green on a mechanism that has quietly stopped writing.
+
+It says so because it did. For the whole life of that mechanism the file was **zero bytes on every
+real emulator run** while this paragraph said it held everything (impl-gate finding F3). The suite
+wrote it through `UiAutomation.executeShellCommand`, which is `Runtime.getRuntime().exec` — that
+splits its argument on whitespace with a `StringTokenizer`, honours no quoting, expands nothing and
+starts no shell, so `sh -c '… | base64 -d >> FILE'` was never a redirect; and the write swallowed its
+own failure by design, so nothing turned red. The evidence goes to the **device log** now, under
+`UiHarness.EVIDENCE_TAG` (mirrored as `ANDROID_EVIDENCE_TAG` in the `Makefile`), which needs no
+quoting, no redirect and no filesystem permission, and `make verify-ui-android` dumps that tag off
+the device with `adb logcat -d -v raw`.
+
+**Operability without a pointer is graded over EVERY control, not just the save control.** The
+traversal walks the screen with the directional keys, records where focus went and what the platform
+said each focused node could do, and then requires every one of the nine controls the home screen
+declares to be drawn, enabled, reached and activatable — a control the screen has stopped drawing or
+has disabled is reported as a failure rather than dropped quietly out of the measured set. Two of
+those nine are only operable once the phone has granted *approximate* location, so the suite grants
+exactly that through the shell before each case: the start/stop control is disabled without a
+location grant and the precise-location upgrade has nothing to upgrade from. Nothing about the app's
+own permission flow is stubbed — the app reads the same `checkSelfPermission` it always reads, and it
+is the device that changed. `internal/uiverify`'s two S0074 regression guards run inside `make check`
+and hold the suite to this: one refuses a control the screen declares and the traversal does not
+name, the other refuses a save-effect predicate that cannot tell "Saved to this device" from
+"Not saved".
 
 The suite needs a booted emulator and **refuses loudly when it cannot have one**, naming the missing
 piece and how to get it (`scripts/android-emulator.sh`). It never skips. Without `/dev/kvm` an
