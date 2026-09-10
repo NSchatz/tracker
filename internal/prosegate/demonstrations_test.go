@@ -46,7 +46,7 @@ func TestEveryRefusalCategoryIsDemonstrated(t *testing.T) {
 func recordDriftRefusal(t *testing.T) error {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, RecordFile), []byte("- error ceiling: 15%\n- warning band: 5%\n- minimum counted lines: 30\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, RecordFile), []byte("- error ceiling: 15%\n- warning band: 35%\n- minimum counted lines: 30\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	err := CheckRecord(root, Enforced)

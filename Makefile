@@ -171,7 +171,7 @@ check: check-go android
 # that is the rule that keeps the PR gate identical to the gate a human runs. It guards BOTH stacks'
 # pins (the Gradle wrapper and version catalog included), so it sits in the half that runs
 # everywhere rather than in `android`, which needs an SDK.
-check-go: fmt vet build test staticcheck govulncheck pin-check
+check-go: fmt vet build test staticcheck govulncheck pin-check prose-check
 
 # --- user-interface grading -----------------------------------------------------
 #

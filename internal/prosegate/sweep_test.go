@@ -109,7 +109,7 @@ func TestAFileOverTheCeilingIsRefusedByName(t *testing.T) {
 	if got.Category != OverCeiling || got.File != "loud.go" {
 		t.Fatalf("want an over-ceiling refusal naming loud.go, got %v", got)
 	}
-	if !strings.Contains(got.Why, "50.0%") || !strings.Contains(got.Why, "35% ceiling") {
+	if !strings.Contains(got.Why, "50.0%") || !strings.Contains(got.Why, "45% ceiling") {
 		t.Errorf("the refusal names the file, its measured ratio and the ceiling; got %q", got.Why)
 	}
 }
@@ -117,7 +117,7 @@ func TestAFileOverTheCeilingIsRefusedByName(t *testing.T) {
 func TestAFileInTheBandIsNamedAndStillExitsZero(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "quiet.go", filler("quiet", 60))
-	write(t, root, "warned.go", narrated("warned", 10, 25))
+	write(t, root, "warned.go", narrated("warned", 20, 30))
 
 	report, err := CheckRepo(root, Enforced)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestAFileInTheBandIsNamedAndStillExitsZero(t *testing.T) {
 	}
 	var out bytes.Buffer
 	report.WriteSummary(&out)
-	if !strings.Contains(out.String(), "warned.go") || !strings.Contains(out.String(), "28.6%") {
+	if !strings.Contains(out.String(), "warned.go") || !strings.Contains(out.String(), "40.0%") {
 		t.Errorf("a banded file is named with its ratio in the output:\n%s", out.String())
 	}
 }

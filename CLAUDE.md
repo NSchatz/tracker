@@ -16,11 +16,13 @@ don't build the next one because it seems easy.
 ## The gate
 
 ```bash
-make check     # BOTH stacks: check-go + android
-make check-go  # gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check
-make android   # ./gradlew assembleDebug lintDebug testDebugUnitTest
-make pin-check # the supply-chain pin gate alone - no daemon, no SDK, no network
-make smoke     # the real compose stack; asserts /healthz answers 200
+make check            # BOTH stacks: check-go + android
+make check-go         # gofmt · vet · build · test -race · staticcheck · govulncheck · pin-check · prose-check
+make android          # ./gradlew assembleDebug lintDebug testDebugUnitTest
+make pin-check        # the supply-chain pin gate alone - no daemon, no SDK, no network
+make prose-check      # the comment-density gate alone - same, needs nothing
+make prose-check-test # the density check's own suite alone - same, needs nothing
+make smoke            # the real compose stack; asserts /healthz answers 200
 ```
 
 **The user-interface gate is a separate set of targets, and it is not optional.**
@@ -105,6 +107,27 @@ red or if any category has quietly stopped finding anything. Do not "fix" those 
 `pin-check` step to `ci.yml` - `make check` already reaches it. When you move a pin, move the
 provenance row in `README.md` with it, and resolve a new pin from the publisher ONCE: a pin resolved
 twice can silently differ.
+
+**Comments earn their place by saying WHY, and `make prose-check` holds the line.** `cmd/prosecheck`
+measures every tracked Go file's prose from the GO TOKEN STREAM (`go/parser`, `go/scanner`,
+`go/ast`) and refuses a file whose ratio is over the ceiling `COMMENT-DENSITY-RECORD.md` records,
+naming the file, its measured ratio and the ceiling. It also refuses a record that no longer agrees
+with the gate, a file it cannot read or parse, and a sweep that measured nothing. Like `pin-check` it
+needs nothing: no daemon, no SDK, no credentials, no network, and it rides `check-go` rather than a
+second step in `ci.yml`.
+
+The thresholds are THIS repository's own measured baseline, derived in the record: the ceiling is the
+smallest whole multiple of five percentage points no eligible file exceeds (capped at fifty) and the
+band is ten points below it. Raising one is a source change with a name on it, and
+`internal/prosegate` fails if the record and the gate ever state different numbers.
+
+Count by TOKENS, never by pattern: a comment marker inside a string literal, and the closing
+delimiter of a raw string spanning several lines, read exactly like prose to anything matching on
+lines. A directive is CODE and never prose - build constraints in both forms, any `//go:` directive,
+`//line`, `//nolint` - so no run can demand a deletion that changes what compiles. A generated file
+leaves the measurement entirely and a leading licence notice is in neither count. Four deliberately
+broken trees under `internal/prosegate/testdata/refusals` prove the gate still bites; do not fix
+them.
 
 **The Claude Code tool layer refuses to write `android/gradle/wrapper/gradle-wrapper.properties`**, and
 `.npmrc` with it: they are on its built-in sensitive-file list, so `Edit` and `Write` are both denied

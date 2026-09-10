@@ -1,22 +1,15 @@
-// Package testsupport provides the real PostGIS that tracker's tests run against.
+// Package testsupport provides the real PostGIS that tracker's tests run against, one container per
+// run, through testcontainers-go.
 //
-// # Why this exists, and why it may never skip
+// tracker's correctness lives in spatial SQL (roadmap §5.1, "the correctness bedrock"):
+// geography-vs-geometry units, lon/lat axis order, on-boundary containment, GiST index selection.
+// None of it can be tested against a mock, because the thing under test IS PostGIS's behaviour and a
+// fake would only assert what we already believed.
 //
-// tracker's correctness lives in spatial SQL (roadmap §5.1 — "the correctness bedrock"):
-// geography-vs-geometry units, lon/lat axis order, on-boundary containment, GiST index
-// selection. None of that can be tested against a mock or an in-memory stand-in, because
-// the thing under test IS PostGIS's behaviour. A fake would only ever assert what we
-// already believed.
-//
-// So the tests need a real PostGIS, and this package starts one per run with
-// testcontainers-go.
-//
-// The one rule: IF THE DATABASE WILL NOT COME UP, THE TEST FAILS. It never skips.
-// A gate that quietly skips its correctness bedrock when the database is missing reports
-// green while proving nothing, which is the "advisory gate" failure this project
-// explicitly refuses. A missing Docker daemon is an unknown, and an unknown is not a
-// pass. That is why every failure path below is t.Fatalf and there is not a single
-// t.Skip in this package.
+// The one rule: IF THE DATABASE WILL NOT COME UP, THE TEST FAILS. It never skips. A gate that
+// quietly skips its correctness bedrock reports green while proving nothing, and a missing Docker
+// daemon is an unknown rather than a pass. Every failure path below is t.Fatalf and there is not a
+// single t.Skip in this package.
 package testsupport
 
 import (
@@ -31,49 +24,35 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// PostGISImage is the image every test runs against, pinned by TAG AND DIGEST (P1 of the
-// org's pinning conventions) and identical to the `postgis` service in docker-compose.yml.
+// PostGISImage is the image every test runs against, pinned by TAG AND DIGEST (P1 of the org's
+// pinning conventions) and identical to the `postgis` service in docker-compose.yml.
 //
-// The tag stays here so a human can read which PostGIS this is; the digest is what actually
-// resolves, and it is the half that matters. Every spatial assertion tracker makes is an
-// assertion about a specific PostGIS build's behaviour (geography units, on-boundary
-// containment, planner index selection), so a floating tag would let the thing under test
-// change without a single test changing, and would let the database the tests measure
-// drift away from the database the stack runs. Moving it is a two-minute job with the
-// provenance table in README.md; it must move in both places at once.
-//
-// internal/pingate reads this constant and refuses it if it ever loses either half.
+// The tag is what a human reads; the digest is what resolves. Every spatial assertion tracker makes
+// is an assertion about a specific PostGIS build's behaviour, so a floating tag would let the thing
+// under test change without a single test changing, and would let the database the tests measure
+// drift from the database the stack runs. It must move in both places at once, with the provenance
+// table in README.md. internal/pingate refuses this constant if it ever loses either half.
 const PostGISImage = "postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5"
 
-// These credentials are synthetic and local to a throwaway container that is never
-// published to a port on the host. They are not, and must never become, a real secret.
+// Synthetic credentials, local to a throwaway container never published to a host port. They are
+// not, and must never become, a real secret.
 const (
 	testUser = "tracker"
 	testPass = "tracker" //nolint:gosec // synthetic; a per-run throwaway container
 	testDB   = "tracker_test"
 )
 
-// cleanDB is the database tests actually run against. It is created from `template0`,
-// NOT from the container's default database.
-//
-// That distinction is the whole point, and getting it wrong once already produced a gate
-// that proved nothing. The postgis/postgis image's initdb scripts pre-create the postgis
-// extension (plus postgis_topology and postgis_tiger_geocoder) in POSTGRES_DB. A test
-// running there could assert "postgis is enabled" all day and never learn whether the
-// MIGRATION enabled it — the image did. Gut the migration's SQL and such a test still
-// passes green.
-//
-// `template0` is pristine by definition: no extensions, nothing pre-installed. So in this
-// database the schema has to stand on its own, and every assertion about it is an
-// assertion about our migrations rather than about somebody's Dockerfile.
+// cleanDB is the database tests actually run against, created from `template0` and NOT from the
+// container's default database. Getting that wrong once already produced a gate that proved nothing:
+// the postgis/postgis image's initdb scripts pre-create the postgis extension in POSTGRES_DB, so a
+// test running there could assert "postgis is enabled" all day and never learn whether the MIGRATION
+// enabled it. `template0` is pristine by definition, so the schema has to stand on its own and every
+// assertion about it is an assertion about our migrations rather than somebody's Dockerfile.
 const cleanDB = "tracker_clean"
 
-// NewPostGIS starts a PostGIS container and returns a DSN pointing at a pristine database
-// inside it (see cleanDB).
-//
-// The container is terminated when the test ends. Each call gets its OWN container, so
-// tests cannot leak schema or rows into one another — which is what lets them run in
-// parallel and what makes a failure mean what it says.
+// NewPostGIS starts a PostGIS container and returns a DSN pointing at a pristine database inside it
+// (see cleanDB). Each call gets its OWN container, terminated when the test ends, so tests cannot
+// leak schema or rows into one another.
 func NewPostGIS(t testing.TB) string {
 	t.Helper()
 
@@ -84,10 +63,9 @@ func NewPostGIS(t testing.TB) string {
 		postgres.WithUsername(testUser),
 		postgres.WithPassword(testPass),
 		testcontainers.WithWaitStrategy(
-			// Postgres's entrypoint starts the server, shuts it down to run initdb
-			// scripts, then starts it again — so "port is listening" alone can catch the
-			// first, transient server. Waiting for the readiness log twice is the
-			// documented way to wait for the real one.
+			// Postgres's entrypoint starts the server, shuts it down to run initdb scripts,
+			// then starts it again, so "port is listening" alone can catch the first,
+			// transient server. Twice is the documented way to wait for the real one.
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
 				WithStartupTimeout(2*time.Minute),

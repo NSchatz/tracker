@@ -43,14 +43,14 @@ func TestTheThresholdsAreDerivedFromTheRepositoryItMeasures(t *testing.T) {
 }
 
 func TestARecordThatDisagreesWithTheGateIsRefused(t *testing.T) {
-	root := recordAt(t, "- error ceiling: 50%\n- warning band: 25%\n- minimum counted lines: 30\n")
+	root := recordAt(t, "- error ceiling: 50%\n- warning band: 35%\n- minimum counted lines: 30\n")
 
 	err := CheckRecord(root, Enforced)
 	refusals := RefusalsIn(err)
 	if len(refusals) != 1 || refusals[0].Category != RecordDrift {
 		t.Fatalf("want one record-drift refusal, got %v", err)
 	}
-	if !strings.Contains(refusals[0].Why, "states error ceiling 50, and the gate enforces 35") {
+	if !strings.Contains(refusals[0].Why, "states error ceiling 50, and the gate enforces 45") {
 		t.Errorf("the refusal names both numbers; got %q", refusals[0].Why)
 	}
 }

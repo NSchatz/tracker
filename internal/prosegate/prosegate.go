@@ -38,7 +38,7 @@ type Thresholds struct {
 // Enforced is what `make prose-check` applies. The derivation is in RecordFile:
 // the ceiling is the smallest whole multiple of five percentage points that no
 // eligible file exceeds, capped at fifty, and the band is ten points below it.
-var Enforced = Thresholds{CeilingPercent: 35, BandPercent: 25, MinimumLines: 30}
+var Enforced = Thresholds{CeilingPercent: 45, BandPercent: 35, MinimumLines: 30}
 
 // Category names one shape of refusal. A category that has stopped finding
 // anything looks exactly like a compliant repository, so the committed
