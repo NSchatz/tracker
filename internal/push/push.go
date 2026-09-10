@@ -2,24 +2,17 @@
 //
 // The shape is three layers that the acceptance pins independently:
 //
-//   - a SENDER per backend (fcm.go, unifiedpush.go) — the wire format of one push to one endpoint.
+//   - a SENDER per backend (fcm.go, unifiedpush.go) - the wire format of one push to one endpoint.
 //     FCM HTTP v1 with high priority and a collapse key; UnifiedPush a plain POST to an endpoint URL.
-//     These are the unit-tested surface (request shape, priority, collapse key, failure handling).
-//   - a DISPATCHER — a bounded, retrying, non-blocking queue in front of the senders, so a slow or
-//     failing push backend can NEVER block or fail ingestion (§5.3 fail-safe). A send that fails is
-//     retried within limits and then dropped-with-a-log; a queue that fills drops the oldest-refused
-//     with a log (the 100-pending cap). Best-effort delivery is the contract FCM itself gives us, and
-//     the dispatcher does not pretend to more.
-//   - an EventNotifier (notify.go) — the glue the server calls after a crossing is recorded: fan the
-//     family's registered endpoints out into deliveries and hand them to the dispatcher.
+//   - a DISPATCHER - a bounded, retrying, non-blocking queue in front of the senders, so a slow or
+//     failing push backend can NEVER block or fail ingestion (§5.3 fail-safe). Best-effort delivery is
+//     the contract FCM itself gives us, and the dispatcher does not pretend to more.
+//   - an EventNotifier (notify.go) - the glue the server calls after a crossing is recorded.
 //
-// # The PII boundary (§5.3: "no PII in the body beyond what the family opted into")
-//
-// A notification carries only the family's OWN labels — the device's name and the Place's name, both
-// chosen by the operator when enrolling them — and the direction of the crossing. It never carries a
-// coordinate, an accuracy, or any raw fix data. "Alice's phone left School" is the family's own
-// vocabulary; a latitude is not, and none is ever put on the wire. buildNotification (notify.go) is
-// the single place that decides this, so the boundary is enforced in one auditable spot.
+// THE PII BOUNDARY (§5.3, "no PII in the body beyond what the family opted into"): a notification
+// carries only the family's OWN labels - the device's name, the Place's name - and the direction of
+// the crossing. It never carries a coordinate, an accuracy or any raw fix data. buildNotification
+// (notify.go) is the single place that decides this, so the boundary is auditable in one spot.
 package push
 
 import (
@@ -55,18 +48,14 @@ type Notification struct {
 	Data        map[string]string
 }
 
-// Delivery is one Notification bound for one Subscription — the unit the dispatcher queues and a
+// Delivery is one Notification bound for one Subscription: the unit the dispatcher queues and a
 // Sender sends.
 //
-// Bound carries the collapse-bound classification the ledger made when this crossing was handed
-// over: OutcomeHandedOver, or OutcomeBeyondCollapseBound when the endpoint already had four or more
-// distinct keys pending (A19). It is decided at ENQUEUE, where the pending set is known, and is only
-// ever DOWNGRADED afterwards - a delivery the dispatcher never manages to hand over is recorded
-// `dropped` regardless of what it was classified as. Nothing upgrades it, and in particular a
-// backend accepting the message does not (A5).
-//
-// The zero value is the empty string, which the dispatcher treats as OutcomeHandedOver - the
-// under-claiming default, and what a Delivery built by hand in a test means.
+// Bound carries the collapse-bound classification the ledger made (A19). It is decided at ENQUEUE,
+// where the pending set is known, and only ever DOWNGRADED afterwards - a delivery the dispatcher
+// never hands over is recorded `dropped` whatever it was classified as. Nothing upgrades it, and a
+// backend accepting the message in particular does not (A5). The zero value is the under-claiming
+// default, OutcomeHandedOver.
 type Delivery struct {
 	Sub   Subscription
 	Note  Notification
@@ -87,21 +76,18 @@ type Sender interface {
 	Send(ctx context.Context, d Delivery) error
 }
 
-// DefaultMaxPending is the depth of the dispatcher's queue — the "100-pending cap" (roadmap S6). It
-// bounds how many undelivered pushes can back up in memory when a backend is slow or down: past it,
-// new deliveries are dropped with a log rather than growing the queue without limit. It mirrors FCM's
-// own behaviour (it caps pending messages per device and discards the rest), so the cap is not an
-// arbitrary number — it is the same "best-effort, bounded" contract the backend gives us.
+// DefaultMaxPending is the depth of the dispatcher's queue, the "100-pending cap" (roadmap S6). Past
+// it, new deliveries are dropped with a log rather than growing the queue without limit. It mirrors
+// FCM's own behaviour, so the cap is the same "best-effort, bounded" contract the backend gives us.
 const DefaultMaxPending = 100
 
-// defaultMaxAttempts is how many times the dispatcher tries one delivery before giving up and logging
-// it. Small on purpose: push delivery is best-effort and the freshest state arrives on the next fix
-// anyway, so retrying forever would only deepen the queue behind a dead backend.
+// defaultMaxAttempts is how many times the dispatcher tries one delivery. Small on purpose: delivery
+// is best-effort and the freshest state arrives on the next fix, so retrying forever would only
+// deepen the queue behind a dead backend.
 const defaultMaxAttempts = 3
 
-// defaultRetryBackoff is the pause between delivery attempts. Short, because the worker is
-// single-threaded and a long sleep would stall every delivery behind it; the point of the retry is to
-// ride out a momentary blip, not to wait out an outage.
+// defaultRetryBackoff is the pause between attempts. Short, because the worker is single-threaded and
+// a long sleep stalls every delivery behind it: the retry rides out a blip, not an outage.
 const defaultRetryBackoff = 200 * time.Millisecond
 
 // Dispatcher is the bounded, retrying queue in front of the senders. It owns one worker goroutine
@@ -113,9 +99,8 @@ type Dispatcher struct {
 	queue       chan Delivery
 	maxAttempts int
 	backoff     time.Duration
-	// ledger records what became of every delivery, in the three outcomes that exist. It is never
-	// nil - NewDispatcher builds one - so no call site has to nil-check, and accounting cannot be
-	// silently switched off by forgetting an option.
+	// ledger records what became of every delivery. Never nil - NewDispatcher builds one - so
+	// accounting cannot be silently switched off by forgetting an option.
 	ledger *DeliveryLedger
 
 	wg      sync.WaitGroup
@@ -184,11 +169,9 @@ func (d *Dispatcher) Enqueue(deliveries ...Delivery) {
 			n := d.dropped.Add(1)
 			d.logger.Warn("push queue full — dropping delivery (pending cap reached)",
 				"provider", del.Sub.Provider, "collapse_key", del.Note.CollapseKey, "dropped_total", n)
-			// Never handed over at all. On the production path Classify HAS already run for this
-			// delivery - NotifyGeofenceEvents classifies every (crossing, endpoint) pair before it
-			// enqueues any of them - so the pending record it made has to be taken back here, or a
-			// key nothing was ever handed over for would keep counting toward the next crossing's
-			// bound. NotHandedOver is a no-op when there was nothing to take back.
+			// Never handed over at all. NotifyGeofenceEvents classifies every (crossing, endpoint)
+			// pair before it enqueues any of them, so the pending record has to be taken back here or
+			// a key nothing was handed over for keeps counting toward the next crossing's bound.
 			d.notHandedOver(del)
 			d.ledger.Record(context.Background(), del, OutcomeDropped, "queue full (pending cap reached)")
 		}
@@ -201,12 +184,9 @@ func (d *Dispatcher) Enqueue(deliveries ...Delivery) {
 func (d *Dispatcher) Ledger() *DeliveryLedger { return d.ledger }
 
 // notHandedOver takes back the pending record a delivery's classification made, on every path that
-// ends in `dropped`. Pending means handed to the backend (Definitions), and none of the drop paths
-// hands anything over, so a key left counting there would report a bound that nothing earned.
-//
-// Only a delivery classified OutcomeHandedOver ever added a key: OutcomeBeyondCollapseBound
-// deliberately adds none. Calling it otherwise is harmless (the ledger no-ops on a key it is not
-// holding), but the guard keeps the intent readable at the two call sites.
+// ends in `dropped`. Pending means handed to the backend, and no drop path hands anything over, so a
+// key left counting there would report a bound that nothing earned. Only a delivery classified
+// OutcomeHandedOver ever added a key, which is what the guard says.
 func (d *Dispatcher) notHandedOver(del Delivery) {
 	if del.boundOrDefault() != OutcomeHandedOver {
 		return
@@ -218,16 +198,13 @@ func (d *Dispatcher) notHandedOver(del Delivery) {
 // observability and for the cap test to assert the drop happened rather than the delivery blocking.
 func (d *Dispatcher) Dropped() int64 { return d.dropped.Load() }
 
-// Close stops accepting deliveries and blocks until the worker has drained everything already queued.
-// Closing the channel is what ends the worker loop; the buffered deliveries are still processed, so a
-// clean shutdown does not silently discard pushes that were already accepted.
+// Close stops accepting deliveries and blocks until the worker has drained everything already queued,
+// so a clean shutdown does not silently discard pushes that were already accepted.
 //
-// The drain is best-effort and bounded by the SENDERS, not by Close: each remaining delivery is sent
-// (and retried) with the sender's own finite HTTP timeout, so with a dead backend and a full queue
-// Close can take up to roughly pending × maxAttempts × (timeout+backoff). That is acceptable at
-// shutdown — the deliveries were already accepted, the sender timeouts are finite, and an orchestrator
-// that wants a hard cap SIGKILLs after its grace period — and it is called after the HTTP server has
-// already drained, so it never delays serving.
+// The drain is bounded by the SENDERS, not by Close: each remaining delivery is retried with the
+// sender's own finite HTTP timeout, so with a dead backend and a full queue Close can take up to
+// roughly pending x maxAttempts x (timeout+backoff). Acceptable at shutdown, and it runs after the
+// HTTP server has already drained, so it never delays serving.
 func (d *Dispatcher) Close() {
 	close(d.queue)
 	d.wg.Wait()
@@ -242,10 +219,9 @@ func (d *Dispatcher) run() {
 	}
 }
 
-// deliver sends one delivery, retrying up to maxAttempts, and — the fail-safe — swallowing a final
+// deliver sends one delivery, retrying up to maxAttempts, and - the fail-safe - swallowing a final
 // failure as a log rather than a panic or a propagated error. A push that cannot be delivered is a
-// missed alert, which S6 accepts as best-effort; it is never a crash and never anything ingestion
-// sees.
+// missed alert, never a crash and never anything ingestion sees.
 func (d *Dispatcher) deliver(ctx context.Context, del Delivery) {
 	sender, ok := d.senders[del.Sub.Provider]
 	if !ok {

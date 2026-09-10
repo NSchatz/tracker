@@ -1,0 +1,7 @@
+package broken
+
+// The brace below is never closed and the argument list never ends. A counter
+// that scored this file as clean, or skipped it, would be reporting on a file
+// it never read.
+func Broken( {
+	return

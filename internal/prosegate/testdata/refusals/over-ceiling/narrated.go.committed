@@ -1,0 +1,35 @@
+// Package narrated is a file with more narration than code. It is committed
+// broken on purpose and must never be tidied: it is how the ceiling is shown
+// biting.
+//
+// The paragraphs below say the same thing several times over, which is the
+// defect the ceiling exists to name. None of it tells a reader anything the
+// three lines of code do not already say, and that is the point.
+//
+// A comment earns its place by saying WHY. A file where prose outweighs code is
+// not documented, it is narrated, and the reader has to hold both the code and
+// somebody's essay about the code in their head at once.
+package narrated
+
+// Total adds two integers together.
+//
+// It takes the first integer and the second integer and returns their sum. The
+// sum of two integers is the integer you get when you add them. Addition is
+// commutative, so the order of the arguments does not matter here.
+//
+// This restatement is the shape the gate refuses. The signature already said
+// all of it, twice.
+func Total(a, b int) int {
+	return a + b
+}
+
+// Twice doubles an integer.
+//
+// It multiplies the integer by two. Multiplying by two is the same as adding
+// the integer to itself. Either formulation returns the same answer for every
+// integer that does not overflow, and overflow is not handled here.
+//
+// The comment is longer than the function and says less.
+func Twice(n int) int {
+	return n * 2
+}

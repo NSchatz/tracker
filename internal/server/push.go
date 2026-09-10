@@ -1,13 +1,10 @@
 package server
 
-// The S6 push-registration HTTP surface. A viewer registers the push endpoint of its phone so a
-// family's geofence crossings can be delivered to it. Delivery itself is not here — it is driven off
-// the ingestion path through the Notifier (see ingest) — this is only how an endpoint gets onto the
-// registry the fan-out reads.
+// The S6 push-registration HTTP surface: how an endpoint gets onto the registry the fan-out reads.
+// Delivery itself is driven off the ingestion path through the Notifier.
 //
-// Why VIEWER-scoped, and a WRITE: a watcher (a viewer) is who wants the alert on their own phone
-// (§5.3), so the credential that registers an endpoint is the viewer token, and the viewer it
-// registers under is the authenticated caller — never a field in the body. A viewer therefore cannot
+// It is VIEWER-scoped because a watcher is who wants the alert on their own phone (§5.3), and the
+// viewer it registers under is THE AUTHENTICATED CALLER, never a field in the body. A viewer cannot
 // register an endpoint under another viewer, the same authz-by-construction the ingestion path uses
 // for the device identity.
 
@@ -26,14 +23,11 @@ import (
 type pushSubscriptionRequest struct {
 	Provider *string `json:"provider"`
 	Token    *string `json:"token"`
-	// ReplacesToken names a routing address this registration SUPERSEDES - the one the phone was
-	// registered under before its address rotated (ALERT-2 D8). Optional and additive: a client that
-	// omits it behaves exactly as before.
-	//
-	// It exists because registration is idempotent on (provider, token), which refreshes an
-	// UNCHANGED address but cannot help a rotated one: an FCM registration token that rotates is a
-	// new address, so the phone would hold two deliverable rows and receive every crossing twice.
-	// The phone is the only party that knows its own previous address, so it names it.
+	// ReplacesToken names a routing address this registration SUPERSEDES (ALERT-2 D8). Optional and
+	// additive. Registration is idempotent on (provider, token), which refreshes an UNCHANGED address
+	// but cannot help a rotated one: a rotated FCM registration token is a new address, so the phone
+	// would hold two deliverable rows and receive every crossing twice. Only the phone knows its own
+	// previous address, so it names it.
 	ReplacesToken *string `json:"replaces_token"`
 }
 
@@ -43,15 +37,11 @@ type pushSubscriptionRequest struct {
 type pushSubscriptionResponse struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
-	// ConfiguredProvider is the push backend THIS DEPLOYMENT has configured, or "" when it has
-	// configured none (ALERT-2 D7/A22). It is not the same thing as Provider above: Provider echoes
-	// what the caller registered, ConfiguredProvider says whether anything will ever be sent through
-	// it. The registration is accepted and stored either way - a deployment can configure a backend
-	// after a phone has registered - so this is the one honest way for an app to say "registered,
-	// but alerts are not being received" instead of showing armed.
-	//
-	// The field is always PRESENT, empty when there is no backend, so a client can tell "this server
-	// configured nothing" from "this server is older than A22 and does not report" (an absent key).
+	// ConfiguredProvider is the push backend THIS DEPLOYMENT has configured, or "" when it has none
+	// (ALERT-2 D7/A22). Provider echoes what the caller registered; this says whether anything will
+	// ever be sent through it, so an app can say "registered, but alerts are not being received"
+	// instead of showing armed. It is always PRESENT and empty when there is no backend, so a client
+	// can tell "configured nothing" from "older than A22 and does not report" (an absent key).
 	ConfiguredProvider string `json:"configured_provider"`
 }
 
@@ -102,15 +92,14 @@ func registerPushSubscription(database DB, notifier Notifier, configuredProvider
 		// collapse-key accounting (A20).
 		notifier.EndpointRegistered(r.Context(), *req.Provider, token)
 
-		// The supersede (A24). Ordered AFTER the register on purpose: if the store failed between the
-		// two, the phone would hold two rows (one crossing twice, which is noisy) rather than none
-		// (the crossing silently lost, which is the failure this whole phase exists to close).
+		// The supersede (A24), ordered AFTER the register on purpose: a store failure between the two
+		// leaves the phone with two rows (a crossing twice, noisy) rather than none (the crossing
+		// silently lost).
 		//
-		// A25 is the shape of what follows: the removal is scoped to the AUTHENTICATED viewer in the
-		// SQL, its result is deliberately not branched on, and nothing about it reaches the response.
-		// Naming an address that is registered to another viewer, or to nobody, therefore removes
-		// nothing and is byte-identical to the succeeding case - the route cannot be used to discover
-		// whether a routing address exists or to unregister somebody else's phone.
+		// A25: the removal is scoped to the AUTHENTICATED viewer in the SQL and nothing about it
+		// reaches the response, so naming an address registered to another viewer, or to nobody,
+		// removes nothing and is byte-identical to the succeeding case. The route cannot be used to
+		// discover whether an address exists or to unregister somebody else's phone.
 		if req.ReplacesToken != nil {
 			replaced := strings.TrimSpace(*req.ReplacesToken)
 			// Replacing an address with itself is the idempotent re-registration, not a supersede;

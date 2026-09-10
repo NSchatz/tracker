@@ -1,29 +1,17 @@
 // Package auth issues and verifies tracker's per-device bearer tokens.
 //
-// # Why a token is not its hash, and why that distinction is load-bearing
+// Two byte strings must never be confused: the TOKEN (what the client sends) and its HASH (what the
+// database holds). The server never stores the token, only its SHA-256, so a database that is read -
+// a backup, a dump, a compromised replica - cannot hand the reader the ability to impersonate a
+// family's phone. This package owns the token, store owns the hash, and Token.Hash is the one place
+// they meet.
 //
-// A device authenticates with a bearer token — an opaque, high-entropy string it presents on
-// every write. The server never stores that string: it stores the SHA-256 of it (see
-// store.CreateDevice, token_hash). A database that is read (a backup, a dump, a compromised
-// replica) must not hand the reader the ability to impersonate a family's phone, and storing
-// only the digest is what buys that — the digest cannot be replayed as a token.
-//
-// So there are two byte strings that must never be confused: the TOKEN (what the client sends)
-// and its HASH (what the database holds). This package owns the token; store owns the hash. The
-// one place they meet is Token.Hash, and the flow is always the same: generate a token, store its
-// hash, and on every request hash the presented token and look the device up by that hash.
-//
-// # The length guard, made real (S2, roadmap risk path #3)
-//
-// devices.token_hash is guarded by a LENGTH check (octet_length = 32), not a "this is really a
-// digest" check — no such check exists, because any 32 bytes are a syntactically valid SHA-256.
-// The failure that guard is meant to stop is a caller accidentally storing the RAW TOKEN where the
-// hash belongs, turning the table into a file of live credentials. That guard is only sufficient
-// if a raw token can never itself be 32 bytes long — otherwise it would sail straight through.
-//
-// A token here is 32 random bytes rendered as unpadded base64url: 43 characters, never 32. That is
-// not incidental; TestTokenIsNeverHashLength pins it, so the length guard in store is a genuine
-// barrier against a raw token masquerading as a digest rather than a coincidence waiting to break.
+// devices.token_hash is guarded by a LENGTH check (octet_length = 32), because no check for "this is
+// really a digest" exists: any 32 bytes are a syntactically valid SHA-256. That guard stops a caller
+// storing the RAW TOKEN where the hash belongs, and it is only sufficient while a raw token can never
+// itself be 32 bytes long. A token here is 32 random bytes as unpadded base64url - 43 characters,
+// never 32 - and TestTokenIsNeverHashLength pins it, so the guard is a barrier rather than a
+// coincidence waiting to break.
 package auth
 
 import (
@@ -35,20 +23,17 @@ import (
 	"strings"
 )
 
-// TokenBytes is the amount of cryptographic randomness in a token before encoding. 32 bytes = 256
-// bits, comfortably past any brute-force reach, and — encoded — never collides with the 32-BYTE
-// length of a SHA-256 digest (see the package doc).
+// TokenBytes is the cryptographic randomness in a token before encoding: 256 bits, and encoded it
+// never collides with the 32-BYTE length of a SHA-256 digest.
 const TokenBytes = 32
 
 // Token is a device's bearer credential in its plaintext form: the string a client sends and the
 // server hashes. It is a secret. It is returned exactly once, at enrollment, and never stored.
 type Token string
 
-// Generate mints a new token from the system CSPRNG.
-//
-// base64url without padding keeps the token safe to carry in an Authorization header, a URL, or an
-// HTTP Basic password without escaping — and, deliberately, 43 characters long, so it can never be
-// mistaken (by length) for the 32-byte digest it will be hashed into.
+// Generate mints a new token from the system CSPRNG. base64url without padding carries safely in an
+// Authorization header, a URL or an HTTP Basic password without escaping, and is 43 characters, so it
+// can never be mistaken by length for the 32-byte digest it will be hashed into.
 func Generate() (Token, error) {
 	b := make([]byte, TokenBytes)
 	if _, err := rand.Read(b); err != nil {
@@ -66,15 +51,14 @@ func (t Token) Hash() [sha256.Size]byte {
 // FromRequest extracts the presented token from the Authorization header, accepting both schemes
 // tracker's clients use:
 //
-//   - Bearer — the first-party client and any modern API caller: `Authorization: Bearer <token>`.
-//   - Basic — the stock OwnTracks app (roadmap §5.2, interim adapter), which authenticates with an
-//     HTTP Basic username/password. The token is the PASSWORD; the username is the device's own
-//     label and is ignored, because the device's identity comes from the token, never from a field
-//     the client can set freely.
+//   - Bearer - the first-party client and any modern API caller.
+//   - Basic - the stock OwnTracks app (roadmap §5.2, interim adapter). The token is the PASSWORD; the
+//     username is ignored, because a device's identity comes from the token, never from a field the
+//     client can set freely.
 //
-// It returns ok=false for a missing, empty, or malformed credential, so the caller answers 401
-// without ever reaching the database. A blank token is treated as absent: an empty string that
-// hashed to a fixed digest and then happened to match a row would be an authentication bypass.
+// It returns ok=false for a missing, empty or malformed credential, so the caller answers 401 without
+// reaching the database. A blank token is absent: an empty string that hashed to a fixed digest and
+// then matched a row would be an authentication bypass.
 func FromRequest(r *http.Request) (Token, bool) {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if h == "" {
