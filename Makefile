@@ -59,7 +59,7 @@ ANDROID_EVIDENCE_TAG ?= TrackerUiGrade
 # theme, which is a few hundred kilobytes; the default ring buffer would evict the first cases.
 ANDROID_LOG_BUFFER ?= 16M
 
-.PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check tidy clean image compose-check smoke run-db \
+.PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check prose-check prose-check-test tidy clean image compose-check smoke run-db \
 	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
 
 build:
@@ -116,6 +116,33 @@ govulncheck:
 # second step in ci.yml - the same shape as internal/toolchain and internal/vulngate.
 pin-check:
 	go run ./cmd/pincheck
+
+# The COMMENT-DENSITY gate. cmd/prosecheck measures every tracked Go file's prose from the
+# GO TOKEN STREAM - go/parser, go/scanner, go/ast - and refuses a file whose prose is over
+# the ceiling COMMENT-DENSITY-RECORD.md records, naming the file, its measured ratio and the
+# ceiling. It also refuses a record that no longer agrees with the gate, a file it cannot
+# read or parse, and a sweep that measured nothing.
+#
+# Counting by PATTERN is the failure it exists to avoid: a comment marker inside a string
+# literal, and the closing delimiter of a raw string spanning several lines, both read
+# exactly like prose to anything matching on lines, and trimming to that number guts files
+# that are mostly code.
+#
+# The thresholds are this repository's OWN measured baseline. The record derives them - the
+# smallest whole multiple of five percentage points no eligible file exceeds, capped at
+# fifty, with the band ten points below - so raising one is a source change with a name on
+# it. Like pin-check this gate needs NOTHING: no Docker daemon, no Android SDK, no
+# credentials and no network. It reads files.
+prose-check:
+	go run ./cmd/prosecheck
+
+# The density check's own suite, alone, inheriting pin-check's needs-nothing property. It is
+# a grading lane, not a bypass: `make test` is `-race` and starts a real PostGIS, so a
+# counting result routed through it goes red for reasons that have nothing to do with
+# counting. The suite lives in a package `go test ./...` picks up, so it still reaches CI
+# through `make check` with no second step in ci.yml.
+prose-check-test:
+	go test ./internal/prosegate/...
 
 # The Android client gate — assemble the debug APK, run Android Lint, run the JVM unit
 # tests. Uses the committed Gradle wrapper (pinned to 8.9), so the only host requirements
