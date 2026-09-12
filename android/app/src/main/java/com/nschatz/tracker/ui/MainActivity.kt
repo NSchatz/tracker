@@ -315,6 +315,7 @@ private fun HomeScreen(
     var collectionEnabled by remember { mutableStateOf(homePrefs.collectionEnabled) }
     fun adoptStoredState() {
         collectionEnabled = homePrefs.collectionEnabled
+        if (mutation == UiMutation.RESTART_REASON_UNREPORTED) return
         if (!CollectionStatus.running) {
             homePrefs.bootRestartReason?.let { CollectionStatus.recordBlocked(it.kind, it.sentence) }
         }

@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.nschatz.tracker.R
+import com.nschatz.tracker.collect.BootRestartReason
 import com.nschatz.tracker.collect.ClientPreferences
 import com.nschatz.tracker.collect.CollectionStatus
 import com.nschatz.tracker.collect.TroubleKind
@@ -1144,12 +1145,139 @@ class UiClaimTest {
         )
     }
 
+    // --- REBOOT-1: a restart that did not happen is visible as one ------------------------------
+    //
+    // Two claims, two mutations, for the reason stated at the top of this file: one breaks the STATE
+    // and one breaks the EXPLANATION, so a run that stays green names which of the two checks is
+    // blind. A single mutation covering both would report nothing and say nothing about why.
+    //
+    // The names start with `AC` because that prefix is load-bearing: the structural guard in
+    // internal/uiverify recognises a claim by it and refuses one with no `_demonstration` beside it.
+    // What follows is the work rather than the next number in the AC12-to-AC29 sequence this file
+    // already carries, which has no criterion about a reboot to lend an ordinal.
+
+    @Test
+    fun ACREBOOT_a_failed_restart_reads_as_not_running() {
+        aBootDeclinedToRestartCollection()
+        UiHarness.launch()
+        aFailedRestartReadsAsNotRunning()
+    }
+
+    @Test
+    fun ACREBOOT_a_failed_restart_reads_as_not_running_demonstration() {
+        aBootDeclinedToRestartCollection()
+        UiHarness.launch(UiMutation.STORED_ASK_READS_AS_RUNNING)
+        assertFails("a stored ask for collection drawn as a running collection was not caught") {
+            aFailedRestartReadsAsNotRunning()
+        }
+    }
+
+    /**
+     * The state, read off the screen: not running, and the disagreement said out loud.
+     *
+     * The expected words are read from the device's own resources while the measured ones come from
+     * what Compose published, so this compares a rendering against the app's own vocabulary rather
+     * than against a literal typed twice.
+     */
+    private fun aFailedRestartReadsAsNotRunning() {
+        compose.waitForIdle()
+        val running = UiHarness.context.getString(R.string.collection_running)
+        val stopped = UiHarness.context.getString(R.string.collection_stopped)
+
+        val word = textOf("collection-running")
+        assertNotEquals(
+            "collection was asked for and is not running, and the card draws \"$word\"; a stored " +
+                "intent to collect must never be presented as a running collection",
+            running,
+            word,
+        )
+        assertEquals("the card must read as not running", stopped, word)
+
+        // ... and "Stopped" alone is not enough, because that is what a phone somebody switched off
+        // says too. The state a failed restart leaves behind has to be distinguishable from a
+        // deliberate stop, which is the whole reason this line exists.
+        val ask = textOf("collection-ask")
+        assertTrue(
+            "the card says nothing about collection being enabled while not running, so a restart " +
+                "that did not happen is indistinguishable from a deliberate stop",
+            ask.isNotBlank(),
+        )
+        assertNotEquals("the enabled-not-running line repeats the running word", word, ask)
+    }
+
+    @Test
+    fun ACREBOOT_a_failed_restart_names_its_reason() {
+        aBootDeclinedToRestartCollection()
+        UiHarness.launch()
+        aFailedRestartNamesItsReason()
+    }
+
+    @Test
+    fun ACREBOOT_a_failed_restart_names_its_reason_demonstration() {
+        aBootDeclinedToRestartCollection()
+        UiHarness.launch(UiMutation.RESTART_REASON_UNREPORTED)
+        assertFails("a failed restart with no reason anywhere on the screen was not caught") {
+            aFailedRestartNamesItsReason()
+        }
+    }
+
+    /**
+     * The reason, read off the screen: a few words on the card, the sentence one tap away.
+     *
+     * The process that decided it is long gone by the time anyone opens the app - a receiver runs for
+     * milliseconds at boot - so this is also the assertion that the reason survived it.
+     */
+    private fun aFailedRestartNamesItsReason() {
+        compose.waitForIdle()
+        val label = textOf("collection-error")
+        assertTrue(
+            "the card names no reason for the collection not running, so a person is left with a " +
+                "state and no way to act on it",
+            label.isNotBlank(),
+        )
+        assertTrue(
+            "the reason on the card is \"$label\", which is a paragraph rather than a label",
+            wordCount(label) <= MAX_LABEL_WORDS,
+        )
+
+        compose.onNodeWithTag("explain-counters").performScrollTo().performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("explanation").assertIsDisplayed()
+        val sentence = textOf("explanation-detail")
+        assertTrue(
+            "the explanation destination renders \"$sentence\"; the sentence the card deliberately " +
+                "does not draw has to be readable somewhere or the reason was not recorded, it was lost",
+            sentence.isNotBlank() && wordCount(sentence) > MAX_LABEL_WORDS,
+        )
+        compose.onNodeWithTag("explanation-back").performScrollTo().performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("home").assertIsDisplayed()
+    }
+
     // --- fixtures --------------------------------------------------------------------------------
     //
     // The screen is the unit under test; these are its inputs. The spec allows a doctored input
     // where the running stack has no path to the state - a queue directory that cannot be listed is
     // exactly that - and CollectionStatus is a process-scoped singleton the instrumentation shares
     // with the app, so setting it is setting the real thing the screen reads.
+
+    /**
+     * The state a reboot leaves behind when the restart could not happen.
+     *
+     * Written where the boot path writes it - the preference file - rather than into
+     * [CollectionStatus], because the point of the claim is that the reason OUTLIVED the process
+     * that decided it. Setting the in-memory readout directly would grade the screen against a
+     * process that is still there, which is not the case a person opens the app in.
+     *
+     * `setUp` has already cleared the stored configuration, so the reason recorded here is the one
+     * the boot path would genuinely have reached.
+     */
+    private fun aBootDeclinedToRestartCollection() {
+        val prefs = ClientPreferences(UiHarness.context)
+        prefs.collectionEnabled = true
+        prefs.bootRestartReason = BootRestartReason.SERVER_CONFIG_UNUSABLE
+        UiHarness.resetStatus()
+    }
 
     private fun aRunHasHappened() {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
