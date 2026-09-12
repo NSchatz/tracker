@@ -96,11 +96,50 @@ class ClientPreferences(context: Context) {
         get() = prefs.getString(KEY_ROUTING_ADDRESS, null)
         set(value) = prefs.edit().putString(KEY_ROUTING_ADDRESS, value?.trim()).apply()
 
+    /**
+     * Whether a person has asked for collection to be running.
+     *
+     * Distinct from [CollectionStatus.running], and the distinction is the whole point.
+     * `running` is a live in-memory signal about THIS process: a reboot, a force-stop or a
+     * system kill resets it to false, which is honest about the service and says nothing about
+     * what was asked for. This is the ASK, and it has to outlive the process that took it or a
+     * reboot cannot tell "nobody wanted collection" from "collection was wanted and stopped".
+     *
+     * Written at the two places a person acts - the screen's start/stop control and the ongoing
+     * notification's Stop action - and never by the boot path, which only reads it. Defaulting
+     * to false is the fail-safe direction: an install that has never been asked for collection,
+     * and one whose preference file was lost, both come up not collecting rather than starting
+     * the GPS on a phone at a moment nobody chose.
+     */
+    var collectionEnabled: Boolean
+        get() = prefs.getBoolean(KEY_COLLECTION_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_COLLECTION_ENABLED, value).apply()
+
+    /**
+     * Why the boot path last declined to start collection, or null when it has nothing to report.
+     *
+     * The reason has to survive the process that decided it: a receiver runs for milliseconds and
+     * its process can be gone long before anyone opens the app, so a reason held only in
+     * [CollectionStatus] would be lost exactly in the case it exists for.
+     *
+     * What is stored is the enum NAME and nothing else, which is what keeps the record free of a
+     * coordinate or a credential by construction rather than by inspection: the vocabulary is
+     * closed, the sentence a reader sees is a committed literal chosen from it, and there is no
+     * free-text field here for a careless caller to interpolate into. An unrecognised value on
+     * disk reads as null - a preference file written by an older build, or by hand, cannot make
+     * the screen render something the closed set does not name.
+     */
+    var bootRestartReason: BootRestartReason?
+        get() = BootRestartReason.named(prefs.getString(KEY_BOOT_RESTART_REASON, null))
+        set(value) = prefs.edit().putString(KEY_BOOT_RESTART_REASON, value?.name).apply()
+
     private companion object {
         const val PREFS_NAME = "tracker_client"
         const val KEY_BASE_URL = "base_url"
         const val KEY_DEVICE_TOKEN = "device_token"
         const val KEY_VIEWER_TOKEN = "viewer_token"
         const val KEY_ROUTING_ADDRESS = "push_routing_address"
+        const val KEY_COLLECTION_ENABLED = "collection_enabled"
+        const val KEY_BOOT_RESTART_REASON = "boot_restart_reason"
     }
 }

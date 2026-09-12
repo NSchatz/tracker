@@ -107,6 +107,16 @@ enum class UiMutation {
     /** Keep saying the counters are current after collection has stopped. */
     ALWAYS_CURRENT,
 
+    /**
+     * Read a stored ask for collection as a running collection.
+     *
+     * The card draws "Running" and omits the line naming the disagreement, so a phone that was asked
+     * to collect and is not collecting looks exactly like one that is. This is the state a reboot
+     * leaves behind whenever the restart could not happen, and a claim about it cannot be evidence
+     * without a screen that gets it wrong to go red against.
+     */
+    STORED_ASK_READS_AS_RUNNING,
+
     /** Lay the screen out wider than the display, so its content is pushed off and clipped. */
     OVERFLOWING_LAYOUT,
 

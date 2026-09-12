@@ -615,6 +615,10 @@ var documentedStrings = []string{
 	// these are the sections that have to carry them.
 	"config_verdict_note",
 	"collection_trouble",
+	// What happens to collection across a reboot, and the two reasons a restart does not happen.
+	// The card draws three words for that state ("Enabled, not running") and a label for the
+	// reason; this is where the rest of it landed.
+	"collection_restart",
 	"collection_limitation",
 	"counter_delivered",
 	"counter_queued",

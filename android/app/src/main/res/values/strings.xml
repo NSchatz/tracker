@@ -62,6 +62,7 @@
          explanation destination behind "About these counters". -->
     <string name="trouble_not_configured">Server settings incomplete</string>
     <string name="trouble_permission_lost">Location permission lost</string>
+    <string name="trouble_background_location_missing">Background location not allowed</string>
     <string name="trouble_service_refused">Android refused collection</string>
     <string name="trouble_delivery_failed">Reporting failed</string>
     <string name="trouble_credential_rejected">Device token rejected</string>
@@ -89,6 +90,10 @@
     <string name="collection_stop">Stop collecting</string>
     <string name="collection_running">Running</string>
     <string name="collection_stopped">Stopped</string>
+    <!-- Drawn only when a person asked for collection and it is not running - the state a reboot
+         leaves behind when the restart could not happen. "Stopped" alone reads as a deliberate
+         stop, which is what makes this its own line rather than a third value of the word above. -->
+    <string name="collection_enabled_not_running">Enabled, not running</string>
 
     <!-- The three states this card can be in, exactly one at a time. -->
     <string name="collection_state_unknown">Checking the queue</string>
@@ -145,7 +150,8 @@
     <string name="explain_counter_queued">Queued counts fixes currently sitting in the on-disk queue, read from the queue itself rather than counted in memory — which is why it survives a restart when the other two do not. A non-zero value is normal, not an error: it is what the queue looks like while the phone is offline, and it is the number that says nothing has been lost.</string>
     <string name="explain_counter_dropped">Dropped counts fixes measured during this run that will never reach the server. It is shown as prominently as Delivered on purpose: an app that only ever displays its successes is how silent fix loss stays silent.</string>
     <string name="explain_counter_not_recorded">A counter that has never been measured reads “not recorded”, never 0 and never a dash. A measured zero still reads 0, because “we checked and it is none” and “we never checked” are different facts and a reader deciding whether their family\'s trail has a hole in it needs to be able to tell them apart. If the queue directory cannot be read at all, the queued figure alone reads “unavailable” and everything else on the screen keeps working.</string>
-    <string name="explain_collection_trouble">When something stops collection or delivery, the card names the KIND of trouble in a few words - server settings incomplete, location permission lost, Android refused collection, reporting failed, device token rejected - and the sentence describing exactly what happened is shown at the top of this page. The sentence is kept off the card because it is not ours to keep short: a network failure or an Android exception supplies its own wording, and a paragraph on a phone card is a paragraph nobody reads.</string>
+    <string name="explain_collection_trouble">When something stops collection or delivery, the card names the KIND of trouble in a few words - server settings incomplete, location permission lost, background location not allowed, Android refused collection, reporting failed, device token rejected - and the sentence describing exactly what happened is shown at the top of this page. The sentence is kept off the card because it is not ours to keep short: a network failure or an Android exception supplies its own wording, and a paragraph on a phone card is a paragraph nobody reads.</string>
+    <string name="explain_collection_restart">When the phone reboots, collection starts again on its own if you had it running: the app remembers that you asked for it and restarts as soon as Android reports the boot finished, with nobody touching the phone. If you stopped collection before the reboot it stays stopped. Two things can prevent the restart, and the card says so rather than looking like a deliberate stop - it reads \"Enabled, not running\" and names the reason, with the full sentence at the top of this page. The reasons are that \"Allow all the time\" location access is not granted, which Android requires before anything may start location collection in the background, and that the server settings on this phone are incomplete, so there is nowhere to report to. One case the app cannot recover from at all: after a force-stop, Android delivers no boot signal to this app until you open it again, so collection stays stopped until you do.</string>
     <!-- The alert surface's paragraphs (ALERT-2). One per delivery state, in the same closed set the
          card's labels come from, plus the crossings list, the discard count and the two limitations
          a person needs before they trust a notification to arrive. -->
