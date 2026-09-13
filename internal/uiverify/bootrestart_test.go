@@ -168,8 +168,9 @@ func TestTheBootRestartRunsCoverWhatTheCriteriaName(t *testing.T) {
 		if r.name == "" || r.establishes == "" {
 			t.Fatalf("a run with no name or no statement of what it establishes: %+v", r.name)
 		}
-		if r.prepare == nil || r.assert == nil || r.restore == nil {
-			t.Fatalf("run %q does not reach a precondition, assert, and put the device back", r.name)
+		if r.prepare == nil || r.survived == nil || r.assert == nil || r.restore == nil {
+			t.Fatalf("run %q does not reach a precondition, check that it survived the reboot, assert, and "+
+				"put the device back", r.name)
 		}
 	}
 	if inverted != 1 {

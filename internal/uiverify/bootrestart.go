@@ -111,6 +111,9 @@ func RunBootRestart(ctx context.Context, w io.Writer) error {
 			return err
 		}
 		dev.recordBootLog(log)
+		if serr := run.survived(dev, log); serr != nil {
+			return serr
+		}
 		verdict := run.assert(dev, log)
 		switch {
 		case run.mustFail && verdict == nil:
@@ -379,7 +382,27 @@ func (d *bootDevice) leaveTheStoppedState(w io.Writer) error {
 	return nil
 }
 
+// settleBeforeReboot waits for the platform to write its own package state to disk.
+//
+// This is not defensive padding; it is the difference between this route working and silently measuring
+// the wrong device. `PackageManagerService` persists its settings - which is where the STOPPED flag
+// lives - on a DELAYED write, ten seconds after the change, and `adb reboot` does not wait for it. So a
+// launch five seconds before the reboot was lost on the way down and the guest came back reporting
+// `stopped=true notLaunched=true`, as though the app had never been opened: no boot broadcast was
+// delivered, the service did not start, and the route reported a boot path that does not work when what
+// had happened was that its precondition never survived the reboot.
+//
+// The wait clears that delay and the sync flushes the page cache behind it. The post-boot precondition
+// on each run is the assertion that this worked, so a platform that changes the delay refuses rather
+// than quietly grading a fresh install.
+func (d *bootDevice) settleBeforeReboot(w io.Writer) {
+	time.Sleep(25 * time.Second)
+	_, _ = d.shell("sync")
+	fmt.Fprintln(w, "waited for the platform to persist its package state, and synced")
+}
+
 func (d *bootDevice) rebootAndWait(w io.Writer) error {
+	d.settleBeforeReboot(w)
 	fmt.Fprintf(w, "rebooting %s\n", d.serial)
 	if out, err := d.adb("reboot"); err != nil {
 		return fmt.Errorf("rebooting %s: %v\n%s", d.serial, err, out)
@@ -677,8 +700,13 @@ type bootRestartRun struct {
 	name        string
 	establishes string
 	prepare     func(*bootDevice, io.Writer) error
-	assert      func(*bootDevice, io.Writer) error
-	restore     func(*bootDevice, io.Writer) error
+	// survived asserts, after the boot, that the state prepare reached is still the state the device is
+	// in. It REFUSES rather than fails, and the distinction is the whole reason it exists: a precondition
+	// the reboot lost is a route that cannot grade this criterion, not a phone that misbehaved, and
+	// reporting the second when the first happened is how a green run stops meaning anything.
+	survived func(*bootDevice, io.Writer) error
+	assert   func(*bootDevice, io.Writer) error
+	restore  func(*bootDevice, io.Writer) error
 	// capture photographs the state this run reached, for the runs where there is rendered evidence to
 	// take. Its verdict is reported separately from assert's, so a missing screenshot and a phone that
 	// failed to restart are never read as the same failure.
@@ -687,6 +715,39 @@ type bootRestartRun struct {
 	// boot path and re-runs the SAME assertion the enabled case uses, and a pass there would mean the
 	// assertion cannot fail and every green run of it is worth nothing.
 	mustFail bool
+}
+
+// theAppIsStillReachable refuses unless the platform still records the app as launchable after the boot.
+//
+// Three of the four runs need it, because Android delivers no ACTION_BOOT_COMPLETED to an app in the
+// STOPPED state: without this, a reboot that lost the launch would produce a device that was never sent
+// the broadcast and a route that called that a boot path which does not work.
+func theAppIsStillReachable(d *bootDevice, w io.Writer) error {
+	state := d.packageState()
+	fmt.Fprintf(w, "platform package state after the boot: %s\n", state.userLine)
+	if state.stopped || state.notLaunched {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "an app the boot broadcast could reach, still recorded as launched after the reboot on " + d.serial + " (it reports: " + state.userLine + ")",
+			HowToObtain:  "the platform writes its package state on a delayed write; raise the settle in settleBeforeReboot, or reboot through a path that flushes it",
+		}
+	}
+	return nil
+}
+
+// theAppIsStillStopped is the force-stopped run's mirror of it: that run's whole point is an app in the
+// STOPPED state, so a reboot that CLEARED the flag would leave it measuring an ordinary phone.
+func theAppIsStillStopped(d *bootDevice, w io.Writer) error {
+	state := d.packageState()
+	fmt.Fprintf(w, "platform package state after the boot: %s\n", state.userLine)
+	if !state.stopped {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "the app still in the platform's STOPPED state after the reboot on " + d.serial + " (it reports: " + state.userLine + ")",
+			HowToObtain:  "the platform writes its package state on a delayed write; raise the settle in settleBeforeReboot, or reboot through a path that flushes it",
+		}
+	}
+	return nil
 }
 
 func bootRestartRuns(words screenWords) []bootRestartRun {
@@ -701,8 +762,9 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				}
 				return d.leaveTheStoppedState(w)
 			},
-			assert:  collectionIsRunningAfterTheBoot,
-			restore: noRestore,
+			survived: theAppIsStillReachable,
+			assert:   collectionIsRunningAfterTheBoot,
+			restore:  noRestore,
 		},
 		{
 			name:        "collection was stopped by a person",
@@ -713,22 +775,13 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				}
 				return d.leaveTheStoppedState(w)
 			},
-			assert: func(d *bootDevice, w io.Writer) error {
-				// Re-read AFTER the boot, and that is the assertion that makes this run mean something:
-				// an app Android delivered no boot broadcast to would also not be collecting, and the
-				// two would be indistinguishable. This one was reachable and is not collecting, so the
-				// boot path DECIDED not to start it. The same check before the reboot is in prepare;
-				// this one catches a reboot that put the app back into that state.
-				state := d.packageState()
-				fmt.Fprintf(w, "platform package state after the boot: %s\n", state.userLine)
-				if state.stopped {
-					return fmt.Errorf("the app is in the stopped state after the boot (%s), so Android "+
-						"delivered it no boot broadcast and this run cannot tell a decision from a "+
-						"non-delivery", state.userLine)
-				}
-				return collectionIsNotRunningAfterTheBoot(d, w)
-			},
-			restore: noRestore,
+			// The survival check is what makes this run mean something rather than being a tautology: an
+			// app Android delivered no boot broadcast to would also not be collecting, and the two would
+			// be indistinguishable. This one was reachable and is not collecting, so the boot path
+			// DECIDED not to start it.
+			survived: theAppIsStillReachable,
+			assert:   collectionIsNotRunningAfterTheBoot,
+			restore:  noRestore,
 		},
 		{
 			name:        "the app was force-stopped",
@@ -757,6 +810,7 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				fmt.Fprintf(w, "the platform records the app as stopped: %s\n", forced.userLine)
 				return nil
 			},
+			survived: theAppIsStillStopped,
 			assert: func(d *bootDevice, w io.Writer) error {
 				if err := collectionIsNotRunningAfterTheBoot(d, w); err != nil {
 					return err
@@ -798,6 +852,7 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				fmt.Fprintln(w, "the platform records the boot receiver as disabled")
 				return nil
 			},
+			survived: theAppIsStillReachable,
 			assert:   collectionIsRunningAfterTheBoot,
 			mustFail: true,
 			restore: func(d *bootDevice, w io.Writer) error {
