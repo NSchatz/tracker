@@ -60,7 +60,7 @@ ANDROID_EVIDENCE_TAG ?= TrackerUiGrade
 ANDROID_LOG_BUFFER ?= 16M
 
 .PHONY: build test check check-go android fmt vet staticcheck govulncheck pin-check prose-check prose-check-test tidy clean image compose-check smoke run-db \
-	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all print-avd print-sys-image
+	verify-ui verify-ui-android verify-ui-refusal verify-ui-record verify-ui-all verify-boot-restart print-avd print-sys-image
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o tracker ./cmd/tracker
@@ -247,6 +247,24 @@ verify-ui-record:
 	go run ./cmd/uiverify record
 
 verify-ui-all: verify-ui verify-ui-android verify-ui-refusal verify-ui-record
+
+# Does collection come back after the phone restarts, with nobody touching it? (REBOOT-1)
+#
+# Not part of `make check` and not part of verify-ui-all: it REBOOTS the device, four times, so it
+# would take the emulator out from under the instrumented suite if the two shared a run. It is also
+# not a rendered-claim route - what it reads is the platform's own service list, the platform's own
+# record of the stopped state and the disabled component, and the accessibility tree the app
+# published - so it is its own target rather than a case inside the UI suite. A setup case that
+# merely rebooted and passed would land in the instrumented results as an ungraded claim about the
+# screen, which is the one thing `uiverify android` refuses.
+#
+# The require below duplicates a check the route makes again for itself, deliberately: this one fails
+# in a second rather than after a three-minute assemble, and the route's own is the one criterion 5's
+# test drives. Both go through scripts/android-emulator.sh, so there is one check and two callers.
+verify-boot-restart:
+	@TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" ./scripts/android-emulator.sh require
+	cd android && ./gradlew --no-daemon assembleDebug
+	TRACKER_AVD="$(TRACKER_AVD)" TRACKER_SYS_IMAGE="$(TRACKER_SYS_IMAGE)" go run ./cmd/uiverify bootrestart
 
 # CI provisions the emulator from these, so that the AVD name and the system image stay pinned HERE
 # and are never restated in ci.yml - the same rule the Go tools and the Android SDK levels follow.

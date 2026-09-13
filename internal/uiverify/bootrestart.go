@@ -1,0 +1,680 @@
+package uiverify
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// The reboot-restart route: does collection come back after the phone restarts, with nobody
+// touching it?
+//
+// Everything here is read from the PLATFORM's own answers about a device that really rebooted:
+// `dumpsys activity services` for whether the location foreground service is running, `dumpsys
+// package` for whether the app is in the stopped state and whether the boot receiver is enabled,
+// and `uiautomator dump` - the accessibility tree the app itself published - for what the screen
+// says when it is reopened. None of it is a search over source text, which is what F2 asks for and
+// what a reboot claim in particular has no source-level equivalent of.
+//
+// It is driven from the HOST rather than as an instrumented case, and that is a requirement rather
+// than a preference: `internal/uiverify` counts EVERY passing instrumented case as a rendered claim
+// and refuses one with no `<name>_demonstration` beside it, so a setup case that merely rebooted the
+// device and passed would land in the results as an ungraded claim about the screen. An
+// instrumented test also cannot survive the reboot it is testing.
+//
+// It NEVER skips. Every prerequisite it cannot find exits non-zero naming that prerequisite, and it
+// reaches its device through scripts/android-emulator.sh so the four absences that script already
+// refuses by name are refused here by the same code rather than by a second copy of the check.
+
+// bootRestartCriterion is what the refusals say they could not grade. The emulator script reads it
+// out of the environment, so its refusals name this route's criterion rather than the UI suite's.
+const bootRestartCriterion = "the reboot restart (collection resumes after a boot with nobody touching the phone)"
+
+const (
+	trackerPackage  = "com.nschatz.tracker"
+	bootReceiver    = trackerPackage + "/.collect.BootCompletedReceiver"
+	mainActivity    = trackerPackage + "/.ui.MainActivity"
+	debugAPKPath    = "android/app/build/outputs/apk/debug/app-debug.apk"
+	prefsFileName   = "tracker_client.xml"
+	bootRestartFile = "build/uiverify/boot-restart.log"
+)
+
+// bootRestartTimeout is how long one reboot has to reach a state this route can read.
+//
+// A reboot is two waits and they are different: the device coming back at all, and the boot
+// broadcast being delivered and acted on afterwards. Both are covered by this one budget because a
+// device that is slow at the first is slow at the second, and splitting it would only produce two
+// numbers to tune. TRACKER_BOOT_RESTART_TIMEOUT overrides it.
+func bootRestartTimeout() time.Duration {
+	if v := os.Getenv("TRACKER_BOOT_RESTART_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 6 * time.Minute
+}
+
+// RunBootRestart is the whole route: get a device, install the debug build, and reboot it once per
+// case the criteria name.
+func RunBootRestart(ctx context.Context, w io.Writer) error {
+	root := repoRootFromEnv()
+	log, closeLog, err := bootRestartWriter(root, w)
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+
+	apk := filepath.Join(root, filepath.FromSlash(debugAPKPath))
+	dev, err := bootedDeviceFor(ctx, root, log)
+	if err != nil {
+		return err
+	}
+	if _, serr := os.Stat(apk); serr != nil {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "the debug build at " + debugAPKPath,
+			HowToObtain:  "`make verify-boot-restart` assembles it first; on its own, (cd android && ./gradlew assembleDebug)",
+			Underlying:   serr,
+		}
+	}
+	words, err := renderedWords(root)
+	if err != nil {
+		return err
+	}
+
+	if out, ierr := dev.adb("install", "-r", "-d", apk); ierr != nil {
+		return fmt.Errorf("installing %s on %s: %v\n%s", debugAPKPath, dev.serial, ierr, out)
+	}
+	fmt.Fprintf(log, "installed %s on %s\n", debugAPKPath, dev.serial)
+	// The log buffer is raised BEFORE any reboot and through a persisted property, because the boot
+	// path runs while the device is booting and there is no moment afterwards at which a bigger
+	// buffer would have kept its lines. The lines are corroboration rather than a gate - see
+	// recordBootLog.
+	_, _ = dev.shell("setprop persist.logd.size 4M")
+	if gerr := dev.grantLocation(log); gerr != nil {
+		return gerr
+	}
+
+	var problems []string
+	for _, run := range bootRestartRuns(words) {
+		fmt.Fprintf(log, "\n--- %s: %s\n", run.name, run.establishes)
+		if err := run.prepare(dev, log); err != nil {
+			return err
+		}
+		if err := dev.rebootAndWait(log); err != nil {
+			return err
+		}
+		dev.recordBootLog(log)
+		verdict := run.assert(dev, log)
+		switch {
+		case run.mustFail && verdict == nil:
+			problems = append(problems, fmt.Sprintf(
+				"%s: the restart assertion PASSED against a build whose boot path is disabled, so a green "+
+					"run of it is not evidence - the assertion cannot go red", run.name))
+		case run.mustFail:
+			fmt.Fprintf(log, "%s: the restart assertion went red as it must:\n%s\n", run.name, indent(verdict.Error()))
+		case verdict != nil:
+			problems = append(problems, run.name+": "+verdict.Error())
+			fmt.Fprintf(log, "%s: FAILED\n%s\n", run.name, indent(verdict.Error()))
+		default:
+			fmt.Fprintf(log, "%s: passed\n", run.name)
+		}
+		if cerr := run.restore(dev, log); cerr != nil {
+			return cerr
+		}
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("the reboot restart does not hold:\n  - %s", strings.Join(problems, "\n  - "))
+	}
+	fmt.Fprintf(log, "\nboot restart: %d device runs, each across a real reboot of %s\n",
+		len(bootRestartRuns(words)), dev.serial)
+	return nil
+}
+
+// bootRestartWriter tees this route's output into a file the CI job uploads, so a run that went red
+// on the emulator leaves behind what it read rather than only what it concluded.
+func bootRestartWriter(root string, w io.Writer) (io.Writer, func(), error) {
+	path := filepath.Join(root, filepath.FromSlash(bootRestartFile))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, func() {}, err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return io.MultiWriter(w, f), func() { _ = f.Close() }, nil
+}
+
+// --- the device ---------------------------------------------------------------------------------
+
+// bootDevice is one booted emulator, reached through the repository's own emulator script.
+type bootDevice struct {
+	ctx    context.Context
+	adbBin string
+	serial string
+}
+
+// bootedDeviceFor asserts the prerequisites and boots the AVD, THROUGH scripts/android-emulator.sh.
+//
+// The script is the prerequisite gate this repository already has, and `make verify-ui-refusal`
+// already drives each of its absences. Re-implementing the check here would mean two checks to keep
+// honest and a second refusal nobody exercises, so the script's own refusal is passed through
+// unchanged: it names this route's criterion (it reads CRITERION from the environment), the missing
+// prerequisite, how to obtain it, and that no clause is reported green.
+func bootedDeviceFor(ctx context.Context, root string, w io.Writer) (*bootDevice, error) {
+	for _, sub := range []string{"require", "boot"} {
+		out, err := runEmulatorScript(ctx, root, sub)
+		fmt.Fprintf(w, "emulator script %q:\n%s", sub, indent(out))
+		if err != nil {
+			return nil, &passthroughRefusal{text: out}
+		}
+		if sub != "boot" {
+			continue
+		}
+		serial := lastLine(out)
+		if serial == "" || !strings.HasPrefix(serial, "emulator-") {
+			return nil, &Refusal{
+				Criterion:    bootRestartCriterion,
+				Prerequisite: "a BOOTED emulator device (the emulator script exited 0 and named none)",
+				HowToObtain:  "give the runner /dev/kvm, or raise TRACKER_EMULATOR_BOOT_TIMEOUT for a TCG boot",
+			}
+		}
+		sdk := os.Getenv("ANDROID_SDK_ROOT")
+		if sdk == "" {
+			sdk = os.Getenv("ANDROID_HOME")
+		}
+		return &bootDevice{ctx: ctx, adbBin: filepath.Join(sdk, "platform-tools", "adb"), serial: serial}, nil
+	}
+	return nil, fmt.Errorf("unreachable: the emulator script neither booted nor refused")
+}
+
+// runEmulatorScript invokes one subcommand of the emulator script with this route's criterion.
+func runEmulatorScript(ctx context.Context, root, sub string) (string, error) {
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(root, "scripts", "android-emulator.sh"), sub)
+	cmd.Env = append(os.Environ(), "CRITERION="+bootRestartCriterion)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// passthroughRefusal is a refusal another program already wrote, carried without a second voice.
+type passthroughRefusal struct{ text string }
+
+func (p *passthroughRefusal) Error() string { return p.text }
+
+func (d *bootDevice) adb(args ...string) (string, error) {
+	cmd := exec.CommandContext(d.ctx, d.adbBin, append([]string{"-s", d.serial}, args...)...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (d *bootDevice) shell(command string) (string, error) {
+	return d.adb(append([]string{"shell"}, strings.Fields(command)...)...)
+}
+
+// grantLocation grants what the platform requires before a location foreground service may start
+// from the background.
+//
+// Through adb rather than through a debug-only switch in the app, which is why the shipped app gains
+// nothing from this route existing. Foreground location first and background second, because that is
+// the order the platform's own model has and a background grant made before a foreground one is
+// refused.
+func (d *bootDevice) grantLocation(w io.Writer) error {
+	for _, p := range []string{
+		"android.permission.ACCESS_COARSE_LOCATION",
+		"android.permission.ACCESS_FINE_LOCATION",
+		"android.permission.ACCESS_BACKGROUND_LOCATION",
+		"android.permission.POST_NOTIFICATIONS",
+	} {
+		if out, err := d.shell("pm grant " + trackerPackage + " " + p); err != nil {
+			return fmt.Errorf("granting %s: %v\n%s", p, err, out)
+		}
+	}
+	// Read back rather than assumed. A grant that did not take surfaces two reboots later as "the
+	// service is not running", which is a true statement about the device and a useless one about
+	// why, and it is the difference between a product defect and an unreached precondition.
+	out, _ := d.shell("dumpsys package " + trackerPackage)
+	granted := regexp.MustCompile(`ACCESS_BACKGROUND_LOCATION: granted=true`).MatchString(out)
+	fmt.Fprintf(w, "grants: ACCESS_BACKGROUND_LOCATION granted=%v\n", granted)
+	if !granted {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "a granted ACCESS_BACKGROUND_LOCATION on " + d.serial,
+			HowToObtain:  "adb -s " + d.serial + " shell pm grant " + trackerPackage + " android.permission.ACCESS_BACKGROUND_LOCATION",
+		}
+	}
+	return nil
+}
+
+// writeStoredState puts the persisted ask and the server settings on the device, in the file the app
+// reads them from.
+//
+// `run-as` is the whole mechanism, and it is available because the debug build is debuggable: the
+// app's own data directory is reachable as the app's own uid, so this writes exactly the file the app
+// would have written and nothing in the shipped app has to offer a way in. That is what keeps this
+// route from needing a debug-only input the release build would then have to be shown ignoring.
+//
+// The app is force-stopped first because SharedPreferences caches its map per process, so a running
+// app would write its stale copy back over this one. Every caller then LAUNCHES the app, which is
+// not politeness: a force-stopped app - and a freshly installed one that has never been launched -
+// is in the STOPPED state, and Android delivers no BOOT_COMPLETED to an app in that state at all.
+func (d *bootDevice) writeStoredState(w io.Writer, collectionEnabled bool, configured bool) error {
+	if out, err := d.shell("am force-stop " + trackerPackage); err != nil {
+		return fmt.Errorf("force-stopping %s: %v\n%s", trackerPackage, err, out)
+	}
+	url, token := "", ""
+	if configured {
+		// A host that resolves nowhere, deliberately: this route grades whether collection is
+		// RUNNING, never whether a fix was delivered, and pointing it at something reachable would
+		// make the assertion depend on a server nobody started.
+		url, token = "https://tracker.invalid", "a-device-token"
+	}
+	body := fmt.Sprintf(`<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="base_url">%s</string>
+    <string name="device_token">%s</string>
+    <boolean name="collection_enabled" value="%t" />
+</map>
+`, url, token, collectionEnabled)
+
+	local, err := os.CreateTemp("", "tracker-prefs-*.xml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(local.Name())
+	if _, err := local.WriteString(body); err != nil {
+		return err
+	}
+	if err := local.Close(); err != nil {
+		return err
+	}
+
+	staged := "/data/local/tmp/" + prefsFileName
+	if out, err := d.adb("push", local.Name(), staged); err != nil {
+		return fmt.Errorf("pushing the stored state: %v\n%s", err, out)
+	}
+	dir := "/data/data/" + trackerPackage + "/shared_prefs"
+	if out, err := d.shell("run-as " + trackerPackage + " mkdir -p " + dir); err != nil {
+		return fmt.Errorf("making %s: %v\n%s", dir, err, out)
+	}
+	if out, err := d.shell("run-as " + trackerPackage + " cp " + staged + " " + dir + "/" + prefsFileName); err != nil {
+		return fmt.Errorf("writing the stored state: %v\n%s", err, out)
+	}
+
+	// Read it back off the device. A precondition that was not reached must refuse, not be assumed:
+	// every assertion after this reboot is about a phone in a state this line is the only proof of.
+	back, _ := d.shell("run-as " + trackerPackage + " cat " + dir + "/" + prefsFileName)
+	want := fmt.Sprintf(`value="%t"`, collectionEnabled)
+	if !strings.Contains(back, want) {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: fmt.Sprintf("a stored collection ask of %t on %s (read back: %q)", collectionEnabled, d.serial, strings.TrimSpace(back)),
+			HowToObtain:  "the debug build must be debuggable so `run-as " + trackerPackage + "` can write its own data directory",
+		}
+	}
+	fmt.Fprintf(w, "stored state: collection_enabled=%t configured=%t\n", collectionEnabled, configured)
+	return nil
+}
+
+// openTheApp launches the screen and waits for it to settle.
+//
+// This is also what takes the app OUT of the stopped state, which is the one thing standing between
+// a correct boot receiver and a boot that delivers nothing to it.
+func (d *bootDevice) openTheApp(w io.Writer) error {
+	if out, err := d.shell("am start -W -n " + mainActivity); err != nil {
+		return fmt.Errorf("launching %s: %v\n%s", mainActivity, err, out)
+	}
+	time.Sleep(3 * time.Second)
+	fmt.Fprintf(w, "opened %s\n", mainActivity)
+	return nil
+}
+
+func (d *bootDevice) rebootAndWait(w io.Writer) error {
+	fmt.Fprintf(w, "rebooting %s\n", d.serial)
+	if out, err := d.adb("reboot"); err != nil {
+		return fmt.Errorf("rebooting %s: %v\n%s", d.serial, err, out)
+	}
+	deadline := time.Now().Add(bootRestartTimeout())
+	// wait-for-device returns as soon as adbd is up, which is well before the boot has finished and
+	// long before a boot broadcast has been delivered. The property is the platform's own answer to
+	// "has the boot completed", so it is the one that is waited on.
+	if out, err := d.adb("wait-for-device"); err != nil {
+		return fmt.Errorf("waiting for %s to come back: %v\n%s", d.serial, err, out)
+	}
+	for time.Now().Before(deadline) {
+		if out, _ := d.shell("getprop sys.boot_completed"); strings.TrimSpace(out) == "1" {
+			// The broadcast is dispatched after the property is set, and the service then takes a
+			// moment to enter the foreground. Nothing observable says "every boot receiver has run",
+			// so the settle is a wait rather than a poll - and every assertion afterwards polls for
+			// what it is looking for, so this is a floor rather than the whole budget.
+			time.Sleep(20 * time.Second)
+			fmt.Fprintf(w, "booted: %s\n", d.serial)
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return &Refusal{
+		Criterion:    bootRestartCriterion,
+		Prerequisite: fmt.Sprintf("a device that finished rebooting (waited %s for sys.boot_completed on %s)", bootRestartTimeout(), d.serial),
+		HowToObtain:  "give the runner /dev/kvm, or raise TRACKER_BOOT_RESTART_TIMEOUT",
+	}
+}
+
+// recordBootLog copies the app's own boot-path log lines into this route's evidence.
+//
+// Corroboration, and deliberately NOT one of the assertions. The boot path logs from inside a device
+// that is booting, into a ring buffer the rest of the boot is also writing to, so a line can be
+// evicted on a slow run - and the platform's own state answers the same questions without that risk:
+// whether the service is running, whether the app was in the stopped state, whether the receiver was
+// enabled. Asserting on a line that can vanish would make a green run depend on log volume.
+func (d *bootDevice) recordBootLog(w io.Writer) {
+	out, _ := d.adb("logcat", "-d", "-v", "raw", "-s", "TrackerBoot:D")
+	text := strings.TrimSpace(out)
+	if text == "" {
+		text = "(no boot-path log line survived this boot's ring buffer)"
+	}
+	fmt.Fprintf(w, "the app's own boot log (corroboration, not an assertion):\n%s\n", indent(text))
+}
+
+// --- what the platform says --------------------------------------------------------------------
+
+// locationServiceIsRunning polls the platform's own service list until the location foreground
+// service is running, or the budget is out.
+func (d *bootDevice) locationServiceIsRunning() (bool, string) {
+	deadline := time.Now().Add(90 * time.Second)
+	last := ""
+	for {
+		out, _ := d.shell("dumpsys activity services " + trackerPackage)
+		last = out
+		if at := strings.Index(out, "LocationCollectionService"); at >= 0 {
+			// isForeground is read from the record for THIS service rather than from anywhere in the
+			// dump, because the app declares a second service and a foreground flag belonging to it
+			// would answer a question nobody asked.
+			window := out[at:]
+			if len(window) > 2000 {
+				window = window[:2000]
+			}
+			if strings.Contains(window, "isForeground=true") {
+				return true, window
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return false, last
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// packageState is what the platform records about the app itself, rather than about its services.
+type packageState struct {
+	stopped          bool
+	receiverDisabled bool
+	dump             string
+}
+
+func (d *bootDevice) packageState() packageState {
+	out, _ := d.shell("dumpsys package " + trackerPackage)
+	return packageState{
+		stopped: regexp.MustCompile(`(?m)^\s*stopped=true`).MatchString(out),
+		// The component appears in the package's disabledComponents set once `pm disable-user` has
+		// been applied to it. That is the platform's own record of the boot path being switched off,
+		// which is what makes the disabled-boot-path run a fact rather than an intention.
+		receiverDisabled: strings.Contains(out, "collect.BootCompletedReceiver") &&
+			strings.Contains(out, "disabledComponents"),
+		dump: out,
+	}
+}
+
+// publishedScreenText is the accessibility tree the app itself published, read off the device.
+//
+// This is the app's own answer about what it is showing, which is what F2 admits for a claim about
+// what a person sees. It is not a screenshot and it is not a source read: it is the tree an assistive
+// technology would be handed.
+func (d *bootDevice) publishedScreenText() (string, error) {
+	remote := "/sdcard/tracker-window-dump.xml"
+	if out, err := d.shell("uiautomator dump " + remote); err != nil {
+		return "", fmt.Errorf("dumping the published tree: %v\n%s", err, out)
+	}
+	out, err := d.shell("cat " + remote)
+	if err != nil {
+		return "", fmt.Errorf("reading the published tree: %v\n%s", err, out)
+	}
+	return out, nil
+}
+
+// --- the words the app declares -----------------------------------------------------------------
+
+// screenWords are the texts this route looks for in what the app published.
+type screenWords struct{ running, stopped, enabledNotRunning string }
+
+// renderedWords reads the three labels out of the app's own resource file.
+//
+// The GRADE is on the rendering - what the app published about itself after a real reboot - and this
+// supplies only the expected VALUE, so F2's rule is untouched: a source read cannot decide what was
+// shown, and nothing here asks it to. Reading them rather than spelling them out is what stops this
+// route and the app's resources drifting into two different vocabularies, and a missing resource
+// refuses rather than quietly matching nothing.
+func renderedWords(root string) (screenWords, error) {
+	path := filepath.Join(root, filepath.FromSlash("android/app/src/main/res/values/strings.xml"))
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return screenWords{}, &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "the app's string resources at " + path,
+			HowToObtain:  "run this route from the repository root, or set TRACKER_REPO_ROOT",
+			Underlying:   err,
+		}
+	}
+	words := screenWords{}
+	for name, into := range map[string]*string{
+		"collection_running":             &words.running,
+		"collection_stopped":             &words.stopped,
+		"collection_enabled_not_running": &words.enabledNotRunning,
+	} {
+		m := regexp.MustCompile(`<string name="` + name + `">([^<]*)</string>`).FindSubmatch(body)
+		if m == nil {
+			return screenWords{}, &Refusal{
+				Criterion:    bootRestartCriterion,
+				Prerequisite: fmt.Sprintf("the string resource %q, which this route looks for in what the app publishes", name),
+				HowToObtain:  "restore it in android/app/src/main/res/values/strings.xml, or re-derive this route against its new name",
+			}
+		}
+		*into = string(m[1])
+	}
+	return words, nil
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// --- the device runs ----------------------------------------------------------------------------
+
+// bootRestartRun is one reboot: a state to reach, and what must be true on the other side.
+type bootRestartRun struct {
+	name        string
+	establishes string
+	prepare     func(*bootDevice, io.Writer) error
+	assert      func(*bootDevice, io.Writer) error
+	restore     func(*bootDevice, io.Writer) error
+	// mustFail inverts the verdict. It is how the route is shown able to go RED: one run disables the
+	// boot path and re-runs the SAME assertion the enabled case uses, and a pass there would mean the
+	// assertion cannot fail and every green run of it is worth nothing.
+	mustFail bool
+}
+
+func bootRestartRuns(words screenWords) []bootRestartRun {
+	noRestore := func(*bootDevice, io.Writer) error { return nil }
+	return []bootRestartRun{
+		{
+			name:        "collection was enabled",
+			establishes: "a phone that was collecting is collecting again after the reboot, untouched",
+			prepare: func(d *bootDevice, w io.Writer) error {
+				if err := d.writeStoredState(w, true, true); err != nil {
+					return err
+				}
+				return d.openTheApp(w)
+			},
+			assert:  collectionIsRunningAfterTheBoot,
+			restore: noRestore,
+		},
+		{
+			name:        "collection was stopped by a person",
+			establishes: "a phone whose owner stopped collecting stays stopped after the reboot",
+			prepare: func(d *bootDevice, w io.Writer) error {
+				if err := d.writeStoredState(w, false, true); err != nil {
+					return err
+				}
+				return d.openTheApp(w)
+			},
+			assert: func(d *bootDevice, w io.Writer) error {
+				// The app must NOT be in the stopped state here, and that is the assertion that makes
+				// this run mean something: an app Android delivered no boot broadcast to would also
+				// not be collecting, and the two would be indistinguishable. This one was reachable
+				// and is not collecting, so the boot path DECIDED not to start it.
+				state := d.packageState()
+				if state.stopped {
+					return fmt.Errorf("the app is in the stopped state, so Android delivered it no boot " +
+						"broadcast and this run cannot tell a decision from a non-delivery")
+				}
+				return collectionIsNotRunningAfterTheBoot(d, w)
+			},
+			restore: noRestore,
+		},
+		{
+			name:        "the app was force-stopped",
+			establishes: "a force-stopped app is not collecting after the boot, and says so when reopened",
+			prepare: func(d *bootDevice, w io.Writer) error {
+				if err := d.writeStoredState(w, true, true); err != nil {
+					return err
+				}
+				// Opened and THEN force-stopped, in that order. Opening clears the stopped state, so
+				// without it the force-stop would be putting the app into a state it was already in
+				// and the run would prove nothing about a force-stop.
+				if err := d.openTheApp(w); err != nil {
+					return err
+				}
+				if out, err := d.shell("am force-stop " + trackerPackage); err != nil {
+					return fmt.Errorf("force-stopping %s: %v\n%s", trackerPackage, err, out)
+				}
+				if !d.packageState().stopped {
+					return &Refusal{
+						Criterion:    bootRestartCriterion,
+						Prerequisite: "the app in the platform's STOPPED state on " + d.serial,
+						HowToObtain:  "adb -s " + d.serial + " shell am force-stop " + trackerPackage,
+					}
+				}
+				fmt.Fprintln(w, "the platform records the app as stopped")
+				return nil
+			},
+			assert: func(d *bootDevice, w io.Writer) error {
+				if err := collectionIsNotRunningAfterTheBoot(d, w); err != nil {
+					return err
+				}
+				return theReopenedAppSaysItIsNotCollecting(d, w, words)
+			},
+			restore: noRestore,
+		},
+		{
+			name:        "the boot path is disabled",
+			establishes: "the restart assertion goes RED when the boot path cannot run, so a green run is evidence",
+			prepare: func(d *bootDevice, w io.Writer) error {
+				if err := d.writeStoredState(w, true, true); err != nil {
+					return err
+				}
+				if err := d.openTheApp(w); err != nil {
+					return err
+				}
+				// The boot path is switched off at the platform, not in a second build. `pm
+				// disable-user` is the platform's own record of a disabled component, so what this run
+				// grades is a device whose boot path genuinely cannot run rather than one this route
+				// merely says so about.
+				if out, err := d.shell("pm disable-user --user 0 " + bootReceiver); err != nil {
+					return fmt.Errorf("disabling the boot receiver: %v\n%s", err, out)
+				}
+				if !d.packageState().receiverDisabled {
+					return &Refusal{
+						Criterion:    bootRestartCriterion,
+						Prerequisite: "a disabled boot receiver on " + d.serial + " (the platform still reports it enabled)",
+						HowToObtain:  "adb -s " + d.serial + " shell pm disable-user --user 0 " + bootReceiver,
+					}
+				}
+				fmt.Fprintln(w, "the platform records the boot receiver as disabled")
+				return nil
+			},
+			assert:   collectionIsRunningAfterTheBoot,
+			mustFail: true,
+			restore: func(d *bootDevice, w io.Writer) error {
+				if out, err := d.shell("pm enable " + bootReceiver); err != nil {
+					return fmt.Errorf("re-enabling the boot receiver: %v\n%s", err, out)
+				}
+				fmt.Fprintln(w, "the boot receiver is enabled again")
+				return nil
+			},
+		},
+	}
+}
+
+// collectionIsRunningAfterTheBoot is the assertion the enabled case makes and the disabled-boot-path
+// case is required to break. One function, used twice, so the two cannot drift apart.
+func collectionIsRunningAfterTheBoot(d *bootDevice, w io.Writer) error {
+	running, dump := d.locationServiceIsRunning()
+	fmt.Fprintf(w, "platform service list says running=%v\n%s\n", running, indent(strings.TrimSpace(dump)))
+	if !running {
+		return fmt.Errorf("the location foreground service is not running after the boot; the platform's "+
+			"own service list for %s reports:\n%s", trackerPackage, indent(strings.TrimSpace(dump)))
+	}
+	return nil
+}
+
+func collectionIsNotRunningAfterTheBoot(d *bootDevice, w io.Writer) error {
+	running, dump := d.locationServiceIsRunning()
+	fmt.Fprintf(w, "platform service list says running=%v\n", running)
+	if running {
+		return fmt.Errorf("the location foreground service IS running after the boot, and nothing asked "+
+			"it to be; the platform's own service list reports:\n%s", indent(strings.TrimSpace(dump)))
+	}
+	return nil
+}
+
+// theReopenedAppSaysItIsNotCollecting reads the app's published accessibility tree after the reboot.
+//
+// The second half of the force-stopped case: Android delivered no boot signal, so nothing restarted,
+// and the screen has to say that rather than presenting the stored ask as a running collection. The
+// words are the app's own, read from its resources; the answer about what was SHOWN comes from the
+// tree the app published.
+func theReopenedAppSaysItIsNotCollecting(d *bootDevice, w io.Writer, words screenWords) error {
+	if err := d.openTheApp(w); err != nil {
+		return err
+	}
+	tree, err := d.publishedScreenText()
+	if err != nil {
+		return err
+	}
+	shows := func(text string) bool { return strings.Contains(tree, `text="`+text+`"`) }
+	fmt.Fprintf(w, "the reopened app published: %q=%v %q=%v %q=%v\n",
+		words.stopped, shows(words.stopped),
+		words.running, shows(words.running),
+		words.enabledNotRunning, shows(words.enabledNotRunning))
+
+	if shows(words.running) {
+		return fmt.Errorf("the reopened app publishes %q; a stored intent to collect must never be "+
+			"presented as a running collection", words.running)
+	}
+	if !shows(words.stopped) {
+		return fmt.Errorf("the reopened app publishes neither %q nor anything this route recognises as "+
+			"the collection state:\n%s", words.stopped, indent(tree))
+	}
+	if !shows(words.enabledNotRunning) {
+		return fmt.Errorf("the reopened app publishes %q but not %q, so a restart that did not happen "+
+			"reads exactly like a deliberate stop", words.stopped, words.enabledNotRunning)
+	}
+	return nil
+}
