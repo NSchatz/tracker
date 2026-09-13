@@ -77,6 +77,11 @@ jobs:
     # missing, which is why a runner that lost its browser or its /dev/kvm turns this job red
     # instead of quietly grading nothing.
     #
+    # A fifth target rides here for the same reason rather than because it is a rendered claim:
+    # `make verify-boot-restart` needs a device it can REBOOT, which is the one prerequisite no other
+    # job in this file has. What it reads is the platform's own service list and the accessibility
+    # tree the app published, not a screen's paint.
+    #
     # As everywhere else in this repo, the version pins live in the build files, never here: the AVD
     # name and the system image are Makefile variables, the Android tool versions are in
     # android/gradle/libs.versions.toml, and Chromium is whatever the runner image ships.
@@ -148,6 +153,20 @@ jobs:
       - name: make verify-ui-android (the Android screen)
         if: success() || failure()
         run: make verify-ui-android
+
+      # Does collection come back after the phone restarts, with nobody touching it? (REBOOT-1)
+      #
+      # It runs AFTER the instrumented suite and not before, because it REBOOTS the device four
+      # times - once per case the criteria name - and a reboot in the middle of the suite above would
+      # take the emulator out from under it. The two steps below need no device at all, so nothing
+      # after this depends on the state it leaves.
+      #
+      # No new action and no new image, so there is no reference for the pin gate to bind: it is the
+      # same toolchain the three steps above already provisioned, plus `make` and the AVD this job
+      # created from the Makefile's own pins.
+      - name: make verify-boot-restart (collection across a real reboot)
+        if: success() || failure()
+        run: make verify-boot-restart
 
       # Both routes, with their prerequisite removed, must exit non-zero naming what is missing.
       # This is the check that keeps the two above from ever degrading into a silent skip.

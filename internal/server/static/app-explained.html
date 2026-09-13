@@ -91,11 +91,23 @@
   <h2 id="counters">The counters, and the set each is counted over</h2>
   <p id="collection_trouble">
     When something stops collection or delivery, the card names the KIND of trouble in a few words -
-    server settings incomplete, location permission lost, Android refused collection, reporting
-    failed, device token rejected - and the sentence describing exactly what happened is shown at the
-    top of the in-app explanation. The sentence is kept off the card because it is not ours to keep
-    short: a network failure or an Android exception supplies its own wording, and a paragraph on a
-    phone card is a paragraph nobody reads.
+    server settings incomplete, location permission lost, background location not allowed, Android
+    refused collection, reporting failed, device token rejected - and the sentence describing exactly
+    what happened is shown at the top of the in-app explanation. The sentence is kept off the card
+    because it is not ours to keep short: a network failure or an Android exception supplies its own
+    wording, and a paragraph on a phone card is a paragraph nobody reads.
+  </p>
+  <p id="collection_restart">
+    When the phone reboots, collection starts again on its own if you had it running: the app
+    remembers that you asked for it and restarts as soon as Android reports the boot finished, with
+    nobody touching the phone. If you stopped collection before the reboot it stays stopped. Two
+    things can prevent the restart, and the card says so rather than looking like a deliberate stop -
+    it reads "Enabled, not running" and names the reason, with the full sentence at the top of the
+    in-app explanation. The reasons are that "Allow all the time" location access is not granted,
+    which Android requires before anything may start location collection in the background, and that
+    the server settings on this phone are incomplete, so there is nowhere to report to. One case the
+    app cannot recover from at all: after a force-stop, Android delivers no boot signal to this app
+    until you open it again, so collection stays stopped until you do.
   </p>
   <p id="collection_limitation">
     Fixes are saved on this phone until the server confirms them, so going offline delays reporting

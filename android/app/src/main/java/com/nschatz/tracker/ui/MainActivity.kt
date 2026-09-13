@@ -302,6 +302,26 @@ private fun HomeScreen(
 
     var grants by remember { mutableStateOf(readGrants(context)) }
 
+    // The persisted ask, and the reason a boot gave for not honouring it.
+    //
+    // Both are read off disk here rather than in the card, which keeps the card's inputs plain data.
+    // The reason is ADOPTED into CollectionStatus rather than rendered from the preference directly:
+    // the card already has one closed-vocabulary trouble label and one explanation destination for a
+    // sentence, and a second, parallel path to the same two places would be a second thing to keep
+    // honest. It is adopted only while collection is not running, because a reason recorded by a boot
+    // that has since been superseded by a person starting collection is history, not the current
+    // state.
+    val homePrefs = remember { ClientPreferences(context) }
+    var collectionEnabled by remember { mutableStateOf(homePrefs.collectionEnabled) }
+    fun adoptStoredState() {
+        collectionEnabled = homePrefs.collectionEnabled
+        if (mutation == UiMutation.RESTART_REASON_UNREPORTED) return
+        if (!CollectionStatus.running) {
+            homePrefs.bootRestartReason?.let { CollectionStatus.recordBlocked(it.kind, it.sentence) }
+        }
+    }
+    LaunchedEffect(Unit) { adoptStoredState() }
+
     // rememberSaveable, NOT remember.
     //
     // This flag is the only thing that distinguishes "never asked" from "asked and permanently
@@ -321,7 +341,10 @@ private fun HomeScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) grants = readGrants(context)
+            if (event == Lifecycle.Event.ON_RESUME) {
+                grants = readGrants(context)
+                adoptStoredState()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -377,7 +400,20 @@ private fun HomeScreen(
         ServerConfigCard(mutation = mutation, onExplain = { onExplain(ExplanationTopic.SERVER) })
         CollectionCard(
             canCollect = capability != CollectionCapability.NONE,
+            collectionEnabled = collectionEnabled,
             mutation = mutation,
+            // The persisted ask is written at the two places a person acts on it, and this is one of
+            // them (the other is the ongoing notification's Stop action, answered in the service).
+            // The boot path never writes it - it reads it - which is what keeps "somebody asked for
+            // this" a record of a human act rather than of the app's own behaviour.
+            onCollectionAsked = { wanted ->
+                homePrefs.collectionEnabled = wanted
+                // Starting collection supersedes whatever a previous boot could not do, so the
+                // reason goes with it. Stopping leaves it: a person who stops is not owed a stale
+                // complaint either, and the adopt-only-while-stopped rule above is what retires it.
+                if (wanted) homePrefs.bootRestartReason = null
+                collectionEnabled = wanted
+            },
             onExplain = { onExplain(ExplanationTopic.COUNTERS) },
         )
         AlertsCard(mutation = mutation, onExplain = { onExplain(ExplanationTopic.ALERTS) })
@@ -791,7 +827,13 @@ private fun ServerConfigCard(mutation: UiMutation, onExplain: () -> Unit) {
 }
 
 @Composable
-private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain: () -> Unit) {
+private fun CollectionCard(
+    canCollect: Boolean,
+    collectionEnabled: Boolean,
+    mutation: UiMutation,
+    onCollectionAsked: (Boolean) -> Unit,
+    onExplain: () -> Unit,
+) {
     val context = LocalContext.current
     val running = CollectionStatus.running
 
@@ -805,13 +847,17 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
             now = System.currentTimeMillis()
         }
     }
-    val readout = CollectionReadout.of(CollectionStatus, now)
+    val readout = CollectionReadout.of(CollectionStatus, now, collectionEnabled)
+    // The mutation reads the stored ask as a running collection: "Running" on the word, and no line
+    // naming the disagreement. Exactly the two things the claim measures, and nothing else.
+    val asksReadAsRunning = mutation == UiMutation.STORED_ASK_READS_AS_RUNNING
+    val drawsAsRunning = running || (asksReadAsRunning && collectionEnabled)
 
     Card(modifier = Modifier.fillMaxWidth().testTag("card-collection")) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             CardTitle(R.string.collection_title)
             Text(
-                stringResource(if (running) R.string.collection_running else R.string.collection_stopped),
+                stringResource(if (drawsAsRunning) R.string.collection_running else R.string.collection_stopped),
                 style = MaterialTheme.typography.bodyMedium,
                 // The contrast mutation, and it is chosen PER THEME.
                 //
@@ -828,11 +874,31 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
                 },
                 modifier = Modifier.testTag("collection-running"),
             )
+
+            // The disagreement between what was asked for and what is running, said in its own
+            // words. Without it "Stopped" is all a reader gets, and "Stopped" is what a phone
+            // somebody switched off says too - so the state a failed restart leaves behind would be
+            // indistinguishable from a deliberate stop, which is the half of this the reboot work
+            // exists to make visible. It is drawn ONLY in that state, so it never competes with
+            // "Running" or contradicts an honest "Stopped".
+            if (readout.enabledButNotRunning && !asksReadAsRunning) {
+                Text(
+                    stringResource(R.string.collection_enabled_not_running),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag("collection-ask"),
+                )
+            }
+
             val collectionLabel =
                 stringResource(if (running) R.string.collection_stop else R.string.collection_start)
             val onCollectionClick: () -> Unit = {
-                if (running) LocationCollectionService.stop(context)
-                else LocationCollectionService.start(context)
+                if (running) {
+                    onCollectionAsked(false)
+                    LocationCollectionService.stop(context)
+                } else {
+                    onCollectionAsked(true)
+                    LocationCollectionService.start(context)
+                }
             }
             if (mutation == UiMutation.TARGET_BELOW_FLOOR) {
                 // A touch target genuinely under the 48dp floor, which takes TWO changes rather
@@ -951,6 +1017,7 @@ private fun CollectionCard(canCollect: Boolean, mutation: UiMutation, onExplain:
 private fun troubleLabel(kind: TroubleKind): Int = when (kind) {
     TroubleKind.NOT_CONFIGURED -> R.string.trouble_not_configured
     TroubleKind.PERMISSION_LOST -> R.string.trouble_permission_lost
+    TroubleKind.BACKGROUND_LOCATION_MISSING -> R.string.trouble_background_location_missing
     TroubleKind.SERVICE_REFUSED -> R.string.trouble_service_refused
     TroubleKind.DELIVERY_FAILED -> R.string.trouble_delivery_failed
     TroubleKind.CREDENTIAL_REJECTED -> R.string.trouble_credential_rejected
@@ -1190,6 +1257,7 @@ private fun explanationParagraphs(topic: ExplanationTopic): List<Int> = when (to
 
     ExplanationTopic.COUNTERS -> listOf(
         R.string.explain_collection_trouble,
+        R.string.explain_collection_restart,
         R.string.explain_collection_limitation,
         R.string.explain_counter_delivered,
         R.string.explain_counter_queued,

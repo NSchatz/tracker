@@ -8,6 +8,10 @@
 //	make verify-ui-android  uiverify docs     + the instrumented suite on an emulator, then
 //	                        uiverify android  the emulator's claim/demonstration count (AC18)
 //
+// A fifth target reaches a device the same way and is not about a rendered claim:
+//
+//	make verify-boot-restart  uiverify bootrestart  collection after a real reboot of the emulator
+//
 // The one thing it will never do is report a clause green without having rendered it. A missing
 // browser engine exits non-zero naming the engine and how to get it, exactly as `make android` does
 // for a missing SDK and internal/testsupport does for a missing Docker daemon.
@@ -43,6 +47,8 @@ func main() {
 		err = uiverify.CheckDocuments(os.Stdout, repoRoot())
 	case "android":
 		err = uiverify.CheckAndroidRun(os.Stdout, repoRoot())
+	case "bootrestart":
+		err = uiverify.RunBootRestart(ctx, os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -55,7 +61,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: uiverify {web|refusal|record|docs|android}")
+	fmt.Fprintln(os.Stderr, "usage: uiverify {web|refusal|record|docs|android|bootrestart}")
 }
 
 // repoRoot is where the record and the documents live. The make targets run from the repository

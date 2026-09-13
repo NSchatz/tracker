@@ -9,6 +9,13 @@ constrained to `NetworkType.CONNECTED` drains that queue into the server's alrea
 `POST /v1/fixes`. Going offline now delays reporting instead of losing it. It does **not** yet store
 its token securely (C3), adapt its cadence to save battery (C4), or show a map (C5).
 
+As of **REBOOT-1** a **reboot no longer ends collection**. The phone remembers that somebody asked
+for collection, and a `BOOT_COMPLETED` receiver starts the location foreground service again with
+nobody touching it. Two things stop that, and the card **says which** rather than reading as a
+deliberate stop: no "Allow all the time" location grant, or server settings it cannot report to. One
+thing nothing can stop: a **force-stopped** app is delivered no boot signal at all until a person
+opens it, so it stays stopped until they do.
+
 As of **ALERT-2** it also **watches**: a crossing pushed by the server arrives as a notification
 naming the device, the Place and the direction, and opening the app shows the family's recent
 crossings read back from `GET /v1/geofence-events` - so a crossing the push backend dropped is still
@@ -26,6 +33,7 @@ left silent.
 | **Flush** | `queue/QueueFlusher` (pure: what to send, keep, discard) driven by `queue/FixUploadWorker` (WorkManager, `NetworkType.CONNECTED`, exponential backoff jittered by `queue/FlushBackoff`). |
 | **Alert receive path** | `alert/TrackerMessagingService` - the FCM service. It decides nothing: `alert/AlertIntake` parses and either renders or discards-and-counts, and `alert/AlertNotifications` posts. |
 | **Alert surface** | `alert/AlertStatusPolicy` (the ordered six-state delivery status), `alert/CrossingListView` (the in-app list and its five outcomes), `alert/AlertClient` (the two viewer routes), `alert/MiniJson` (a strict reader, no dependency). All pure. |
+| **Reboot restart** | `collect/BootCompletedReceiver` - the thin edge, which reads three values and decides nothing - driven by the pure `collect/BootRestartDecision`. The persisted ask lives in `ClientPreferences.collectionEnabled`, written only where a person acts on it. |
 | **Configuration** | `collect/ClientPreferences` - server URL, device token and **viewer token**, entered in-app. **Plaintext for now** (see *Known limitations*). |
 | **UI** | `ui/MainActivity` - one screen: the current permission step, the server settings, start/stop, honest counters (`delivered` / `queued` / `dropped`), and the alert delivery status with the crossing list. |
 
@@ -145,7 +153,10 @@ be evidence about the mock, not about Android.
   dialog. The gate proves which step the app *decides* to take; it cannot take it.
 - **That the "Allow all the time" settings round-trip works** on a given Android version and OEM
   skin. The settings page layout is vendor-specific.
-- **That the foreground service starts, posts its notification, and survives screen-off.**
+- **That the foreground service posts its notification and survives screen-off.** That it STARTS is
+  no longer on this list: `make verify-boot-restart` starts it by rebooting a real Android runtime
+  and reads the platform's own service list for `isForeground=true`. What that route cannot see is
+  the notification a person would look at, or what an hour with the screen off does to the service.
 - **That the fused provider actually delivers fixes** at the configured cadence, or at all.
 - **That fixes land in the server's `fixes` table** end to end.
 - **That the queue's writer is crash-atomic, or that it trims in the right order.** `FixQueue`
@@ -180,6 +191,44 @@ be evidence about the mock, not about Android.
 - **That a Firebase project, once configured, yields a registration token.** The no-project case is
   gate-proved (the build is green without one and the app reports it has no usable push
   configuration); the with-project case needs a Firebase account and a real handset.
+- **That a particular OEM skin delivers `BOOT_COMPLETED` at all.** The reboot route below proves the
+  restart on an emulator running Google's own API 34 image, which is stock Android. Whether a Samsung,
+  Xiaomi or Huawei build delivers the broadcast to an app its battery manager has opinions about is
+  vendor behaviour on a real handset, and several of those vendors are known to withhold it from apps
+  the user has not put on an allow-list. Nothing in this repository claims otherwise, and no test here
+  can: the emulator is not that phone. This is the residue the reboot work leaves, and it is an unrun
+  operator check rather than a covered case.
+- **The Android 15 WIDENING of the stopped state.** The stopped state itself IS graded - a force-stop
+  puts the app in it on API 34, and that is what withholds the boot broadcast - but Android 15 adds
+  further ways an app enters it, and an API 34 AVD cannot produce any of them. The pinned image is API
+  34 (`SDK levels`, below), so that half is ungraded here. It is not claimed and it is not filed as
+  met; the target-SDK ladder is `tracker#SDK-4`.
+
+#### What the reboot route proves, and how
+
+`make verify-boot-restart` reboots the pinned AVD **four times** and reads the platform's own answers
+each time. It is not part of `make check` - that gate needs no device - and it is not part of the
+instrumented suite, because a setup case that merely rebooted the emulator and passed would land in
+the JUnit results as a rendered claim nobody demonstrated.
+
+| run | precondition it reaches | what must then be true |
+|---|---|---|
+| collection was enabled | the stored ask is on, the config is usable, the app has been opened | the location foreground service is running (`dumpsys activity services`, `isForeground=true`) |
+| collection was stopped by a person | the stored ask is off, and the app is NOT in the stopped state | no location foreground service |
+| the app was force-stopped | the app is in the stopped state (`dumpsys package`, `stopped=true`) | no location foreground service, and the reopened app publishes "Stopped" and "Enabled, not running" and never "Running" |
+| the boot path is disabled | `pm disable-user` on the receiver, confirmed in `disabledComponents` | the FIRST run's assertion, re-run, must go **RED** |
+
+The last row is what makes the other three worth reading. An assertion that has only ever been seen
+passing says nothing about whether it can fail, so the route disables the boot path at the platform
+and requires the same restart assertion - the same function, not a copy of it - to fail there.
+
+Two things are deliberately **not** assertions. The app's own boot-path log lines are copied into
+`build/uiverify/boot-restart.log` as corroboration only, because they are written from inside a
+booting device into a ring buffer the whole boot is also writing to and a line can be evicted on a
+slow run; the platform's state answers the same questions without that risk. And the second run's
+value rests on `stopped=false` being checked BEFORE the verdict: an app Android delivered no broadcast
+to would also not be collecting, so without that check the run could not tell a decision from a
+non-delivery.
 
 #### Why the instrumented suite grades the SCREEN and nothing else
 
@@ -295,6 +344,16 @@ that job.
    cannot prove.
 9. Force-stop the app with fixes still queued, then reopen it. The **queued** counter should come
    back non-zero (it is read from disk, not from memory) and the queue should drain.
+10. **Reboot the handset with collection running, and touch nothing afterwards.** Expect collection to
+    be running again - the ongoing notification back, **delivered** climbing - without opening the
+    app. This is `REBOOT-1`, and the emulator route grades it on stock Android; what only a real
+    handset answers is whether THIS vendor's build delivers the broadcast, so a phone that comes back
+    with collection off is the OEM residue recorded above rather than a repository defect. Then stop
+    collection, reboot again, and expect it to stay stopped.
+11. Revoke "Allow all the time" (leaving "While using the app"), start collection, and reboot. Expect
+    the card to read **Enabled, not running** with **Background location not allowed** beside it, and
+    the sentence naming what to grant behind **About these counters**. A card reading only "Stopped"
+    here is the defect this state exists to prevent.
 
 #### The device check to run before believing ALERT-2 works
 
@@ -370,6 +429,21 @@ be worse than no test.
 - **The scheduling half is not gate-provable.** The queue and the flush loop are unit-tested against
   a real filesystem and a real socket; that WorkManager actually runs the job when the radio returns
   is an operator check (above).
+- **A force-stopped app does not come back after a reboot, and cannot be made to.** An app in the
+  platform's STOPPED state is delivered no `ACTION_BOOT_COMPLETED` at all until a user action takes
+  it out of that state, whatever the app targets. So a phone whose owner (or whose OEM battery
+  manager) force-stopped tracker restarts with collection off and stays that way until somebody opens
+  the app. This is a platform rule rather than a defect and there is no code that closes it: what the
+  app owes is honesty, which is the collection card reading "Enabled, not running" instead of looking
+  like a deliberate stop. The reboot route grades exactly that case.
+- **A restart the boot path declines records a reason from a CLOSED set, which is narrower than the
+  truth.** The two reasons are the missing background-location grant and an unusable server
+  configuration. A third cause - Android refusing the service in spite of the grant - is recorded as
+  the missing grant, on the argument that a platform refusing a background start of a `location`
+  service is telling us that condition is not met whatever `checkSelfPermission` said a moment
+  earlier, and that it is the one thing a person can act on. The closed set is deliberate (it is what
+  keeps a coordinate or a bearer token out of the record by construction), and this is the precision
+  it costs.
 - **BOTH credentials are stored in plaintext** `SharedPreferences`: the device (write) token, and -
   since ALERT-2 - the **viewer (read) token** the alert surface needs. Neither is readable by other
   apps on a non-rooted device; both are readable with root, an unlocked bootloader, or a full-device
@@ -439,6 +513,7 @@ build — `abortOnError = true`), `testDebugUnitTest` runs the JVM unit tests de
 ```bash
 make verify-ui-android    # the instrumented suite, on a BOOTED emulator
 make verify-ui-refusal    # ... and the proof it refuses when there is no emulator
+make verify-boot-restart  # collection across four real reboots of that emulator
 ```
 
 `make check` is unchanged and still means what it always meant. `make verify-ui-android` sits beside
@@ -449,6 +524,11 @@ it because it needs something `make check` does not: a running Android device. I
    when any is missing,
 3. boots the AVD headless and blocks until `sys.boot_completed`,
 4. runs `connectedDebugAndroidTest`.
+
+`make verify-boot-restart` reaches its device through the same script and then reboots it, which is
+why it is a separate target rather than a case inside the suite above: a reboot in the middle of a
+run would take the emulator out from under it. `TRACKER_BOOT_RESTART_TIMEOUT` is how long one reboot
+is given to come back and act on the broadcast.
 
 The AVD name and the system image are `TRACKER_AVD` and `TRACKER_SYS_IMAGE` in the root `Makefile`,
 which is the only place they are stated; CI reads them back with `make print-avd` /
@@ -500,6 +580,7 @@ in CI. Note the gate carries **both** stacks: the Go server (a real PostGIS via 
 Docker required) and this Android client (JDK 17 + Android SDK). Size the runner for both.
 
 A second job, `ui`, provisions the same toolchain plus an emulator, **enables `/dev/kvm` explicitly**,
-and runs the four UI targets. It is separate from `check` because its prerequisites are different, and
-because a browser or an emulator that has gone missing must turn a job red rather than quietly
-grading nothing.
+and runs the four UI targets plus `make verify-boot-restart`. It is separate from `check` because its
+prerequisites are different, and because a browser or an emulator that has gone missing must turn a
+job red rather than quietly grading nothing. The reboot target runs **after** the instrumented suite,
+because it restarts the device four times and the two steps after it need no device at all.

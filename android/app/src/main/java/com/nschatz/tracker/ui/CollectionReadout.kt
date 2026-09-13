@@ -49,6 +49,21 @@ enum class CollectionCardState {
 data class CollectionReadout(
     val state: CollectionCardState,
     val running: Boolean,
+    /**
+     * True when a person asked for collection and it is not running.
+     *
+     * The card needs this as its own value rather than as two booleans a composable happens to read
+     * together, because the honest rendering of the pair is not the conjunction of their separate
+     * renderings. `running` false draws "Stopped", which is the whole truth when nobody asked for
+     * collection and only half of it when somebody did: a phone that was asked to collect and is not
+     * collecting looks, on a card that says only "Stopped", exactly like a phone somebody switched
+     * off. That is the state a reboot leaves behind when the restart could not happen, and it is the
+     * one a reader most needs told.
+     *
+     * It is deliberately NOT a third value of `running`. Whether the service is running is a fact
+     * about the process and it stays a boolean; this is the fact that a stored ask disagrees with it.
+     */
+    val enabledButNotRunning: Boolean,
     val delivered: Figure,
     val queued: Figure,
     val dropped: Figure,
@@ -70,7 +85,12 @@ data class CollectionReadout(
          */
         const val FRESH_WINDOW_MILLIS: Long = CollectionPolicy.DEFAULT_INTERVAL_MILLIS
 
-        fun of(status: CollectionStatus, now: Long): CollectionReadout {
+        /**
+         * @param collectionEnabled the persisted ask, from `ClientPreferences.collectionEnabled`.
+         *   Passed in rather than read here, so this stays a pure function of plain data and the one
+         *   `SharedPreferences` read lives at the framework edge with the others.
+         */
+        fun of(status: CollectionStatus, now: Long, collectionEnabled: Boolean): CollectionReadout {
             val queued: Figure = when {
                 status.readState == CollectionStatus.ReadState.UNREADABLE -> Figure.Unavailable
                 status.queued == null -> Figure.NotRecorded
@@ -99,6 +119,7 @@ data class CollectionReadout(
             return CollectionReadout(
                 state = state,
                 running = status.running,
+                enabledButNotRunning = collectionEnabled && !status.running,
                 delivered = delivered,
                 queued = queued,
                 dropped = dropped,
