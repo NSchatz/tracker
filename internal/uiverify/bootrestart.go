@@ -169,6 +169,9 @@ type bootDevice struct {
 	ctx    context.Context
 	adbBin string
 	serial string
+	// rooted records that this route restarted adbd as root to reach a component-state change no other
+	// caller on the device is allowed to make, so it can put it back afterwards.
+	rooted bool
 }
 
 // bootedDeviceFor asserts the prerequisites and boots the AVD, THROUGH scripts/android-emulator.sh.
@@ -521,44 +524,108 @@ func (d *bootDevice) packageState() packageState {
 
 // setBootReceiverEnabled switches the boot path off (or back on) at the PLATFORM.
 //
-// Two commands are tried and the outcome is read back, because API 34 closed the obvious route: a shell
-// uid is refused outright with "Shell cannot change component state for ComponentInfo{...}", from
-// `PackageManagerService.setEnabledSettings`. An app is allowed to change its OWN components, and the
-// debug build is debuggable, so `run-as` reaches the same call as the app's own uid. Which command
-// worked is printed rather than assumed.
+// A ladder of commands is tried and the outcome is read back after each, because no single one of them
+// works everywhere. A shell uid is refused outright on API 34 with "Shell cannot change component state
+// for ComponentInfo{...}", from `PackageManagerService.setEnabledSettings`. An app may change its OWN
+// components, and the debug build is debuggable, so `run-as` reaches that call as the app's own uid -
+// but `disable-user` is a state only a privileged caller may set, and the app's own call for it comes
+// back as `default`, which is the rung that left the fourth run unstaged the first time this route ran
+// on a real device. `disable` is the state an app IS allowed to set on itself, and an emulator built
+// from a `google_apis` (userdebug) system image also has `adb root`, which reaches the same call with
+// CHANGE_COMPONENT_ENABLED_STATE and is the rung that works when the others do not.
 //
-// The verdict is the platform's own disabledComponents list, not either command's exit status, so the
-// run grades a device whose boot path genuinely cannot run. If neither command achieves it, this REFUSES
-// by name: criterion 4 exists to show the restart assertion able to go red, and a run that could not
+// The verdict is the platform's own disabledComponents list, not any command's exit status, so the run
+// grades a device whose boot path genuinely cannot run. If the whole ladder fails, this REFUSES by
+// name: criterion 4 exists to show the restart assertion able to go red, and a run that could not
 // disable the boot path has not shown that. Substituting a weaker mutation - a revoked grant, a cleared
 // data directory - would be showing the assertion red against a boot path that RAN and declined, which
 // is a different claim.
 func (d *bootDevice) setBootReceiverEnabled(enabled bool, w io.Writer) error {
-	verb := "disable-user --user 0"
+	privileged, own := "disable-user --user 0", "disable"
 	if enabled {
-		verb = "enable"
+		privileged, own = "enable", "enable"
 	}
 	var tried []string
-	for _, command := range []string{
-		"pm " + verb + " " + bootReceiver,
-		"run-as " + trackerPackage + " cmd package " + verb + " " + bootReceiver,
-	} {
+	reached := func(command string) bool {
 		out, err := d.shell(command)
 		tried = append(tried, fmt.Sprintf("%s -> err=%v %s", command, err, strings.TrimSpace(headLine(out))))
 		if d.packageState().receiverDisabled != enabled {
 			fmt.Fprintf(w, "the platform records the boot receiver as disabled=%v, via: %s\n", !enabled, command)
+			return true
+		}
+		return false
+	}
+
+	for _, command := range []string{
+		"pm " + privileged + " " + bootReceiver,
+		"run-as " + trackerPackage + " cmd package " + privileged + " " + bootReceiver,
+		"run-as " + trackerPackage + " cmd package " + own + " " + bootReceiver,
+	} {
+		if reached(command) {
+			d.leaveRootIfTaken(w, enabled)
 			return nil
 		}
 	}
+
+	// The last rung, and the one that needs the device to be a userdebug build rather than a shipped
+	// phone. It is reported in the refusal alongside the others when it is not available, so an
+	// environment that cannot stage this run says which route it lacked.
+	if d.becomeRoot(&tried) {
+		for _, command := range []string{
+			"pm " + privileged + " " + bootReceiver,
+			"pm " + own + " " + bootReceiver,
+		} {
+			if reached(command) {
+				d.leaveRootIfTaken(w, enabled)
+				return nil
+			}
+		}
+	}
+
 	state := "disabled"
 	if enabled {
 		state = "enabled"
 	}
+	d.leaveRootIfTaken(w, enabled)
 	return &Refusal{
 		Criterion:    bootRestartCriterion,
 		Prerequisite: "a " + state + " boot receiver on " + d.serial + "; every route to it was refused:\n    " + strings.Join(tried, "\n    "),
-		HowToObtain:  "a platform that lets the app's own uid change its own component state (run-as on a debuggable build), or a shell with CHANGE_COMPONENT_ENABLED_STATE",
+		HowToObtain:  "a platform that lets the app's own uid change its own component state (run-as on a debuggable build), a shell with CHANGE_COMPONENT_ENABLED_STATE, or an emulator built from a userdebug system image, where `adb root` reaches it",
 	}
+}
+
+// becomeRoot restarts adbd as root, which a `google_apis` emulator image permits and a shipped phone
+// does not.
+//
+// The verdict is `id -u` and not adb's exit status: `adb root` answers "adbd cannot run as root in
+// production builds" and exits ZERO, so a route that trusted the status would report an escalation that
+// did not happen and then blame the next command for failing.
+func (d *bootDevice) becomeRoot(tried *[]string) bool {
+	out, err := d.adb("root")
+	*tried = append(*tried, fmt.Sprintf("adb root -> err=%v %s", err, strings.TrimSpace(headLine(out))))
+	// adbd restarts, so the connection this route holds has to be re-established before anything is
+	// asked of it.
+	_, _ = d.adb("wait-for-device")
+	who, _ := d.shell("id -u")
+	rooted := strings.TrimSpace(who) == "0"
+	d.rooted = rooted
+	*tried = append(*tried, fmt.Sprintf("id -u after adb root -> %q", strings.TrimSpace(who)))
+	return rooted
+}
+
+// leaveRootIfTaken puts adbd back where it was found, once the boot path has been restored.
+//
+// It runs on the RESTORE call rather than after each command: the disabled run still needs the
+// escalation to put the receiver back, and dropping it in between would leave the route unable to
+// undo what it did to the device.
+func (d *bootDevice) leaveRootIfTaken(w io.Writer, restoring bool) {
+	if !d.rooted || !restoring {
+		return
+	}
+	_, _ = d.adb("unroot")
+	_, _ = d.adb("wait-for-device")
+	d.rooted = false
+	fmt.Fprintln(w, "adbd put back to its unprivileged self")
 }
 
 // headLine is the first line of a command's output, which is where a shell command's complaint is. It
