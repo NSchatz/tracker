@@ -125,6 +125,13 @@ func RunBootRestart(ctx context.Context, w io.Writer) error {
 		default:
 			fmt.Fprintf(log, "%s: passed\n", run.name)
 		}
+		if run.capture != nil {
+			if cerr := run.capture(dev, root, log); cerr != nil {
+				problems = append(problems, fmt.Sprintf(
+					"%s: the rendered evidence for this state was not taken (F12 of the umbrella's "+
+						"frontend conventions asks for it in both themes at both widths): %v", run.name, cerr))
+			}
+		}
 		if cerr := run.restore(dev, log); cerr != nil {
 			return cerr
 		}
@@ -212,6 +219,17 @@ func (d *bootDevice) adb(args ...string) (string, error) {
 	cmd := exec.CommandContext(d.ctx, d.adbBin, append([]string{"-s", d.serial}, args...)...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// adbBytes is adb with stdout kept BINARY and separate from stderr.
+//
+// `exec-out screencap -p` writes a PNG to stdout, and both halves of that matter: `adb shell` would
+// translate the stream and corrupt it, and CombinedOutput would splice any adb warning into the middle
+// of the image. A picture that decodes to nothing is worse than no picture, because it looks like
+// evidence in a directory listing.
+func (d *bootDevice) adbBytes(args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(d.ctx, d.adbBin, append([]string{"-s", d.serial}, args...)...)
+	return cmd.Output()
 }
 
 func (d *bootDevice) shell(command string) (string, error) {
@@ -448,6 +466,103 @@ func (d *bootDevice) publishedScreenText() (string, error) {
 	return out, nil
 }
 
+// --- the rendered evidence F12 asks for ---------------------------------------------------------
+
+// renderedEvidenceDir is where this route leaves the screenshots. CI uploads build/uiverify/ whole.
+const renderedEvidenceDir = "build/uiverify/shots"
+
+// renderProfiles are the two widths F12 names, expressed as something a phone actually has.
+//
+// F12 asks for both themes "at 360 and at desktop width". A native phone surface has no desktop, so
+// the wide cell is the widest configuration this AVD can be put into rather than a claim about one:
+// 600dp, which is where Android's own breakpoints put a small tablet.
+//
+// Both are TALL on purpose, and that is the part worth explaining. The home screen is a single
+// scrolling column and the card this work changes is the third one on it, so a capture at a phone's
+// real height would be a picture of the permission card. Setting the display's height rather than
+// swiping down to the card keeps the capture deterministic - no coordinates, no gestures, nothing that
+// lands in the wrong place on a slow frame - and puts the whole column in one frame.
+//
+// dp = px * 160 / dpi, which is the same arithmetic UiHarness.set360dpProfile uses: 720 x 160 / 320 is
+// exactly 360dp of width, and 2400 x 160 / 320 is 1200dp of height.
+var renderProfiles = []struct{ cell, size, density string }{
+	{"360", "720x2400", "320"},
+	{"desktop", "1200x2400", "320"},
+}
+
+var renderThemes = []struct{ cell, night string }{
+	{"light", "no"},
+	{"dark", "yes"},
+}
+
+// captureRenderedEvidence photographs the state this work adds, in both themes at both widths.
+//
+// It runs at the one moment the device is IN that state: after the force-stopped reboot, with the app
+// reopened, showing a collection somebody asked for that is not running and the reason it is not. A
+// screenshot of any other moment would be a picture of a screen this change did not alter.
+//
+// The device is put back to its own profile and to light mode afterwards, so the run that follows this
+// one inherits a device rather than a configuration.
+func (d *bootDevice) captureRenderedEvidence(root string, w io.Writer) error {
+	dir := filepath.Join(root, filepath.FromSlash(renderedEvidenceDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = d.shell("wm size reset")
+		_, _ = d.shell("wm density reset")
+		_, _ = d.shell("cmd uimode night no")
+		time.Sleep(2 * time.Second)
+	}()
+
+	var written []string
+	for _, profile := range renderProfiles {
+		if out, err := d.shell("wm size " + profile.size); err != nil {
+			return fmt.Errorf("setting the display to %s: %v\n%s", profile.size, err, out)
+		}
+		if out, err := d.shell("wm density " + profile.density); err != nil {
+			return fmt.Errorf("setting the density to %s: %v\n%s", profile.density, err, out)
+		}
+		for _, theme := range renderThemes {
+			if out, err := d.shell("cmd uimode night " + theme.night); err != nil {
+				return fmt.Errorf("setting night mode to %s: %v\n%s", theme.night, err, out)
+			}
+			time.Sleep(3 * time.Second)
+			// Relaunched per cell rather than left to recompose, because a display resize and a theme
+			// change are both configuration changes and what is wanted is the screen as it is drawn
+			// from scratch in that configuration.
+			if err := d.openTheApp(w); err != nil {
+				return err
+			}
+			png, err := d.adbBytes("exec-out", "screencap", "-p")
+			if err != nil {
+				return fmt.Errorf("screenshotting %s/%s: %v", theme.cell, profile.cell, err)
+			}
+			// Checked rather than trusted, which is the lesson of finding F3: a mechanism that wrote
+			// nothing while two documents said it wrote everything went unnoticed for the whole life of
+			// the mechanism. A file that is not a PNG, or one too small to be a screen, is not evidence.
+			if len(png) < 4 || png[0] != 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G' {
+				return fmt.Errorf("the screenshot for %s/%s is %d bytes and does not begin with a PNG "+
+					"signature, so it is not a picture of anything", theme.cell, profile.cell, len(png))
+			}
+			if len(png) < 20_000 {
+				return fmt.Errorf("the screenshot for %s/%s is %d bytes, which is too small to be a "+
+					"rendered screen at %s", theme.cell, profile.cell, len(png), profile.size)
+			}
+			name := fmt.Sprintf("collection.%s.%s.png", theme.cell, profile.cell)
+			if err := os.WriteFile(filepath.Join(dir, name), png, 0o644); err != nil {
+				return err
+			}
+			written = append(written, fmt.Sprintf("%s (%d bytes)", name, len(png)))
+		}
+	}
+	fmt.Fprintf(w, "rendered evidence in %s:\n%s\n", renderedEvidenceDir, indent(strings.Join(written, "\n")))
+	if len(written) != len(renderProfiles)*len(renderThemes) {
+		return fmt.Errorf("%d of the %d theme-and-width cells were captured", len(written), len(renderProfiles)*len(renderThemes))
+	}
+	return nil
+}
+
 // --- the words the app declares -----------------------------------------------------------------
 
 // screenWords are the texts this route looks for in what the app published.
@@ -504,6 +619,10 @@ type bootRestartRun struct {
 	prepare     func(*bootDevice, io.Writer) error
 	assert      func(*bootDevice, io.Writer) error
 	restore     func(*bootDevice, io.Writer) error
+	// capture photographs the state this run reached, for the runs where there is rendered evidence to
+	// take. Its verdict is reported separately from assert's, so a missing screenshot and a phone that
+	// failed to restart are never read as the same failure.
+	capture func(*bootDevice, string, io.Writer) error
 	// mustFail inverts the verdict. It is how the route is shown able to go RED: one run disables the
 	// boot path and re-runs the SAME assertion the enabled case uses, and a pass there would mean the
 	// assertion cannot fail and every green run of it is worth nothing.
@@ -579,6 +698,12 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 					return err
 				}
 				return theReopenedAppSaysItIsNotCollecting(d, w, words)
+			},
+			// The one run whose state is worth photographing: collection asked for, not running, and
+			// the reason on the card. That is the screen this work adds, and F12 asks for it in both
+			// themes at both widths.
+			capture: func(d *bootDevice, root string, w io.Writer) error {
+				return d.captureRenderedEvidence(root, w)
 			},
 			restore: noRestore,
 		},

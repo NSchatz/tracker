@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,10 +157,13 @@ func TestTheBootRestartRunsCoverWhatTheCriteriaName(t *testing.T) {
 		t.Fatalf("the route makes %d device runs; the criteria name four: the enabled case, the "+
 			"stopped-by-a-person case, the force-stopped case and the disabled-boot-path case", len(runs))
 	}
-	inverted := 0
+	inverted, captures := 0, 0
 	for _, r := range runs {
 		if r.mustFail {
 			inverted++
+		}
+		if r.capture != nil {
+			captures++
 		}
 		if r.name == "" || r.establishes == "" {
 			t.Fatalf("a run with no name or no statement of what it establishes: %+v", r.name)
@@ -171,6 +175,39 @@ func TestTheBootRestartRunsCoverWhatTheCriteriaName(t *testing.T) {
 	if inverted != 1 {
 		t.Fatalf("%d runs are inverted; exactly one is - the disabled-boot-path run, which shows the "+
 			"restart assertion able to go red", inverted)
+	}
+	// Exactly one run photographs its state, and it has to be the one whose state this work adds: a
+	// collection somebody asked for that is not running, with the reason on the card. A capture on any
+	// other run would be a picture of a screen nothing here changed.
+	if captures != 1 {
+		t.Fatalf("%d runs capture rendered evidence; exactly one does", captures)
+	}
+	for _, r := range runs {
+		if (r.capture != nil) != strings.Contains(r.name, "force-stopped") {
+			t.Fatalf("the rendered evidence is taken on %q; it belongs on the force-stopped run, which is "+
+				"the one that reaches the enabled-but-not-running screen", r.name)
+		}
+	}
+
+	// And the cells it writes are the four F12 names, derived from the tables rather than restated, so
+	// a profile added without a theme cannot leave a half-filled matrix.
+	if len(renderProfiles)*len(renderThemes) != 4 {
+		t.Fatalf("the capture covers %d cells; F12 asks for both themes at both widths, which is four",
+			len(renderProfiles)*len(renderThemes))
+	}
+	seen := map[string]bool{}
+	for _, p := range renderProfiles {
+		for _, th := range renderThemes {
+			seen[fmt.Sprintf("collection.%s.%s.png", th.cell, p.cell)] = true
+		}
+	}
+	for _, want := range []string{
+		"collection.light.360.png", "collection.dark.360.png",
+		"collection.light.desktop.png", "collection.dark.desktop.png",
+	} {
+		if !seen[want] {
+			t.Fatalf("the capture writes no %q; `just shots` reads that name and nothing else", want)
+		}
 	}
 }
 
