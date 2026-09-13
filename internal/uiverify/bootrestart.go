@@ -519,6 +519,57 @@ func (d *bootDevice) packageState() packageState {
 	}
 }
 
+// setBootReceiverEnabled switches the boot path off (or back on) at the PLATFORM.
+//
+// Two commands are tried and the outcome is read back, because API 34 closed the obvious route: a shell
+// uid is refused outright with "Shell cannot change component state for ComponentInfo{...}", from
+// `PackageManagerService.setEnabledSettings`. An app is allowed to change its OWN components, and the
+// debug build is debuggable, so `run-as` reaches the same call as the app's own uid. Which command
+// worked is printed rather than assumed.
+//
+// The verdict is the platform's own disabledComponents list, not either command's exit status, so the
+// run grades a device whose boot path genuinely cannot run. If neither command achieves it, this REFUSES
+// by name: criterion 4 exists to show the restart assertion able to go red, and a run that could not
+// disable the boot path has not shown that. Substituting a weaker mutation - a revoked grant, a cleared
+// data directory - would be showing the assertion red against a boot path that RAN and declined, which
+// is a different claim.
+func (d *bootDevice) setBootReceiverEnabled(enabled bool, w io.Writer) error {
+	verb := "disable-user --user 0"
+	if enabled {
+		verb = "enable"
+	}
+	var tried []string
+	for _, command := range []string{
+		"pm " + verb + " " + bootReceiver,
+		"run-as " + trackerPackage + " cmd package " + verb + " " + bootReceiver,
+	} {
+		out, err := d.shell(command)
+		tried = append(tried, fmt.Sprintf("%s -> err=%v %s", command, err, strings.TrimSpace(headLine(out))))
+		if d.packageState().receiverDisabled != enabled {
+			fmt.Fprintf(w, "the platform records the boot receiver as disabled=%v, via: %s\n", !enabled, command)
+			return nil
+		}
+	}
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	return &Refusal{
+		Criterion:    bootRestartCriterion,
+		Prerequisite: "a " + state + " boot receiver on " + d.serial + "; every route to it was refused:\n    " + strings.Join(tried, "\n    "),
+		HowToObtain:  "a platform that lets the app's own uid change its own component state (run-as on a debuggable build), or a shell with CHANGE_COMPONENT_ENABLED_STATE",
+	}
+}
+
+// headLine is the first line of a command's output, which is where a shell command's complaint is. It
+// is not the browser route's `firstLine`: that one reduces an error and this one reduces a string.
+func headLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 // componentIsDisabled reads the package's disabledComponents list rather than the whole dump.
 func componentIsDisabled(dump, component string) bool {
 	at := strings.Index(dump, "disabledComponents:")
@@ -578,6 +629,31 @@ var renderThemes = []struct{ cell, night string }{
 	{"dark", "yes"},
 }
 
+// renderProfile is one of the display configurations above.
+type renderProfile = struct{ cell, size, density string }
+
+// useTallProfile puts the display into one of those configurations, so the whole scrolling column is on
+// screen at once - which is what both the screenshots and the published-tree read depend on.
+func (d *bootDevice) useTallProfile(p renderProfile, w io.Writer) error {
+	if out, err := d.shell("wm size " + p.size); err != nil {
+		return fmt.Errorf("setting the display to %s: %v\n%s", p.size, err, out)
+	}
+	if out, err := d.shell("wm density " + p.density); err != nil {
+		return fmt.Errorf("setting the density to %s: %v\n%s", p.density, err, out)
+	}
+	time.Sleep(3 * time.Second)
+	fmt.Fprintf(w, "display: %s at %sdpi (the %s cell)\n", p.size, p.density, p.cell)
+	return nil
+}
+
+// resetDisplay puts the device back to its own profile and to light mode.
+func (d *bootDevice) resetDisplay() {
+	_, _ = d.shell("wm size reset")
+	_, _ = d.shell("wm density reset")
+	_, _ = d.shell("cmd uimode night no")
+	time.Sleep(2 * time.Second)
+}
+
 // captureRenderedEvidence photographs the state this work adds, in both themes at both widths.
 //
 // It runs at the one moment the device is IN that state: after the force-stopped reboot, with the app
@@ -591,20 +667,12 @@ func (d *bootDevice) captureRenderedEvidence(root string, w io.Writer) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	defer func() {
-		_, _ = d.shell("wm size reset")
-		_, _ = d.shell("wm density reset")
-		_, _ = d.shell("cmd uimode night no")
-		time.Sleep(2 * time.Second)
-	}()
+	defer d.resetDisplay()
 
 	var written []string
 	for _, profile := range renderProfiles {
-		if out, err := d.shell("wm size " + profile.size); err != nil {
-			return fmt.Errorf("setting the display to %s: %v\n%s", profile.size, err, out)
-		}
-		if out, err := d.shell("wm density " + profile.density); err != nil {
-			return fmt.Errorf("setting the density to %s: %v\n%s", profile.density, err, out)
+		if err := d.useTallProfile(profile, w); err != nil {
+			return err
 		}
 		for _, theme := range renderThemes {
 			if out, err := d.shell("cmd uimode night " + theme.night); err != nil {
@@ -835,32 +903,16 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				if err := d.leaveTheStoppedState(w); err != nil {
 					return err
 				}
-				// The boot path is switched off at the platform, not in a second build. `pm
-				// disable-user` is the platform's own record of a disabled component, so what this run
-				// grades is a device whose boot path genuinely cannot run rather than one this route
-				// merely says so about.
-				if out, err := d.shell("pm disable-user --user 0 " + bootReceiver); err != nil {
-					return fmt.Errorf("disabling the boot receiver: %v\n%s", err, out)
-				}
-				if !d.packageState().receiverDisabled {
-					return &Refusal{
-						Criterion:    bootRestartCriterion,
-						Prerequisite: "a disabled boot receiver on " + d.serial + " (the platform still reports it enabled)",
-						HowToObtain:  "adb -s " + d.serial + " shell pm disable-user --user 0 " + bootReceiver,
-					}
-				}
-				fmt.Fprintln(w, "the platform records the boot receiver as disabled")
-				return nil
+				// The boot path is switched off at the platform, not in a second build, and not by
+				// anything the shipped app offers. What makes it a fact rather than an intention is
+				// that the platform's own disabledComponents list is read back afterwards.
+				return d.setBootReceiverEnabled(false, w)
 			},
 			survived: theAppIsStillReachable,
 			assert:   collectionIsRunningAfterTheBoot,
 			mustFail: true,
 			restore: func(d *bootDevice, w io.Writer) error {
-				if out, err := d.shell("pm enable " + bootReceiver); err != nil {
-					return fmt.Errorf("re-enabling the boot receiver: %v\n%s", err, out)
-				}
-				fmt.Fprintln(w, "the boot receiver is enabled again")
-				return nil
+				return d.setBootReceiverEnabled(true, w)
 			},
 		},
 	}
@@ -940,6 +992,18 @@ func collectionIsNotRunningAfterTheBoot(d *bootDevice, w io.Writer) error {
 // words are the app's own, read from its resources; the answer about what was SHOWN comes from the
 // tree the app published.
 func theReopenedAppSaysItIsNotCollecting(d *bootDevice, w io.Writer, words screenWords) error {
+	// The display is made TALL before the app is opened, and that is not cosmetic. The home screen is
+	// one scrolling column and the collection card is the third card on it, so on a phone-shaped display
+	// the card is BELOW THE FOLD - and Compose publishes only what is on screen to the accessibility
+	// tree, so a dump taken at the AVD's own height contains no collection state at all and every word
+	// this function looks for reads as absent. The first CI run of this route failed exactly there, and
+	// on a shorter screen it would have been reported as the app saying nothing.
+	//
+	// Resizing rather than scrolling for the same reason the screenshots do it: a swipe needs
+	// coordinates and lands somewhere else on a slow frame, and a display height is deterministic.
+	if err := d.useTallProfile(renderProfiles[0], w); err != nil {
+		return err
+	}
 	if err := d.openTheApp(w); err != nil {
 		return err
 	}
