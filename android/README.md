@@ -216,7 +216,7 @@ the JUnit results as a rendered claim nobody demonstrated.
 | collection was enabled | the stored ask is on, the config is usable, the app has been opened | the location foreground service is running (`dumpsys activity services`, `isForeground=true`) |
 | collection was stopped by a person | the stored ask is off, and the app is NOT in the stopped state | no location foreground service |
 | the app was force-stopped | the app is in the stopped state (`dumpsys package`, `stopped=true`) | no location foreground service, and the reopened app publishes "Stopped" and "Enabled, not running" and never "Running" |
-| the boot path is disabled | `pm disable-user` on the receiver, confirmed in `disabledComponents` | the FIRST run's assertion, re-run, must go **RED** |
+| the boot path is disabled | the receiver switched off at the package manager, confirmed in `disabledComponents` | the FIRST run's assertion, re-run, must go **RED** |
 
 The last row is what makes the other three worth reading. An assertion that has only ever been seen
 passing says nothing about whether it can fail, so the route disables the boot path at the platform
