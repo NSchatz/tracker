@@ -96,7 +96,7 @@ func RunBootRestart(ctx context.Context, w io.Writer) error {
 	// path runs while the device is booting and there is no moment afterwards at which a bigger
 	// buffer would have kept its lines. The lines are corroboration rather than a gate - see
 	// recordBootLog.
-	_, _ = dev.shell("setprop persist.logd.size 4M")
+	_, _ = dev.shell("setprop persist.logd.size 16M")
 	if gerr := dev.grantLocation(log); gerr != nil {
 		return gerr
 	}
@@ -348,8 +348,34 @@ func (d *bootDevice) openTheApp(w io.Writer) error {
 	if out, err := d.shell("am start -W -n " + mainActivity); err != nil {
 		return fmt.Errorf("launching %s: %v\n%s", mainActivity, err, out)
 	}
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 	fmt.Fprintf(w, "opened %s\n", mainActivity)
+	return nil
+}
+
+// leaveTheStoppedState opens the app and asserts the platform agrees it is no longer stopped.
+//
+// Three of the four runs depend on this and cannot say so for themselves: Android delivers no
+// ACTION_BOOT_COMPLETED to an app in the STOPPED state, and a freshly installed app that has never
+// been launched is in it, as is one that has been force-stopped. So a run that skipped this would
+// measure a device the broadcast never reached and report it as a boot path that did not work.
+//
+// It is asserted rather than assumed because "a launch clears the stopped flag" is a platform
+// behaviour, not a guarantee this code owns. If it ever stops being true, this refuses by name here
+// instead of surfacing two minutes later as "the service is not running".
+func (d *bootDevice) leaveTheStoppedState(w io.Writer) error {
+	if err := d.openTheApp(w); err != nil {
+		return err
+	}
+	state := d.packageState()
+	fmt.Fprintf(w, "platform package state: %s\n", state.userLine)
+	if state.stopped {
+		return &Refusal{
+			Criterion:    bootRestartCriterion,
+			Prerequisite: "an app the boot broadcast can reach on " + d.serial + " (the platform still records it as stopped after a launch: " + state.userLine + ")",
+			HowToObtain:  "adb -s " + d.serial + " shell am start -W -n " + mainActivity + ", or launch it from the launcher",
+		}
+	}
 	return nil
 }
 
@@ -392,7 +418,7 @@ func (d *bootDevice) rebootAndWait(w io.Writer) error {
 // whether the service is running, whether the app was in the stopped state, whether the receiver was
 // enabled. Asserting on a line that can vanish would make a green run depend on log volume.
 func (d *bootDevice) recordBootLog(w io.Writer) {
-	out, _ := d.adb("logcat", "-d", "-v", "raw", "-s", "TrackerBoot:D")
+	out, _ := d.adb("logcat", "-b", "all", "-d", "-v", "raw", "-s", "TrackerBoot:V")
 	text := strings.TrimSpace(out)
 	if text == "" {
 		text = "(no boot-path log line survived this boot's ring buffer)"
@@ -405,7 +431,9 @@ func (d *bootDevice) recordBootLog(w io.Writer) {
 // locationServiceIsRunning polls the platform's own service list until the location foreground
 // service is running, or the budget is out.
 func (d *bootDevice) locationServiceIsRunning() (bool, string) {
-	deadline := time.Now().Add(90 * time.Second)
+	// Generous on purpose. Nothing observable says "every boot receiver has run", so this budget has to
+	// cover a broadcast queue still working through a cold boot as well as the service's own start.
+	deadline := time.Now().Add(150 * time.Second)
 	last := ""
 	for {
 		out, _ := d.shell("dumpsys activity services " + trackerPackage)
@@ -432,21 +460,53 @@ func (d *bootDevice) locationServiceIsRunning() (bool, string) {
 // packageState is what the platform records about the app itself, rather than about its services.
 type packageState struct {
 	stopped          bool
+	notLaunched      bool
 	receiverDisabled bool
+	userLine         string
 	dump             string
 }
 
+// stoppedField matches the platform's own record of the STOPPED state.
+//
+// It is matched mid-line and not at the start of one, which is the whole reason it is a named pattern.
+// `dumpsys package` prints the per-user state as one long line - "installed=true hidden=false
+// suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 ..." - so an anchored
+// pattern matches nothing whatever the state is, and a check built on one reads "not stopped" for every
+// device. That is not a hypothetical: it is what the first CI run of this route did, which reported the
+// app reachable when nothing had been checked.
+var (
+	stoppedField     = regexp.MustCompile(`(?:^|\s)stopped=true(?:\s|$)`)
+	notLaunchedField = regexp.MustCompile(`(?:^|\s)notLaunched=true(?:\s|$)`)
+	userStateLine    = regexp.MustCompile(`(?m)^\s*User \d+:.*$`)
+)
+
 func (d *bootDevice) packageState() packageState {
 	out, _ := d.shell("dumpsys package " + trackerPackage)
+	line := userStateLine.FindString(out)
 	return packageState{
-		stopped: regexp.MustCompile(`(?m)^\s*stopped=true`).MatchString(out),
-		// The component appears in the package's disabledComponents set once `pm disable-user` has
-		// been applied to it. That is the platform's own record of the boot path being switched off,
-		// which is what makes the disabled-boot-path run a fact rather than an intention.
-		receiverDisabled: strings.Contains(out, "collect.BootCompletedReceiver") &&
-			strings.Contains(out, "disabledComponents"),
-		dump: out,
+		stopped:     stoppedField.MatchString(line),
+		notLaunched: notLaunchedField.MatchString(line),
+		// The component has to be INSIDE the disabledComponents list, not merely mentioned somewhere in
+		// a dump that names every component the package declares. `pm disable-user` prints it as an
+		// indented line under a "disabledComponents:" heading, so the heading is found and the lines
+		// after it are what is searched.
+		receiverDisabled: componentIsDisabled(out, "BootCompletedReceiver"),
+		userLine:         strings.TrimSpace(line),
+		dump:             out,
 	}
+}
+
+// componentIsDisabled reads the package's disabledComponents list rather than the whole dump.
+func componentIsDisabled(dump, component string) bool {
+	at := strings.Index(dump, "disabledComponents:")
+	if at < 0 {
+		return false
+	}
+	window := dump[at:]
+	if len(window) > 4000 {
+		window = window[:4000]
+	}
+	return strings.Contains(window, component)
 }
 
 // publishedScreenText is the accessibility tree the app itself published, read off the device.
@@ -639,7 +699,7 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				if err := d.writeStoredState(w, true, true); err != nil {
 					return err
 				}
-				return d.openTheApp(w)
+				return d.leaveTheStoppedState(w)
 			},
 			assert:  collectionIsRunningAfterTheBoot,
 			restore: noRestore,
@@ -651,17 +711,20 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				if err := d.writeStoredState(w, false, true); err != nil {
 					return err
 				}
-				return d.openTheApp(w)
+				return d.leaveTheStoppedState(w)
 			},
 			assert: func(d *bootDevice, w io.Writer) error {
-				// The app must NOT be in the stopped state here, and that is the assertion that makes
-				// this run mean something: an app Android delivered no boot broadcast to would also
-				// not be collecting, and the two would be indistinguishable. This one was reachable
-				// and is not collecting, so the boot path DECIDED not to start it.
+				// Re-read AFTER the boot, and that is the assertion that makes this run mean something:
+				// an app Android delivered no boot broadcast to would also not be collecting, and the
+				// two would be indistinguishable. This one was reachable and is not collecting, so the
+				// boot path DECIDED not to start it. The same check before the reboot is in prepare;
+				// this one catches a reboot that put the app back into that state.
 				state := d.packageState()
+				fmt.Fprintf(w, "platform package state after the boot: %s\n", state.userLine)
 				if state.stopped {
-					return fmt.Errorf("the app is in the stopped state, so Android delivered it no boot " +
-						"broadcast and this run cannot tell a decision from a non-delivery")
+					return fmt.Errorf("the app is in the stopped state after the boot (%s), so Android "+
+						"delivered it no boot broadcast and this run cannot tell a decision from a "+
+						"non-delivery", state.userLine)
 				}
 				return collectionIsNotRunningAfterTheBoot(d, w)
 			},
@@ -677,20 +740,21 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				// Opened and THEN force-stopped, in that order. Opening clears the stopped state, so
 				// without it the force-stop would be putting the app into a state it was already in
 				// and the run would prove nothing about a force-stop.
-				if err := d.openTheApp(w); err != nil {
+				if err := d.leaveTheStoppedState(w); err != nil {
 					return err
 				}
 				if out, err := d.shell("am force-stop " + trackerPackage); err != nil {
 					return fmt.Errorf("force-stopping %s: %v\n%s", trackerPackage, err, out)
 				}
-				if !d.packageState().stopped {
+				forced := d.packageState()
+				if !forced.stopped {
 					return &Refusal{
 						Criterion:    bootRestartCriterion,
-						Prerequisite: "the app in the platform's STOPPED state on " + d.serial,
+						Prerequisite: "the app in the platform's STOPPED state on " + d.serial + " (it reports: " + forced.userLine + ")",
 						HowToObtain:  "adb -s " + d.serial + " shell am force-stop " + trackerPackage,
 					}
 				}
-				fmt.Fprintln(w, "the platform records the app as stopped")
+				fmt.Fprintf(w, "the platform records the app as stopped: %s\n", forced.userLine)
 				return nil
 			},
 			assert: func(d *bootDevice, w io.Writer) error {
@@ -714,7 +778,7 @@ func bootRestartRuns(words screenWords) []bootRestartRun {
 				if err := d.writeStoredState(w, true, true); err != nil {
 					return err
 				}
-				if err := d.openTheApp(w); err != nil {
+				if err := d.leaveTheStoppedState(w); err != nil {
 					return err
 				}
 				// The boot path is switched off at the platform, not in a second build. `pm
@@ -753,10 +817,55 @@ func collectionIsRunningAfterTheBoot(d *bootDevice, w io.Writer) error {
 	running, dump := d.locationServiceIsRunning()
 	fmt.Fprintf(w, "platform service list says running=%v\n%s\n", running, indent(strings.TrimSpace(dump)))
 	if !running {
+		// The diagnosis travels with the failure. "The service is not running" is a true statement with
+		// four different causes - the app was stopped so no broadcast arrived, the receiver is disabled,
+		// the stored state is not what was written, or the receiver ran and declined - and a run that
+		// reported only the outcome would need another reboot to tell them apart.
 		return fmt.Errorf("the location foreground service is not running after the boot; the platform's "+
-			"own service list for %s reports:\n%s", trackerPackage, indent(strings.TrimSpace(dump)))
+			"own service list for %s reports:\n%s\nand this is the state it was in:\n%s",
+			trackerPackage, indent(strings.TrimSpace(dump)), indent(d.diagnose()))
 	}
 	return nil
+}
+
+// diagnose gathers what the device can say about why a boot path did not run.
+func (d *bootDevice) diagnose() string {
+	state := d.packageState()
+	prefs, _ := d.shell("run-as " + trackerPackage + " cat /data/data/" + trackerPackage + "/shared_prefs/" + prefsFileName)
+	// Every buffer, not just main: the broadcast queue's own account of what it delivered is in the
+	// system buffer, and it is the half that says whether the receiver was ever reached.
+	boot, _ := d.adb("logcat", "-b", "all", "-d", "-v", "brief", "-s", "TrackerBoot:V", "TrackerCollection:V")
+	broadcasts, _ := d.adb("logcat", "-b", "all", "-d", "-v", "brief", "-s", "ActivityManager:I", "BroadcastQueue:I")
+	// The crash buffer, because "the service was asked for and died" and "the service was never asked
+	// for" produce the same empty service list. A start that threw - in onCreate, in startForeground, or
+	// anywhere in onStartCommand - leaves its stack here and nowhere else this route reads.
+	crash, _ := d.adb("logcat", "-b", "crash", "-d", "-v", "brief")
+	return strings.Join([]string{
+		"package state:     " + state.userLine,
+		fmt.Sprintf("receiver disabled: %v", state.receiverDisabled),
+		"stored state:\n" + indent(strings.TrimSpace(prefs)),
+		"the app's own log (every buffer):\n" + indent(strings.TrimSpace(boot)),
+		"what the platform says about this package's broadcasts:\n" + indent(linesMentioning(broadcasts, trackerPackage, "BOOT_COMPLETED")),
+		"the crash buffer:\n" + indent(strings.TrimSpace(crash)),
+	}, "\n")
+}
+
+// linesMentioning keeps the lines of a log that name any of the given fragments, bounded so a failure
+// message stays readable.
+func linesMentioning(log string, fragments ...string) string {
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		for _, f := range fragments {
+			if strings.Contains(line, f) {
+				out = append(out, strings.TrimSpace(line))
+				break
+			}
+		}
+		if len(out) >= 60 {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func collectionIsNotRunningAfterTheBoot(d *bootDevice, w io.Writer) error {
