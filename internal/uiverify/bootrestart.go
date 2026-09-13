@@ -637,17 +637,42 @@ func headLine(s string) string {
 	return s
 }
 
-// componentIsDisabled reads the package's disabledComponents list rather than the whole dump.
+// componentIsDisabled reads the package's disabledComponents list, bounded by the block under its own
+// heading.
+//
+// The bound is a fix for a real defect rather than tidiness. `pm enable` records the component in an
+// `enabledComponents:` list and `dumpsys package` prints that list right after the disabled one, so a
+// search of a fixed window after the "disabledComponents:" heading found the receiver in the ENABLED
+// list and reported it disabled. The route could then never put the device back, and refused on a run
+// whose four assertions had all passed - which is the worst shape a grader can have: right about the
+// thing it grades and wrong about whether it finished.
+//
+// A dump carries one such heading per user, so every one of them is read.
 func componentIsDisabled(dump, component string) bool {
-	at := strings.Index(dump, "disabledComponents:")
-	if at < 0 {
-		return false
+	lines := strings.Split(dump, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "disabledComponents:") {
+			continue
+		}
+		heading := indentOf(line)
+		for _, entry := range lines[i+1:] {
+			if strings.TrimSpace(entry) == "" {
+				continue
+			}
+			// The next heading returns to the list's own indentation or less, and ends it.
+			if indentOf(entry) <= heading {
+				break
+			}
+			if strings.Contains(entry, component) {
+				return true
+			}
+		}
 	}
-	window := dump[at:]
-	if len(window) > 4000 {
-		window = window[:4000]
-	}
-	return strings.Contains(window, component)
+	return false
+}
+
+func indentOf(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
 // publishedScreenText is the accessibility tree the app itself published, read off the device.

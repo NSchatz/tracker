@@ -265,3 +265,56 @@ func runBootRestartWith(t *testing.T, absence androidAbsence) (string, error) {
 	// a claim - handling that negation is exactly what checkRefusalText does line by line.
 	return out.String(), err
 }
+
+// TestTheDisabledComponentListIsReadAsAList is the regression for the defect that left the first
+// green four-run CI run reporting a refusal.
+//
+// The route reads the platform's own disabledComponents list to decide whether the boot path is off,
+// and it has to be right in BOTH directions: a component named in the ENABLED list that sits a few
+// lines below the disabled one must not read as disabled, or the run that puts the device back can
+// never report success and a route whose four assertions all passed ends red anyway.
+//
+// The fixture is `dumpsys package` output in the shape the emulator prints it, per user, with the two
+// lists adjacent - which is what a fixed-size window after the heading could not tell apart.
+func TestTheDisabledComponentListIsReadAsAList(t *testing.T) {
+	const disabled = `Packages:
+  Package [com.nschatz.tracker] (a1b2c3):
+    userId=10194
+    User 0: ceDataInode=335969 installed=true stopped=false notLaunched=false enabled=0
+      disabledComponents:
+        com.nschatz.tracker.collect.BootCompletedReceiver
+      runtime permissions:
+        android.permission.ACCESS_BACKGROUND_LOCATION: granted=true
+`
+	const enabledAgain = `Packages:
+  Package [com.nschatz.tracker] (a1b2c3):
+    userId=10194
+    User 0: ceDataInode=335969 installed=true stopped=false notLaunched=false enabled=0
+      disabledComponents:
+      enabledComponents:
+        com.nschatz.tracker.collect.BootCompletedReceiver
+      runtime permissions:
+        android.permission.ACCESS_BACKGROUND_LOCATION: granted=true
+`
+	const neverTouched = `Packages:
+  Package [com.nschatz.tracker] (a1b2c3):
+    User 0: ceDataInode=335969 installed=true stopped=false notLaunched=false enabled=0
+      runtime permissions:
+        android.permission.ACCESS_BACKGROUND_LOCATION: granted=true
+`
+	for _, c := range []struct {
+		name string
+		dump string
+		want bool
+	}{
+		{"the component is in the disabled list", disabled, true},
+		{"the component is in the enabled list below the disabled one", enabledAgain, false},
+		{"neither list mentions it", neverTouched, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := componentIsDisabled(c.dump, "BootCompletedReceiver"); got != c.want {
+				t.Fatalf("componentIsDisabled = %v, want %v, on:\n%s", got, c.want, c.dump)
+			}
+		})
+	}
+}
