@@ -302,6 +302,18 @@ func runAndroidScript(ctx context.Context, absence androidAbsence) (string, erro
 		sdk = dir
 	}
 
+	// HOME is staged with the SDK, and that is not housekeeping. The script looks for an AVD in
+	// $HOME/.android/avd as its LAST resort, deliberately - avdmanager's own answer about where it
+	// writes one has moved across cmdline-tools releases - so on a machine where the developer's real
+	// AVD lives there, the no-AVD absence is not absent at all: the script finds the real thing, exits
+	// zero, and this check reports that the refusal does not bite when what happened is that there was
+	// nothing to refuse. An absence staged but not actually absent proves nothing either way.
+	stagedHome, err := os.MkdirTemp("", "uiverify-home-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stagedHome)
+
 	cmd := exec.CommandContext(ctx, "bash", script, absence.subcommand)
 	cmd.Env = append(os.Environ(),
 		"ANDROID_SDK_ROOT="+sdk,
@@ -309,6 +321,7 @@ func runAndroidScript(ctx context.Context, absence androidAbsence) (string, erro
 		"ANDROID_AVD_HOME="+filepath.Join(sdk, "avd"),
 		"ANDROID_PREFS_ROOT=",
 		"ANDROID_SDK_HOME=",
+		"HOME="+stagedHome,
 		"TRACKER_AVD="+avd,
 		"TRACKER_SYS_IMAGE="+image,
 		"TRACKER_EMULATOR_BOOT_TIMEOUT=0",

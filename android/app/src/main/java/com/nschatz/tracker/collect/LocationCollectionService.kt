@@ -96,6 +96,11 @@ class LocationCollectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // A person pressed Stop in the notification shade, which is one of exactly two places
+            // the ask is expressed (the other is the screen's control). Clearing it here is what
+            // makes the next boot honour the stop rather than restart collection on a phone whose
+            // owner turned it off.
+            ClientPreferences(this).collectionEnabled = false
             stopSelf()
             return START_NOT_STICKY
         }
@@ -153,7 +158,8 @@ class LocationCollectionService : Service() {
             return START_NOT_STICKY
         }
 
-        val status = ClientPreferences(this).readConfig()
+        val prefs = ClientPreferences(this)
+        val status = prefs.readConfig()
         if (status is ConfigStatus.Incomplete) {
             // The fail-safe: refuse to run rather than run and quietly report nowhere. A service
             // showing "sharing your location" while posting to an unset URL is precisely the
@@ -163,6 +169,12 @@ class LocationCollectionService : Service() {
             return START_NOT_STICKY
         }
         CollectionStatus.reset()
+        // Collection is genuinely running, so a reason a previous boot recorded for not starting it
+        // is history. It is cleared HERE rather than by the caller that asked for the service,
+        // because `startForegroundService` returns before the service has entered the foreground:
+        // clearing it on the strength of a call that returned would discard the explanation for a
+        // start that then failed.
+        prefs.bootRestartReason = null
         // The queue may already hold fixes from a previous run — that is exactly what C2 buys — so
         // the depth is read from disk rather than assumed to be zero, and a flush is asked for
         // straight away so a backlog left by a killed process starts draining without waiting for

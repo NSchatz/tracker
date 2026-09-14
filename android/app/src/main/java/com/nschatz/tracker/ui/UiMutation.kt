@@ -107,6 +107,26 @@ enum class UiMutation {
     /** Keep saying the counters are current after collection has stopped. */
     ALWAYS_CURRENT,
 
+    /**
+     * Read a stored ask for collection as a running collection.
+     *
+     * The card draws "Running" and omits the line naming the disagreement, so a phone that was asked
+     * to collect and is not collecting looks exactly like one that is. This is the state a reboot
+     * leaves behind whenever the restart could not happen, and a claim about it cannot be evidence
+     * without a screen that gets it wrong to go red against.
+     */
+    STORED_ASK_READS_AS_RUNNING,
+
+    /**
+     * Drop the reason a boot recorded for not restarting collection, and change nothing else.
+     *
+     * The card still says the collection is enabled and not running; what it no longer says is WHY,
+     * and the sentence behind the card's affordance is gone with it. This is a separate mutation from
+     * [STORED_ASK_READS_AS_RUNNING] on purpose: one breaks the state and one breaks the explanation,
+     * so a run that stayed green names which of the two checks is blind.
+     */
+    RESTART_REASON_UNREPORTED,
+
     /** Lay the screen out wider than the display, so its content is pushed off and clipped. */
     OVERFLOWING_LAYOUT,
 

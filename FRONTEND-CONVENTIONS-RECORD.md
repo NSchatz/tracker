@@ -117,11 +117,11 @@ a source change with a name on it.
 | F5 | browser map | AC7-one-bad-event | - |
 | F5 | android screen | AC16_unreadable_queue_costs_only_itself | - |
 | F6 | browser map | AC8-stale | - |
-| F6 | android screen | AC17_stopped_reads_last_known | - |
+| F6 | android screen | AC17_stopped_reads_last_known, ACREBOOT_a_failed_restart_reads_as_not_running | - |
 | F7 | browser map | AC9-three-states | - |
 | F7 | android screen | AC16_three_states_are_distinct | - |
 | F8 | browser map | AC10-explanation | - |
-| F8 | android screen | AC12_labels_stay_short, AC12_each_card_opens_its_explanation | - |
+| F8 | android screen | AC12_labels_stay_short, AC12_each_card_opens_its_explanation, ACREBOOT_a_failed_restart_names_its_reason | - |
 | F9 | browser map | AC11-reflow | - |
 | F9 | android screen | AC12_nothing_clipped_at_360dp | - |
 | F10 | browser map | AC2-contrast-light, AC2-contrast-dark, AC3-theme | - |
@@ -144,6 +144,24 @@ crop of the EMULATOR'S OWN SCREENSHOT is made of, at the bounds the platform rep
 it published - the same two inputs the platform's own contrast check reads, and no source text at
 all. It was not cited here while F21 stood, because the sweep it named could not be shown going red
 and citing it would have been citing a check that is not evidence.
+
+**F6 and F8, android screen: the two reboot assertions, and why their names are shaped that way.**
+A collection a person asked for and that is not running is a stalled feed in F6's sense, and the card
+has to say so: "Stopped" alone is what a phone somebody switched off says too, so a restart that did
+not happen would be indistinguishable from a deliberate stop. `ACREBOOT_a_failed_restart_reads_as_not_running`
+reads the card's own published text for that state. `ACREBOOT_a_failed_restart_names_its_reason` is
+F8's shape rather than F6's - a few words on the card, the sentence one tap behind its affordance -
+and it is also the assertion that the reason survived the process that decided it, since a boot
+receiver runs for milliseconds and is gone before anyone opens the app.
+
+They have **a mutation each**, for the reason F21 taught: `STORED_ASK_READS_AS_RUNNING` breaks the
+state and `RESTART_REASON_UNREPORTED` breaks the explanation, so a run that stays green names which
+of the two checks is blind. One mutation covering both would report nothing and say nothing about why.
+
+The `AC` prefix on those names is load-bearing - `internal/uiverify` recognises a claim by it and
+refuses one with no `_demonstration` beside it - and what follows it deliberately is not the next
+number in the AC12-to-AC29 sequence. That sequence is `S0056`'s, it has no criterion about a reboot,
+and borrowing an ordinal from it would point a reader at a spec that says nothing about this.
 
 **F9, android screen.** The Android surface is a single scrolling column; "phone first" there is the
 360dp profile assertion, which forces the device to `1080x2340` at 480dpi (exactly 360dp of width)

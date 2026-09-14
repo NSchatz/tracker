@@ -26,6 +26,17 @@ enum class TroubleKind {
     /** A location permission was revoked out from under a running collection. */
     PERMISSION_LOST,
 
+    /**
+     * "Allow all the time" location was never granted, so collection cannot start in the background.
+     *
+     * Separate from [PERMISSION_LOST] rather than folded into it, and the difference is what a person
+     * has to do next. `PERMISSION_LOST` is a grant taken away from a running collection - the phone
+     * was collecting and now is not. This is a grant that was never there, found when collection was
+     * asked to start with nobody present: after a reboot, with a foreground-only grant. "Lost" would
+     * be the wrong word on the card and would send a reader looking for something that changed.
+     */
+    BACKGROUND_LOCATION_MISSING,
+
     /** Android refused to let the location foreground service start. */
     SERVICE_REFUSED,
 

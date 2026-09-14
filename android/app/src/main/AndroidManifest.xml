@@ -41,6 +41,18 @@
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      REBOOT-1 - collection survives a reboot. Without this the boot broadcast is never delivered and
+      a phone that restarts silently stops reporting, which is the failure this permission exists to
+      close: the only signal today is the server marking the device stale.
+
+      A BOOT_COMPLETED receiver is allowed to start a location foreground service. Android names the
+      types it may NOT start - dataSync, camera, mediaPlayback, phoneCall, mediaProjection,
+      microphone - and location is not among them. ACCESS_BACKGROUND_LOCATION above is the condition
+      that does bind, and collect/BootRestartDecision checks it before anything is asked for.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -78,6 +90,31 @@
           the missing part" behaviour the receive path refuses. Every crossing this app shows has
           been through TrackerMessagingService and AlertIntake, or it is not shown.
         -->
+        <!--
+          REBOOT-1 - the boot path. exported="true" is REQUIRED here and is the opposite of the rule
+          the two services follow: ACTION_BOOT_COMPLETED is a protected system broadcast delivered
+          from outside this app, so a receiver that is not exported is never reached and the restart
+          silently never happens. What makes that safe is the receiver's own first line - it acts on
+          ACTION_BOOT_COMPLETED and on nothing else - plus the fact that the broadcast is protected:
+          only the system may send it, so no other app can forge one. A receiver that acted on
+          whatever it was handed would be a way for anything on the device to ask this phone to start
+          reporting where its owner is.
+
+          directBootAware is left at its default (false) deliberately. The app's data lives in
+          credential-encrypted storage, so the stored ask and the server settings are not readable
+          until the phone is first unlocked; a direct-boot-aware receiver would run before it could
+          read either and would have to guess. The broadcast is delivered after unlock instead, which
+          is the correct moment rather than a compromise.
+        -->
+        <receiver
+            android:name=".collect.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".alert.TrackerMessagingService"
             android:exported="false">

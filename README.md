@@ -53,6 +53,16 @@ leaves a place you have defined.
 > map, and `/v1/positions` now lists **every device in the family** rather than only the ones that
 > have reported. So *"this phone has never been set up"* is finally distinguishable from *"this phone
 > went quiet an hour ago"*, and no browser derives liveness from a clock the server does not control.
+> As of **REBOOT-1** a **reboot no longer ends collection**: the phone remembers that somebody asked
+> for it, and a `BOOT_COMPLETED` receiver starts the location foreground service again with nobody
+> touching the device. When it cannot - no "Allow all the time" grant, or server settings it cannot
+> report to - the collection card reads **"Enabled, not running"** and names which, instead of reading
+> like a deliberate stop. This is the first piece of client device behaviour the gate does NOT leave to
+> an operator: `make verify-boot-restart` reboots a real Android runtime four times in CI and reads the
+> platform's own service list, including one run that disables the boot path and requires the restart
+> assertion to go **red**. Two things stay out of reach and are said rather than implied - whether a
+> given **OEM skin** delivers the broadcast on a real handset, and a **force-stopped** app, which
+> Android delivers no boot signal to at all until somebody opens it.
 > It is not a finished tracker, and this README will say so until it is. The wire contract is in
 > [`SPEC.md`](SPEC.md); the plan lives in the umbrella at `operations/roadmaps/tracker.md`.
 

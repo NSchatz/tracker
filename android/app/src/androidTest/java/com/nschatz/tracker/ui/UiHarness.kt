@@ -437,6 +437,11 @@ object UiHarness {
         val prefs = ClientPreferences(context)
         prefs.baseUrl = ""
         prefs.deviceToken = ""
+        // The persisted ask and the boot path's recorded reason outlive a case exactly as the two
+        // credentials do, and they change what the collection card draws - so a case that set them
+        // would otherwise decide what the NEXT case measures.
+        prefs.collectionEnabled = false
+        prefs.bootRestartReason = null
     }
 
     /**

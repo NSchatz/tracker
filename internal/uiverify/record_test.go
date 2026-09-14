@@ -513,10 +513,15 @@ func TestTheAndroidRouteCountsItsOwnDemonstrations(t *testing.T) {
 
 const theSplitItem = "S0074-tracker-android-a11y-operability"
 
-// theF6AndroidRow is the row these fixtures deface: an ordinary clause answered by an ordinary
-// assertion, chosen because nothing about it is special. A deferral written onto it must be refused,
+// theF6AndroidRow is the row these fixtures deface: an ordinary clause answered by ordinary
+// assertions, chosen because nothing about it is special. A deferral written onto it must be refused,
 // and so must a deferral written onto any other row, because no clause is split to another item now.
-const theF6AndroidRow = "| F6 | android screen | AC17_stopped_reads_last_known | - |"
+//
+// It is a LITERAL copy of the committed row, so it goes stale the moment that row gains or loses an
+// assertion, and the two fixtures below say so rather than silently replacing nothing: each checks
+// that its edit changed the record. Update this line when the row changes; do not soften the check.
+const theF6AndroidRow = "| F6 | android screen | AC17_stopped_reads_last_known, " +
+	"ACREBOOT_a_failed_restart_reads_as_not_running | - |"
 
 // rewriteRow replaces one clause/surface row of the record wholesale, whatever it currently says.
 //
